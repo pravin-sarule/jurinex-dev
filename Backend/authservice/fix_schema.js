@@ -17,6 +17,18 @@ async function fixSchema() {
     await pool.query('ALTER TABLE firms ALTER COLUMN landline DROP NOT NULL');
     await pool.query('ALTER TABLE firms ALTER COLUMN district DROP NOT NULL');
 
+    // Simplified firm registration form does not collect address/PAN yet
+    await pool.query('ALTER TABLE firms ALTER COLUMN office_address DROP NOT NULL');
+    console.log('Dropped NOT NULL on office_address');
+    await pool.query('ALTER TABLE firms ALTER COLUMN city DROP NOT NULL');
+    console.log('Dropped NOT NULL on city');
+    await pool.query('ALTER TABLE firms ALTER COLUMN state DROP NOT NULL');
+    console.log('Dropped NOT NULL on state');
+    await pool.query('ALTER TABLE firms ALTER COLUMN pin_code DROP NOT NULL');
+    console.log('Dropped NOT NULL on pin_code');
+    await pool.query('ALTER TABLE firms ALTER COLUMN pan_number DROP NOT NULL');
+    console.log('Dropped NOT NULL on pan_number');
+
     console.log('Schema fixed successfully');
   } catch (error) {
     console.error('Error fixing schema:', error);

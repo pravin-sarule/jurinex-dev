@@ -139,6 +139,16 @@ export const deleteFirmUser = async (userId) => {
   return response.data;
 };
 
+/** Enable (true) or disable (false) a firm staff user. Disabled users cannot log in. */
+export const updateFirmUserActiveStatus = async (userId, isActive) => {
+  const response = await axios.patch(
+    `${BASE_URL}/rbac/firm/staff/${userId}/status`,
+    { is_active: isActive },
+    { headers: getHeaders() }
+  );
+  return response.data;
+};
+
 export const updateUserPermissions = async (userId, permissions) => {
   const response = await axios.put(`${BASE_URL}/rbac/permissions/${userId}`, { permissions }, { headers: getHeaders() });
   return response.data;

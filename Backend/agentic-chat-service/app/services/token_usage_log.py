@@ -20,6 +20,36 @@ def _fmt_cost(value: Any) -> str:
         return str(value or "—")
 
 
+def format_table(title: str, headers: list[str], rows: list[list[Any]]) -> str:
+    """Render a generic multi-column ASCII table for console/log output."""
+    headers = [str(h) for h in headers]
+    str_rows = [[str(c) if c is not None else "-" for c in row] for row in rows]
+    cols = len(headers)
+    widths = [len(headers[i]) for i in range(cols)]
+    for row in str_rows:
+        for i in range(cols):
+            if i < len(row):
+                widths[i] = max(widths[i], len(row[i]))
+
+    def fmt_row(cells: list[str]) -> str:
+        padded = [(cells[i] if i < len(cells) else "").ljust(widths[i]) for i in range(cols)]
+        return "| " + " | ".join(padded) + " |"
+
+    border = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+    lines = ["", f" {title}", border, fmt_row(headers), border]
+    lines.extend(fmt_row(r) for r in str_rows)
+    lines.append(border)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def log_table(title: str, headers: list[str], rows: list[list[Any]]) -> None:
+    """Log a generic multi-column ASCII table at INFO level."""
+    if not rows:
+        return
+    logger.info(format_table(title, headers, rows))
+
+
 def _build_rows(
     usage: dict[str, Any] | None,
     *,

@@ -492,6 +492,7 @@ import SettingsPage from './pages/SettingsPage';
 import UserManagementPage from './pages/UserManagementPage';
 import GetHelpPage from './pages/GetHelpPage';
 import CitationReportPage from './pages/CitationReportPage';
+import CitationTestingPage from './pages/CitationTestingPage';
 import EnterpriseAnalyticsPage from './pages/EnterpriseAnalyticsPage';
 import BrandingProfilesPage from './pages/BrandingProfilesPage';
 import BrandingProfileEditorPage from './pages/BrandingProfileEditorPage';
@@ -639,6 +640,16 @@ function App() {
                 <AuthChecker>
                   <MainLayout>
                     <CitationReportPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            <Route
+              path="/citation-testing"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <CitationTestingPage />
                   </MainLayout>
                 </AuthChecker>
               }

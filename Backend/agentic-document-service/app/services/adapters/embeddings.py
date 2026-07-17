@@ -31,7 +31,7 @@ _gemini_unavailable_logged = False
 
 EMBEDDING_DIMS = 768
 # Gemini 001 is the preferred embedding model for ingestion.
-EMBEDDING_MODELS = ("gemini-embedding-001", "text-embedding-004")
+EMBEDDING_MODELS = ("gemini-embedding-001",)
 
 # Process-level set of model names that have returned a permanent 404/not-found
 # error.  Entries are added lazily on first failure and persist for the process
@@ -212,16 +212,26 @@ def embed_text(text: str) -> list[float]:
     return vec
 
 
-def embed_batch(texts: list[str]) -> list[list[float]]:
+def embed_batch(
+    texts: list[str],
+    *,
+    progress_callback=None,
+    progress_start: float = 65.0,
+    progress_end: float = 78.0,
+    max_concurrent: int = 4,
+) -> list[list[float]]:
     """
-    Embed a list of texts efficiently.
+    Embed a list of texts efficiently with parallel sub-batch processing.
 
-    - Hits in-process cache are returned immediately (no API call).
-    - Remaining texts are split into sub-batches of `embedding_batch_size`
-      and sent to Gemini in parallel-friendly serial calls protected by the
-      token-bucket rate limiter and exponential-backoff retry.
-    - Any sub-batch that exhausts retries falls back to hash vectors so the
-      overall pipeline never fails, even for 1 000-page documents.
+    - Cache hits are returned immediately without any API call.
+    - Remaining texts are split into sub-batches of ``embedding_batch_size``
+      and sent to Gemini concurrently via ThreadPoolExecutor (up to
+      ``max_concurrent`` in-flight requests at once). The token-bucket rate
+      limiter keeps each batch within the Gemini RPM quota.
+    - Exponential-backoff retry on 429 / quota errors per sub-batch.
+    - Falls back to deterministic hash vectors when all retries are exhausted.
+    - ``progress_callback(pct)`` is called as each sub-batch completes,
+      with ``pct`` in [progress_start, progress_end].
     """
     if not texts:
         return []
@@ -229,7 +239,7 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
     dims = _embedding_dims()
     results: list[list[float]] = [[] for _ in range(len(texts))]
 
-    # --- cache pass ---
+    # ── Cache pass ───────────────────────────────────────────────────────────
     uncached_indices: list[int] = []
     for i, text in enumerate(texts):
         key = hashlib.md5(text.encode("utf-8")).hexdigest()
@@ -239,14 +249,25 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
             uncached_indices.append(i)
 
     if not uncached_indices:
+        if progress_callback:
+            try:
+                progress_callback(round(progress_end, 1))
+            except Exception:
+                pass
         return results
 
-    # --- batch embed uncached texts ---
+    # ── Parallel batch embedding ─────────────────────────────────────────────
     uncached_texts = [texts[i] for i in uncached_indices]
     batch_size = _get_batch_size()
-    embedded = _embed_texts_in_batches(uncached_texts, dims, batch_size)
+    embedded = _embed_texts_in_batches_parallel(
+        uncached_texts, dims, batch_size,
+        max_workers=max_concurrent,
+        progress_callback=progress_callback,
+        progress_start=progress_start,
+        progress_end=progress_end,
+    )
 
-    # --- write back to cache and result list ---
+    # ── Write back to cache and result list ──────────────────────────────────
     for slot, (orig_idx, text) in enumerate(zip(uncached_indices, uncached_texts)):
         vec = embedded[slot]
         key = hashlib.md5(text.encode("utf-8")).hexdigest()
@@ -270,32 +291,103 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
 # ---------------------------------------------------------------------------
 
 def _embed_texts_in_batches(texts: list[str], dims: int, batch_size: int) -> list[list[float]]:
-    """
-    Split `texts` into sub-batches of `batch_size`, embed each with retry,
-    fall back to hash embeddings for any sub-batch that permanently fails.
-    """
+    """Serial fallback: split texts into sub-batches, embed sequentially."""
     results: list[list[float]] = []
     total = len(texts)
     for batch_start in range(0, total, batch_size):
         batch = texts[batch_start: batch_start + batch_size]
-        logger.debug(
-            "[Embeddings] Batch %d-%d / %d",
-            batch_start + 1,
-            min(batch_start + batch_size, total),
-            total,
-        )
+        logger.debug("[Embeddings] Batch %d-%d / %d", batch_start + 1, min(batch_start + batch_size, total), total)
         batch_vecs = _gemini_embed_batch_with_retry(batch, dims)
         if batch_vecs is None or len(batch_vecs) != len(batch):
-            # Fallback: deterministic hash for every text in this sub-batch
             logger.warning(
                 "[Embeddings] Sub-batch %d-%d failed — using hash fallback for %d texts",
-                batch_start + 1,
-                min(batch_start + batch_size, total),
-                len(batch),
+                batch_start + 1, min(batch_start + batch_size, total), len(batch),
             )
             batch_vecs = [_hash_embed(t, dims) for t in batch]
         results.extend(batch_vecs)
     return results
+
+
+def _embed_texts_in_batches_parallel(
+    texts: list[str],
+    dims: int,
+    batch_size: int,
+    *,
+    max_workers: int = 4,
+    progress_callback=None,
+    progress_start: float = 65.0,
+    progress_end: float = 78.0,
+) -> list[list[float]]:
+    """
+    Parallel batch embedding using ThreadPoolExecutor.
+
+    Splits texts into sub-batches of batch_size and submits all concurrently.
+    The token-bucket rate limiter (already thread-safe) throttles each batch
+    to stay within Gemini RPM limits. Results are reassembled in original order.
+    Falls back to hash embeddings for any sub-batch that fails after retries.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    total = len(texts)
+    # Build ordered list of (start_idx, batch) pairs
+    batches: list[tuple[int, list[str]]] = []
+    for start in range(0, total, batch_size):
+        batches.append((start, texts[start: start + batch_size]))
+
+    n_batches = len(batches)
+    if n_batches <= 1:
+        # Single sub-batch: skip ThreadPoolExecutor overhead
+        result = _embed_texts_in_batches(texts, dims, batch_size)
+        if progress_callback:
+            try:
+                progress_callback(round(progress_end, 1))
+            except Exception:
+                pass
+        return result
+
+    logger.info(
+        "[Embeddings] parallel mode: texts=%d batches=%d workers=%d",
+        total, n_batches, min(max_workers, n_batches),
+    )
+
+    # Pre-allocate result slots so we can write in original order
+    batch_results: dict[int, list[list[float]]] = {}
+    completed_count = 0
+    completed_lock = threading.Lock()
+
+    def _embed_one(start: int, batch: list[str]) -> tuple[int, list[list[float]]]:
+        vecs = _gemini_embed_batch_with_retry(batch, dims)
+        if vecs is None or len(vecs) != len(batch):
+            logger.warning(
+                "[Embeddings] parallel sub-batch start=%d size=%d failed — hash fallback",
+                start, len(batch),
+            )
+            vecs = [_hash_embed(t, dims) for t in batch]
+        return start, vecs
+
+    effective_workers = min(max_workers, n_batches)
+    with ThreadPoolExecutor(max_workers=effective_workers, thread_name_prefix="embed-batch") as pool:
+        future_map = {pool.submit(_embed_one, start, batch): start for start, batch in batches}
+
+        for future in as_completed(future_map):
+            start, vecs = future.result()
+            batch_results[start] = vecs
+            with completed_lock:
+                completed_count += 1
+                done = completed_count
+            if progress_callback:
+                pct = progress_start + (done / n_batches) * (progress_end - progress_start)
+                try:
+                    progress_callback(round(pct, 1))
+                except Exception:
+                    pass
+            logger.debug("[Embeddings] parallel batch done start=%d (%d/%d)", start, done, n_batches)
+
+    # Reassemble in original text order
+    combined: list[list[float]] = []
+    for start, batch in batches:
+        combined.extend(batch_results[start])
+    return combined
 
 
 def _gemini_embed_batch_with_retry(texts: list[str], dims: int) -> list[list[float]] | None:

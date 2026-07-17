@@ -166,6 +166,11 @@ const ChatSessionList = ({ sessions, selectedSessionId, onSelectSession, onDelet
                       <span className="text-[10px] text-gray-400">
                         {formatRelativeTime(session.lastMessageAt)}
                       </span>
+                      {Number(session.chat_count) > 1 && (
+                        <span className="text-[10px] text-gray-400">
+                          · {session.chat_count} Q&A
+                        </span>
+                      )}
                     </div>
                   </div>
 

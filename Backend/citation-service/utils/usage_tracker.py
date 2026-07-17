@@ -45,7 +45,7 @@ def _log_shared_token_pool(
     if tokens_in <= 0 and tokens_out <= 0:
         return
     try:
-        from services.daily_limit_guard import log_llm_usage
+        from services.quota_guard import log_llm_usage
 
         log_llm_usage(
             user_id=uid,

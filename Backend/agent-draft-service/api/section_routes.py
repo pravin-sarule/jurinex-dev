@@ -230,11 +230,9 @@ def _generate_section_sync_impl(
                     analysis_sections = draft_db.get_template_analysis_sections(str(template_id)) if template_id else []
                     for sec in analysis_sections:
                         if _section_matches({"section_key": sec.get("section_key"), "section_id": sec.get("id")}, section_key):
-                            prompts_list = sec.get("section_prompts") or []
-                            if isinstance(prompts_list, list) and len(prompts_list) > 0:
-                                section_prompt = prompts_list[0].get("prompt", "")
-                            elif isinstance(prompts_list, dict):
-                                section_prompt = prompts_list.get("prompt", "")
+                            section_prompt = draft_db.extract_prompt_from_section_prompts(
+                                sec.get("section_prompts") or []
+                            )
                             if section_prompt:
                                 print(f"[Orchestrator] Using prompt from template_analysis_sections (fallback) for section '{section_key}'")
                             break
@@ -251,9 +249,10 @@ def _generate_section_sync_impl(
                         # Use default prompt based on section name
                         section_name = section_config.get("section_name") or section_key.replace("custom_", "").replace("_", " ").title()
                         section_prompt = (
-                            f"Generate comprehensive legal content for the section titled '{section_name}'. "
+                            f"Generate the legal content for the section titled '{section_name}'. "
                             "Ensure it is professionally drafted, legally sound, and formatted in clean HTML. "
-                            "Use the provided case context and field values. The section should be 2-10 A4 pages."
+                            "Use ONLY the provided case context and field values — do not invent facts. "
+                            "Length should match what this section type normally requires; do not pad."
                         )
                         user_edited_prompt = section_prompt
                         print(f"[Orchestrator] Using default prompt for custom section '{section_key}' (name: {section_name})")
@@ -1309,13 +1308,7 @@ def _fetch_sections_from_template_analyzer(
         section_key = (section_name or "").lower().replace(" ", "_").replace("-", "_")
         if not section_key:
             section_key = f"section_{idx}"
-        prompts = sec.get("section_prompts") or []
-        default_prompt = ""
-        if isinstance(prompts, list) and len(prompts) > 0:
-            first = prompts[0]
-            default_prompt = (first.get("prompt") or "") if isinstance(first, dict) else ""
-        elif isinstance(prompts, dict):
-            default_prompt = prompts.get("prompt", "")
+        default_prompt = draft_db.extract_prompt_from_section_prompts(sec.get("section_prompts") or [])
         results.append({
             "section_id": str(sec.get("id", "")),
             "section_key": section_key,

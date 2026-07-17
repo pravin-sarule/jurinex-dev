@@ -544,6 +544,8 @@
 
 
 import React, { useState, useEffect, useRef } from 'react';
+import DeepSeekSidebarChat from './DeepSeekSidebarChat';
+import '../styles/DeepSeekSidebarChat.css';
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -554,6 +556,7 @@ import {
   PencilSquareIcon,
   ScaleIcon,
   BookOpenIcon,
+  BeakerIcon,
   ClockIcon,
   UserGroupIcon,
   Bars3Icon,
@@ -575,6 +578,7 @@ import {
   LogOut,
   User,
   Settings,
+  Zap,
 } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import UserProfileMenu from './UserProfileMenu';
@@ -590,6 +594,7 @@ const Sidebar = () => {
   const { isSidebarHidden, setIsSidebarHidden, isSidebarCollapsed, setIsSidebarCollapsed, forceSidebarCollapsed, setForceSidebarCollapsed } = useSidebar();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+  const [isDeepSeekOpen, setIsDeepSeekOpen] = useState(false);
   const [currentFileId, setCurrentFileId] = useState(null);
   const [isMobile, setIsMobile] = useState(false);
   const [isDocumentUploadOpen, setIsDocumentUploadOpen] = useState(false);
@@ -804,8 +809,10 @@ const Sidebar = () => {
     { name: 'Dashboard', path: '/dashboard', icon: ChartBarIcon },
     { name: 'Projects', path: '/documents', icon: DocumentTextIcon },
     { name: 'Citation', path: '/citation', icon: BookOpenIcon },
+    { name: 'Citation Test', path: '/citation-testing', icon: BeakerIcon },
     { name: 'ChatModel', path: '/chatmodel', icon: ChatBubbleLeftRightIcon },
     { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },
+    { name: 'DeepSeek AI', icon: null, isDeepSeek: true },
     { name: 'Document Drafting', path: '/draft-selection', icon: PencilSquareIcon },
     { name: 'User Management', path: '/user-management', icon: UserGroupIcon, firmMemberOnly: true },
   ];
@@ -904,6 +911,28 @@ const Sidebar = () => {
               const active = isActive(item.path);
               const isChats = item.name === 'Chats';
               const isCollapsed = isSidebarCollapsed && !isMobileView;
+
+              // ── DeepSeek AI button ────────────────────────────────────
+              if (item.isDeepSeek) {
+                return (
+                  <div key="deepseek-ai">
+                    <button
+                      onClick={() => setIsDeepSeekOpen((v) => !v)}
+                      className={`group flex items-center w-full ${isCollapsed ? 'justify-center px-3' : 'px-4'} py-3 text-sm rounded-xl transition-all duration-200 relative ${isDeepSeekOpen ? 'bg-[#1c2128] text-white font-bold' : 'text-gray-400 hover:bg-[#1c2128]/60 hover:text-gray-200 font-medium'}`}
+                      title={isCollapsed ? 'DeepSeek AI' : undefined}
+                    >
+                      <Zap
+                        className={`h-5 w-5 ${isCollapsed ? '' : 'mr-3'} transition-colors duration-200 flex-shrink-0 ${isDeepSeekOpen ? 'text-[#21C1B6]' : 'text-gray-500 group-hover:text-gray-300'}`}
+                      />
+                      <span className={`${isCollapsed ? 'hidden' : 'inline'} transition-all duration-200 truncate`}>DeepSeek AI</span>
+                      {isDeepSeekOpen && !isCollapsed && (
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 w-2 h-2 bg-[#21C1B6] rounded-full" />
+                      )}
+                    </button>
+                  </div>
+                );
+              }
+
               return (
                 <div key={item.name}>
                   {isChats ? (
@@ -1041,6 +1070,11 @@ const Sidebar = () => {
         </div>
       )}
       <ProfileMenuPopup />
+      <DeepSeekSidebarChat
+        isOpen={isDeepSeekOpen}
+        onClose={() => setIsDeepSeekOpen(false)}
+        sidebarCollapsed={isSidebarCollapsed}
+      />
       <input
         ref={fileInputRef}
         type="file"

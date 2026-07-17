@@ -417,6 +417,51 @@ exports.updateUserPermissions = async (req, res) => {
   }
 };
 
+/**
+ * Enable / disable a firm staff user.
+ * Body: { is_active: true | false }  — true = enabled, false = disabled
+ */
+exports.updateFirmUserActiveStatus = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { is_active } = req.body;
+
+    if (typeof is_active !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        message: 'is_active must be a boolean (true = enable, false = disable).',
+      });
+    }
+
+    const resolved = await resolveFirmLifecycleTarget(req.user, userId, 'canUpdateUserInformation');
+    if (resolved.status) {
+      return res.status(resolved.status).json({ success: false, message: resolved.message });
+    }
+
+    const { targetUser } = resolved;
+    const updatedUser = await User.update(targetUser.id, { is_active });
+
+    // Invalidate sessions when disabling so the user cannot keep using an existing token
+    if (is_active === false) {
+      await pool.query('DELETE FROM user_sessions WHERE user_id = $1', [targetUser.id]);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: is_active ? 'User enabled successfully.' : 'User disabled successfully.',
+      user: {
+        id: updatedUser.id,
+        email: updatedUser.email,
+        username: updatedUser.username,
+        is_active: updatedUser.is_active,
+      },
+    });
+  } catch (error) {
+    console.error('[RBAC] Error updating firm user active status:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 exports.resendFirmUserPasswordSetupEmail = async (req, res) => {
   try {
     const { userId } = req.params;

@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from app.services.db import get_db_connection, is_db_available
+from app.services.llm_models_catalog import normalize_model_alias, resolve_chat_llm_model
 
 logger = logging.getLogger("agentic_document_service.secret_prompt_display")
 
@@ -111,7 +112,9 @@ def resolve_secret_prompt_llm_name(secret_id: str | None) -> str | None:
             )
             row = cur.fetchone()
             model_name = str((row or {}).get("llm_name") or "").strip()
-            return model_name or None
+            if not model_name:
+                return None
+            return resolve_chat_llm_model(normalize_model_alias(model_name), model_name)
     except Exception as exc:
         logger.warning("[SecretLocal] secret model lookup failed id=%s: %s", sid, exc)
         return None

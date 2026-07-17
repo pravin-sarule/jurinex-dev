@@ -1,3 +1,5 @@
+import documentApi from '../services/documentApi';
+
 /**
  * Strips markdown syntax from raw text so clipboard gets clean readable content.
  * Used as a fallback when the rendered DOM ref is unavailable.
@@ -188,12 +190,132 @@ ${cloned.innerHTML}
 // percentage widths compute to A4 dimensions, not the user's monitor width.
 const A4_WIDTH_PX = Math.round(210 * 96 / 25.4); // ≈ 794
 
+// ── DOM → GFM markdown ────────────────────────────────────────────────────────
+// The rendered response DOM originates from markdown, so its structure maps
+// back cleanly. This feeds the backend PDF builder, which produces real
+// selectable-text PDFs (the html2canvas path rasterizes the DOM to images).
+
+const MD_SKIP_TAGS = new Set(['BUTTON', 'SCRIPT', 'STYLE', 'SVG', 'NOSCRIPT', 'IFRAME', 'IMG', 'INPUT', 'SELECT']);
+const MD_BLOCK_TAGS = new Set([
+  'P', 'DIV', 'SECTION', 'ARTICLE', 'UL', 'OL', 'TABLE', 'PRE', 'BLOCKQUOTE',
+  'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HR', 'FIGURE', 'HEADER', 'FOOTER', 'MAIN',
+]);
+
+function mdInline(node) {
+  let out = '';
+  for (const child of node.childNodes) {
+    if (child.nodeType === 3) { out += child.textContent.replace(/\s+/g, ' '); continue; }
+    if (child.nodeType !== 1 || MD_SKIP_TAGS.has(child.tagName)) continue;
+    const tag = child.tagName;
+    if (tag === 'BR') { out += ' '; continue; }
+    const inner = mdInline(child).replace(/\s+/g, ' ').trim();
+    if (!inner) continue;
+    if (tag === 'STRONG' || tag === 'B') out += `**${inner}**`;
+    else if (tag === 'EM' || tag === 'I') out += `*${inner}*`;
+    else if (tag === 'CODE') out += `\`${inner}\``;
+    else out += mdInline(child);
+  }
+  return out;
+}
+
+function mdTable(tableEl) {
+  const trs = Array.from(tableEl.querySelectorAll('tr'));
+  if (!trs.length) return null;
+  const cellText = (cell) => mdInline(cell).replace(/\s+/g, ' ').replace(/\|/g, '¦').trim();
+  const toRow = (tr) =>
+    `| ${Array.from(tr.children).filter((c) => c.tagName === 'TD' || c.tagName === 'TH').map(cellText).join(' | ')} |`;
+  const nCols = Math.max(1, trs[0].children.length);
+  const rows = [toRow(trs[0]), `|${Array(nCols).fill(' --- ').join('|')}|`];
+  trs.slice(1).forEach((tr) => rows.push(toRow(tr)));
+  return rows.join('\n');
+}
+
+function mdBlocks(el, out) {
+  for (const child of el.childNodes) {
+    if (child.nodeType === 3) {
+      const t = child.textContent.replace(/\s+/g, ' ').trim();
+      if (t) out.push(t);
+      continue;
+    }
+    if (child.nodeType !== 1 || MD_SKIP_TAGS.has(child.tagName)) continue;
+    const tag = child.tagName;
+    const headingMatch = /^H([1-6])$/.exec(tag);
+    if (headingMatch) {
+      const t = mdInline(child).trim();
+      if (t) out.push(`${'#'.repeat(Number(headingMatch[1]))} ${t}`);
+      continue;
+    }
+    if (tag === 'P' || tag === 'BLOCKQUOTE') {
+      const t = mdInline(child).trim();
+      if (t) out.push(t);
+      continue;
+    }
+    if (tag === 'UL' || tag === 'OL') {
+      const lines = [];
+      let n = 1;
+      Array.from(child.children).forEach((li) => {
+        if (li.tagName !== 'LI') return;
+        const t = mdInline(li).replace(/\s+/g, ' ').trim();
+        if (t) lines.push(tag === 'OL' ? `${n++}. ${t}` : `- ${t}`);
+      });
+      if (lines.length) out.push(lines.join('\n'));
+      continue;
+    }
+    if (tag === 'TABLE') {
+      const table = mdTable(child);
+      if (table) out.push(table);
+      continue;
+    }
+    if (tag === 'PRE') {
+      const code = child.textContent.replace(/```/g, '');
+      if (code.trim()) out.push(`\`\`\`\n${code.replace(/\n+$/, '')}\n\`\`\``);
+      continue;
+    }
+    if (tag === 'HR') continue;
+    // Generic container: recurse when it holds block children, else treat as a paragraph.
+    const hasBlockChild = Array.from(child.children).some((c) => MD_BLOCK_TAGS.has(c.tagName));
+    if (hasBlockChild) {
+      mdBlocks(child, out);
+    } else {
+      const t = mdInline(child).replace(/\s+/g, ' ').trim();
+      if (t) out.push(t);
+    }
+  }
+}
+
+/** Converts a rendered response element back to GFM markdown. */
+export function domToMarkdown(element) {
+  const cloned = cloneForExport(element, false);
+  const out = [];
+  mdBlocks(cloned, out);
+  return out.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 /**
  * Downloads a DOM element as a properly formatted PDF.
- * Uses html2pdf.js canvas approach — handles emojis, Unicode, and rich formatting.
+ * Primary path: convert the DOM back to markdown and let the backend build a
+ * real text-based PDF (selectable text, proper tables and page breaks).
+ * Fallback: the legacy html2pdf.js canvas capture, only if the backend fails.
  */
 export async function downloadAsPdf(element, filename = 'AI_Response.pdf') {
   if (!element) throw new Error('No content to export.');
+
+  try {
+    const markdown = domToMarkdown(element);
+    if (!markdown) throw new Error('No convertible content found.');
+    const base = String(filename).replace(/\.pdf$/i, '');
+    const title = base.replace(/_/g, ' ').replace(/\s*\d{4}-\d{2}-\d{2}.*$/, '').trim() || 'AI Response';
+    await documentApi.exportMergedPdf(
+      title,
+      [{ question: title, answer: markdown, source: null }],
+      false,
+      /\.pdf$/i.test(filename) ? filename : `${filename}.pdf`
+    );
+    return;
+  } catch (err) {
+    console.error('[responseExport] Backend PDF export failed, falling back to canvas render:', err);
+  }
+
   await loadHtml2Pdf();
   if (document.fonts) await document.fonts.ready;
 

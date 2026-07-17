@@ -5,13 +5,16 @@ Critic Agent (ADK-style): Validate and review legal draft content.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict
 
 from agents.critic.tools import review_section, review_html_draft
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "models/gemini-2.5-pro"
+# Flash is sufficient for the validation rubric and avoids 2.5-pro's
+# auto-enabled thinking budget (large latency/cost per section).
+DEFAULT_MODEL = os.environ.get("CRITIC_MODEL", "models/gemini-2.5-flash")
 
 
 def run_critic_agent(payload: Dict[str, Any]) -> Dict[str, Any]:

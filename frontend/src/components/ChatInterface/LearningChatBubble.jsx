@@ -1,8 +1,5 @@
 import React, { useMemo, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
-import rehypeSanitize from 'rehype-sanitize';
+import FormattedAssistantContent from './FormattedAssistantContent';
 import { Copy, ThumbsUp, ThumbsDown, RotateCcw } from 'lucide-react';
 import LearningMcqBlock, { normalizeLearningUiMode } from './LearningMcqBlock';
 
@@ -76,131 +73,6 @@ export default function LearningChatBubble({ data, onViewFull, onOptionClick, is
   const feedbackMd = clampMarkdown(String(feedback || '').trim());
   const hintMd = clampMarkdown(String(contentHint || '').trim());
 
-  const mdBody = {
-    fontSize: '18px',
-    lineHeight: 1.7,
-    color: '#111827',
-    fontFamily: bodyFont,
-    letterSpacing: '0',
-    wordSpacing: '0.02em',
-    textAlign: 'left',
-  };
-
-  /** Main narrative (matches in-thread assistant: open layout, clear hierarchy, hr dividers). */
-  const mdComponentsMain = {
-    p: ({ node, ...props }) => <p style={{ margin: '0 0 14px', ...mdBody }} {...props} />,
-    strong: ({ node, ...props }) => <strong style={{ fontWeight: 700, color: '#111827', fontSize: '18px' }} {...props} />,
-    em: ({ node, ...props }) => <em style={{ fontStyle: 'italic', color: '#334155' }} {...props} />,
-    h1: (p) => <h1 style={{ fontSize: '24px', fontWeight: 700, margin: '18px 0 10px', color: '#111827', fontFamily: bodyFont, lineHeight: 1.5 }} {...p} />,
-    h2: (p) => <h2 style={{ fontSize: '22px', fontWeight: 700, margin: '16px 0 10px', color: '#111827', fontFamily: bodyFont, lineHeight: 1.5 }} {...p} />,
-    h3: (p) => <h3 style={{ fontSize: '20px', fontWeight: 600, margin: '14px 0 8px', color: '#111827', fontFamily: bodyFont, lineHeight: 1.5 }} {...p} />,
-    ul: ({ node, ...props }) => <ul style={{ margin: '0 0 14px', paddingLeft: '34px', ...mdBody }} {...props} />,
-    ol: ({ node, ...props }) => <ol style={{ margin: '0 0 14px', paddingLeft: '34px', ...mdBody }} {...props} />,
-    li: ({ node, ...props }) => <li style={{ marginBottom: '6px', ...mdBody }} {...props} />,
-    blockquote: ({ node, ...props }) => (
-      <blockquote
-        style={{
-          margin: '14px 0',
-          padding: '8px 0 8px 14px',
-          borderLeft: '3px solid #cbd5e1',
-          color: '#475569',
-          fontStyle: 'italic',
-          fontSize: '17px',
-          lineHeight: 1.55,
-          fontFamily: bodyFont,
-        }}
-        {...props}
-      />
-    ),
-    code: ({ node, inline, children, ...props }) =>
-      inline ? (
-        <code
-          style={{
-            background: '#f1f5f9',
-            border: '1px solid #e2e8f0',
-            borderRadius: '4px',
-            padding: '2px 6px',
-            fontSize: '16px',
-            fontFamily: '"IBM Plex Mono", ui-monospace, monospace',
-          }}
-          {...props}
-        >
-          {children}
-        </code>
-      ) : (
-        <code {...props}>{children}</code>
-      ),
-    hr: ({ node, ...props }) => (
-      <hr
-        style={{
-          border: 0,
-          borderTop: '1px solid #e2e8f0',
-          margin: '22px 0',
-        }}
-        {...props}
-      />
-    ),
-    table: ({ children, ...props }) => (
-      <div style={{ overflowX: 'auto', margin: '14px 0' }}>
-        <table
-          style={{
-            width: '100%',
-            borderCollapse: 'collapse',
-            fontSize: '17px',
-            fontFamily: bodyFont,
-            color: '#111827',
-          }}
-          {...props}
-        >
-          {children}
-        </table>
-      </div>
-    ),
-    thead: (p) => <thead style={{ background: '#f8fafc' }} {...p} />,
-    tbody: (p) => <tbody {...p} />,
-    tr: (p) => <tr style={{ borderBottom: '1px solid #e2e8f0' }} {...p} />,
-    th: (p) => (
-      <th
-        style={{
-          border: '1px solid #e2e8f0',
-          padding: '8px 10px',
-          textAlign: 'left',
-          fontWeight: 600,
-        }}
-        {...p}
-      />
-    ),
-    td: (p) => <td style={{ border: '1px solid #e2e8f0', padding: '8px 10px', verticalAlign: 'top' }} {...p} />,
-  };
-
-  const mdCoach = {
-    ...mdComponentsMain,
-    p: ({ node, ...props }) => (
-      <p
-        style={{
-          margin: '0 0 10px',
-          fontSize: '18px',
-          lineHeight: 1.7,
-          color: '#111827',
-          fontFamily: bodyFont,
-          fontWeight: 500,
-          letterSpacing: '0',
-          wordSpacing: '0.02em',
-        }}
-        {...props}
-      />
-    ),
-    strong: ({ node, ...props }) => <strong style={{ fontWeight: 700, color: '#111827' }} {...props} />,
-    em: ({ node, ...props }) => <em style={{ fontStyle: 'italic' }} {...props} />,
-    ul: ({ node, ...props }) => <ul style={{ margin: '0 0 8px', paddingLeft: '18px' }} {...props} />,
-    ol: ({ node, ...props }) => <ol style={{ margin: '0 0 8px', paddingLeft: '18px' }} {...props} />,
-    li: ({ node, ...props }) => <li style={{ marginBottom: '6px', fontSize: '18px', lineHeight: 1.7, fontFamily: bodyFont, wordSpacing: '0.02em' }} {...props} />,
-    code: mdComponentsMain.code,
-    hr: mdComponentsMain.hr,
-  };
-
-  const rehypePlugins = useMemo(() => [rehypeRaw, rehypeSanitize], []);
-
   const copyFullResponse = useCallback(() => {
     const parts = [feedback, contentHint, question].map((s) => String(s || '').trim()).filter(Boolean);
     const text = parts.join('\n\n');
@@ -220,17 +92,13 @@ export default function LearningChatBubble({ data, onViewFull, onOptionClick, is
     >
       {feedbackMd ? (
         <div style={{ marginBottom: hintMd || fullQuestion || showMcq ? '4px' : '0' }}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins} components={mdComponentsMain}>
-            {feedbackMd}
-          </ReactMarkdown>
+          <FormattedAssistantContent raw={feedbackMd} />
         </div>
       ) : null}
 
       {hintMd ? (
         <div style={{ margin: '10px 0 2px' }}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins} components={mdComponentsMain}>
-            {`**Hint:** ${hintMd}`}
-          </ReactMarkdown>
+          <FormattedAssistantContent raw={`**Hint:** ${hintMd}`} />
         </div>
       ) : null}
 
@@ -245,9 +113,7 @@ export default function LearningChatBubble({ data, onViewFull, onOptionClick, is
             }}
           />
           {keycapSplit && keycapSplit.intro ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins} components={mdCoach}>
-              {`**Next:** ${clampMarkdown(keycapSplit.intro)}`}
-            </ReactMarkdown>
+            <FormattedAssistantContent raw={`**Next:** ${clampMarkdown(keycapSplit.intro)}`} />
           ) : keycapSplit && !keycapSplit.intro ? (
             <p
               style={{
@@ -262,9 +128,7 @@ export default function LearningChatBubble({ data, onViewFull, onOptionClick, is
               Choose a topic below:
             </p>
           ) : (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={rehypePlugins} components={mdCoach}>
-              {`**Next:** ${clampMarkdown(fullQuestion)}`}
-            </ReactMarkdown>
+            <FormattedAssistantContent raw={`**Next:** ${clampMarkdown(fullQuestion)}`} />
           )}
         </div>
       ) : null}

@@ -36,6 +36,7 @@ import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import { SidebarContext } from "../../context/SidebarContext";
 import DownloadPdf from "../DownloadPdf/DownloadPdf";
+import MergeAnswersModal from "../MergeAnswers/MergeAnswersModal";
 import BrandingDownloadModal from "../BrandingDownload/BrandingDownloadModal";
 import { toast } from "react-toastify";
 import "../../styles/ChatInterface.css";
@@ -43,6 +44,21 @@ import CitationsPanel from "../AnalysisPage/CitationsPanel";
 import apiService from "../../services/api";
 import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 import { renderSecretPromptResponse, isStructuredJsonResponse } from "../../utils/renderSecretPromptResponse";
+
+/**
+ * Final answer for a completed stream. Prefer the backend's `done.answer` —
+ * it is normalized, render-ready GFM (the same text persisted to history,
+ * which renders correctly on reload). Re-converting the raw streamed buffer
+ * locally (renderSecretPromptResponse) emits HTML tables mixed with markdown,
+ * which the HTML render path then shows as flattened literal text.
+ */
+const resolveFinalAnswer = (meta, rawBuffer, isStructured) => {
+  const backendAnswer = typeof meta?.answer === 'string' ? meta.answer.trim() : '';
+  if (backendAnswer) return backendAnswer;
+  return isStructured
+    ? renderSecretPromptResponse(rawBuffer)
+    : convertJsonToPlainText(rawBuffer);
+};
 import {
   parseLlmPolicyErrorForUi,
   stringToChatErrorDisplay,
@@ -950,6 +966,7 @@ const ChatInterface = () => {
   const { setForceSidebarCollapsed } = useContext(SidebarContext);
   const { showQuotaError } = useTokenQuota();
   const [currentChatHistory, setCurrentChatHistory] = useState([]);
+  const [showMergeModal, setShowMergeModal] = useState(false);
   const [loadingChat, setLoadingChat] = useState(false);
   const [chatError, setChatError] = useState(null);
   const [chatInput, setChatInput] = useState("");
@@ -2052,9 +2069,7 @@ const ChatInterface = () => {
           }
           setLoadingChat(false);
           const isStructured = isStructuredJsonResponse(streamBufferRef.current);
-          let finalResponse = isStructured
-            ? renderSecretPromptResponse(streamBufferRef.current)
-            : convertJsonToPlainText(streamBufferRef.current);
+          let finalResponse = resolveFinalAnswer(finalMetadata, streamBufferRef.current, isStructured);
           if (finalMetadata) {
             newSessionId = finalMetadata.session_id || finalMetadata.sessionId || newSessionId;
             messageId = finalMetadata.message_id || finalMetadata.id || messageId;
@@ -2133,9 +2148,7 @@ const ChatInterface = () => {
             }
             setLoadingChat(false);
             const isStructured = isStructuredJsonResponse(streamBufferRef.current);
-            let finalResponse = isStructured
-              ? renderSecretPromptResponse(streamBufferRef.current)
-              : convertJsonToPlainText(streamBufferRef.current);
+            let finalResponse = resolveFinalAnswer(finalMetadata, streamBufferRef.current, isStructured);
             if (finalMetadata) {
               newSessionId = finalMetadata.session_id || finalMetadata.sessionId || newSessionId;
               messageId = finalMetadata.message_id || finalMetadata.id || messageId;
@@ -2262,9 +2275,7 @@ const ChatInterface = () => {
               }
 
               const isStructured = isStructuredJsonResponse(streamBufferRef.current);
-              let finalResponse = isStructured
-                ? renderSecretPromptResponse(streamBufferRef.current)
-                : convertJsonToPlainText(streamBufferRef.current);
+              let finalResponse = resolveFinalAnswer(finalMetadata, streamBufferRef.current, isStructured);
               setLoadingChat(false);
               setCurrentStatus(null);
               if (streamThinkingRef.current) {
@@ -2494,9 +2505,7 @@ const ChatInterface = () => {
             }
             setLoadingChat(false);
             const isStructured = isStructuredJsonResponse(streamBufferRef.current);
-            let finalResponse = isStructured
-              ? renderSecretPromptResponse(streamBufferRef.current)
-              : convertJsonToPlainText(streamBufferRef.current);
+            let finalResponse = resolveFinalAnswer(finalMetadata, streamBufferRef.current, isStructured);
             if (finalMetadata) {
               newSessionId = finalMetadata.session_id || finalMetadata.sessionId || newSessionId;
               messageId = finalMetadata.message_id || finalMetadata.id || messageId;
@@ -2577,9 +2586,7 @@ const ChatInterface = () => {
               }
               setLoadingChat(false);
               const isStructured = isStructuredJsonResponse(streamBufferRef.current);
-              let finalResponse = isStructured
-                ? renderSecretPromptResponse(streamBufferRef.current)
-                : convertJsonToPlainText(streamBufferRef.current);
+              let finalResponse = resolveFinalAnswer(finalMetadata, streamBufferRef.current, isStructured);
               if (finalMetadata) {
                 newSessionId = finalMetadata.session_id || finalMetadata.sessionId || newSessionId;
                 messageId = finalMetadata.message_id || finalMetadata.id || messageId;
@@ -2697,9 +2704,7 @@ const ChatInterface = () => {
                 }
 
                 const isStructured = isStructuredJsonResponse(streamBufferRef.current);
-                let finalResponse = isStructured
-                  ? renderSecretPromptResponse(streamBufferRef.current)
-                  : convertJsonToPlainText(streamBufferRef.current);
+                let finalResponse = resolveFinalAnswer(finalMetadata, streamBufferRef.current, isStructured);
                 setLoadingChat(false);
                 setCurrentStatus(null);
                 if (streamThinkingRef.current) {
@@ -3658,6 +3663,15 @@ const ChatInterface = () => {
               </span>
             </div>
             <div className="flex items-center gap-1.5">
+              {currentChatHistory.some((c) => String(c.answer || c.response || '').trim()) && (
+                <button
+                  onClick={() => setShowMergeModal(true)}
+                  title="Select answers and merge them into a single document"
+                  className="px-2.5 py-1 rounded-lg text-xs font-medium text-[#21C1B6] hover:text-[#1AA49B] hover:bg-[#E0F7F6] transition-colors"
+                >
+                  Merge &amp; Export
+                </button>
+              )}
               {(chatSessions.length > 0 || currentChatHistory.length > 0) && (
                 <button onClick={handleDeleteAllChats} disabled={loadingChat} title="Clear all"
                   className="p-1.5 rounded-lg text-gray-300 hover:text-red-400 hover:bg-red-50 transition-colors">
@@ -3666,6 +3680,28 @@ const ChatInterface = () => {
               )}
             </div>
           </div>
+
+          <MergeAnswersModal
+            isOpen={showMergeModal}
+            onClose={() => setShowMergeModal(false)}
+            messages={currentChatHistory.map((c, i) => ({
+              ...c,
+              id: c.id ?? `local-${i}`,
+              answer: c.answer || c.response || '',
+            }))}
+            defaultTitle={(() => {
+              const folderName = typeof selectedFolder === 'string'
+                ? selectedFolder
+                : (selectedFolder?.originalname || selectedFolder?.name || '');
+              return folderName ? `${folderName.replace(/_/g, ' ')} — Merged Analysis` : 'Merged Legal Analysis';
+            })()}
+            sourceName={(() => {
+              const folderName = typeof selectedFolder === 'string'
+                ? selectedFolder
+                : (selectedFolder?.originalname || selectedFolder?.name || '');
+              return folderName ? folderName.replace(/_/g, ' ') : null;
+            })()}
+          />
 
           {/* Messages Area */}
           <div

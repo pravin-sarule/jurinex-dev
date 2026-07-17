@@ -25,9 +25,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["Templates"])
 
-_ANALYZER_CACHE_TTL_SECONDS = float(os.environ.get("TEMPLATE_ANALYZER_CACHE_TTL", "45"))
-_ANALYZER_TEMPLATE_TIMEOUT_SECONDS = float(os.environ.get("TEMPLATE_ANALYZER_TEMPLATE_TIMEOUT", "20"))
-_ANALYZER_PAYLOAD_TIMEOUT_SECONDS = float(os.environ.get("TEMPLATE_ANALYZER_PAYLOAD_TIMEOUT", "25"))
+# Analyzed templates change only when re-analyzed, so cache generously —
+# a 45s TTL forced a (multi-URL, slow-timeout) analyzer round-trip on nearly
+# every template/draft open.
+_ANALYZER_CACHE_TTL_SECONDS = float(os.environ.get("TEMPLATE_ANALYZER_CACHE_TTL", "600"))
+_ANALYZER_TEMPLATE_TIMEOUT_SECONDS = float(os.environ.get("TEMPLATE_ANALYZER_TEMPLATE_TIMEOUT", "8"))
+_ANALYZER_PAYLOAD_TIMEOUT_SECONDS = float(os.environ.get("TEMPLATE_ANALYZER_PAYLOAD_TIMEOUT", "10"))
 _analyzer_template_cache: Dict[tuple[str, int], tuple[float, Dict[str, Any]]] = {}
 _analyzer_payload_cache: Dict[tuple[str, int], tuple[float, Dict[str, Any]]] = {}
 
@@ -377,6 +380,26 @@ async def get_template_html_content(
     Used by chat-draft-backend automatic mode to feed template to the LLM.
     """
     try:
+        # GCS downloads + pypdf parsing + analyzer HTTP are blocking — run the
+        # whole resolution off the event loop so one slow template open cannot
+        # stall every other request on this worker.
+        import asyncio as _asyncio
+        return await _asyncio.to_thread(
+            _get_template_html_content_sync, template_id, user_id, x_user_id
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"[get_template_html_content] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _get_template_html_content_sync(
+    template_id: str,
+    user_id: Optional[int],
+    x_user_id: Optional[str],
+) -> Dict[str, Any]:
+    try:
         if _is_uuid(template_id):
             resolved_user_id: Optional[int] = user_id
             if resolved_user_id is None and x_user_id:
@@ -460,7 +483,7 @@ async def get_template_html_content(
 
         return {"success": False, "html": "", "source": "none", "message": "No HTML content found for this template"}
     except Exception as e:
-        logger.exception(f"[get_template_html_content] Error: {e}")
+        logger.exception(f"[get_template_html_content_sync] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -593,9 +616,8 @@ async def get_template(
             except (ValueError, TypeError):
                 pass
 
-        # 1) Try draft DB (admin templates)
-        templates = draft_db.list_templates()
-        template = next((t for t in templates if str(t.get("template_id")) == template_id), None)
+        # 1) Try draft DB (admin templates) — direct single-row lookup
+        template = draft_db.get_template_summary(template_id)
         if template:
             fields = draft_db.get_template_fields_with_fallback(template_id)
             out = {**template, "fields": fields}

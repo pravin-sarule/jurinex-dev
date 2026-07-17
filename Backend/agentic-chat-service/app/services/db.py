@@ -21,8 +21,10 @@ def _make_pool(url: str, name: str) -> ConnectionPool | None:
         return None
     return ConnectionPool(
         conninfo=url,
-        min_size=1,
-        max_size=8,
+        min_size=2,
+        max_size=20,
+        timeout=60,
+        max_waiting=40,
         kwargs={"row_factory": dict_row},
         check=ConnectionPool.check_connection,  # validate connection is alive before returning from pool
         reconnect_failed=lambda pool: logger.error("%s pool: all reconnect attempts failed", name),

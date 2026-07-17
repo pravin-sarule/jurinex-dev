@@ -41,6 +41,51 @@ def parse_file_ids_from_body(body: dict[str, Any]) -> list[str]:
     return out
 
 
+# Request flags that explicitly turn on the web-search judgement finder.
+_JUDGEMENT_SEARCH_FLAGS = (
+    "web_search",
+    "webSearch",
+    "find_judgements",
+    "findJudgements",
+    "find_judgments",
+    "use_web_search",
+    "judgement_search",
+    "judgment_search",
+)
+
+# Phrases that signal the user wants us to *find / search* real judgements or
+# case law online (as opposed to plain document Q&A). Kept intentionally narrow
+# so ordinary document questions are not hijacked into a web search.
+_JUDGEMENT_INTENT_PHRASES = (
+    "find judgement", "find judgment", "find judgements", "find judgments",
+    "find a judgement", "find a judgment", "find me judgement", "find me judgment",
+    "relevant judgement", "relevant judgment", "relevant case", "relevant case law",
+    "similar judgement", "similar judgment", "similar case", "similar cases",
+    "related judgement", "related judgment", "related case",
+    "case law on", "case laws on", "judgements on", "judgments on",
+    "precedent", "precedents", "find cases", "find case law",
+    "search for judgement", "search for judgment", "search judgement",
+    "find me cases", "supporting judgement", "supporting judgment",
+)
+
+
+def wants_judgement_search(body: dict[str, Any]) -> bool:
+    """True when the request asks for web-grounded judgement / case-law research.
+
+    Triggered by an explicit flag (frontend toggle) or by judgement-finding intent
+    phrases in the question.
+    """
+    if not isinstance(body, dict):
+        return False
+    for flag in _JUDGEMENT_SEARCH_FLAGS:
+        if body.get(flag):
+            return True
+    question = str(body.get("question") or "").lower()
+    if not question:
+        return False
+    return any(phrase in question for phrase in _JUDGEMENT_INTENT_PHRASES)
+
+
 def sanitize_filename(name: str) -> str:
     s = re.sub(r"[^\w.\- ]+", "_", str(name or "document"))
     s = re.sub(r"\s+", "_", s)

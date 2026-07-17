@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from app.services.db import doc_conn
 
@@ -61,6 +62,17 @@ Use markdown so responses render clearly in the JuriNex viewer:
 - **Tables** for comparisons (jurisdictions, penalty tiers, civil vs. criminal, etc.).
 - **Code blocks** for contract clauses, drafted text, or formal legal templates.
 - **Blockquotes** (>) for verbatim statutory text or judgment excerpts.
+- MARKDOWN ONLY — NEVER emit HTML tags. Forbidden: <strong>, <b>, <em>, <i>,
+  <br>, <div>, <span>, <p>, <table>, <ul>, <li>, <h1>–<h6>. The viewer renders
+  HTML tags as literal text. Bold is **text**, italics are *text*, headings are
+  ## text — even if a template, preset, or earlier message shows HTML.
+- Open with ONE short greeting line that addresses the user by their profile
+  name and acknowledges the task, then go straight into the answer. VARY the
+  opening words between responses — do NOT start every reply with the same
+  phrase (e.g. not always "Of course,"). Natural variants: "Certainly, {name} —",
+  "{name}, here is ...", "Right away, {name}.", "Happy to help, {name}.", or
+  similar. Never greet a user as "there" or omit the name when the profile
+  provides one, and never emit a stray "*" line or a decorative banner.
 
 ---
 
@@ -176,6 +188,14 @@ def _build_profile_appendix(user_profile: dict) -> str:
         f"- Preferred Tone: {_f('preferred_tone', professional, user_profile)}\n"
         f"- Detail Level: {_f('preferred_detail_level', professional, user_profile)}\n"
         f"- Citation Style: {_f('citation_style', professional, user_profile)}\n"
+        "\n\nPERSONALIZED GREETING (every response):\n"
+        f"- Open every response with ONE short line greeting the user by name and acknowledging the task, then continue with the answer.\n"
+        f"- VARY the opening phrase from response to response — do NOT start every reply with the same words (e.g. not always \"Of course,\"). Rotate among natural variants such as: \"Certainly, {name} — here is the case summary you asked for.\"; \"{name}, I've structured the analysis as requested.\"; \"Right away, {name}.\"; \"Here you go, {name}.\"; \"Happy to help, {name}.\" — or similar phrasing of your own.\n"
+        f"- Always use the exact name from the profile above ({name}). Never use generic salutations like \"there\" or \"user\", and never invent a different name.\n"
+        "\n\nREPORT METADATA (case summaries, briefs, and other system-generated reports):\n"
+        "- OMIT authorship/date metadata lines entirely — do NOT output 'Prepared By:', 'Prepared For:', 'Date:', 'Generated On:', or similar lines, even if the template, preset, or an earlier message shows them.\n"
+        "- After the greeting line, start the report directly with its first substantive heading (e.g. the case title or first section).\n"
+        f"- Only mention today's date ({datetime.now().strftime('%d %B %Y')}) if the user explicitly asks for it — never as a report header line.\n"
         "\n\nCRITICAL OVERRIDE — PROFILE QUESTIONS (applies even in document-grounded sessions):\n"
         "- If the user asks about their own name, email, role, organization, or any other profile field, "
         "answer EXCLUSIVELY from the USER PROFILE section above — NOT from the uploaded document.\n"
@@ -229,10 +249,15 @@ def build_profile_query_prefix(user_profile: dict | None) -> str:
         if v:
             lines.append(f"{label}: {v}")
 
+    lines.append(f"Today's Date: {datetime.now().strftime('%d %B %Y')}")
     lines.append(
         "NOTE: If the user asks anything about their own profile (name, email, role, etc.), "
         "answer from the above — never claim you lack access to this information. "
-        "Also use this profile to tailor tone, jurisdiction, and technical depth for every response."
+        "Also use this profile to tailor tone, jurisdiction, and technical depth for every response. "
+        f"Open your response with one short line greeting the user by name ({name or 'the user'}), "
+        "varying the phrasing each time — never start every reply with the same words like \"Of course,\". "
+        "In generated reports/summaries, OMIT metadata lines like 'Prepared By:' and 'Date:' entirely — "
+        "start the report directly with its first substantive heading."
     )
     lines.append("[END USER PROFILE]")
     return "\n".join(lines)

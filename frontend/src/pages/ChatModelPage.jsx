@@ -14,6 +14,7 @@ import DocumentViewer from '../components/AnalysisPage/DocumentViewer';
 import '../styles/ChatInterface.css';
 import ProgressStagesPopup from '../components/AnalysisPage/ProgressStagesPopup';
 import UploadOptionsMenu from '../components/UploadOptionsMenu';
+import DraftingModal from '../components/DraftingMode/DraftingModal';
 import googleDriveApi from '../services/googleDriveApi';
 import apiService from '../services/api';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
@@ -24,6 +25,8 @@ import {
   looksLikeRawJsonString,
   chatResponseLooksLikeHtml,
 } from '../utils/formatChatResponse';
+import { ensureTableSeparators, normalizeMarkdownFormatting, extractTableData } from '../utils/markdownUtils';
+import InteractiveTable from '../components/InteractiveTable';
 import { buildSuggestedQuestions } from '../utils/suggestedQuestions';
 
 import { formatFileSize } from '../utils/planUtils';
@@ -69,11 +72,72 @@ import {
   MicOff,
   Sparkles,
   Settings2,
+  ArrowUpRight,
+  Layers,
 } from 'lucide-react';
 import LearningBubble from '../components/LearningBubble';
 import TokenCostPopover from '../components/TokenCostPopover';
 import SessionTokenBadge from '../components/SessionTokenBadge';
 import FileTokenBadge from '../components/FileTokenBadge';
+/**
+ * Removes DeepSeek/AI thinking blocks and raw reasoning patterns from text.
+ * Also holds back incomplete Markdown tables during streaming to prevent gray bars (---).
+ */
+function getSafeMarkdown(text) {
+  if (!text) return '';
+  
+  // 1. Remove complete <think>...</think> or <thinking>...</thinking> blocks
+  let clean = text.replace(/<(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, '');
+  
+  // 2. Remove incomplete <think> block (still streaming)
+  if (/<(?:think|thinking)>/i.test(clean)) {
+    clean = clean.split(/<(?:think|thinking)>/i)[0];
+  }
+  
+  // 3. Remove raw reasoning patterns (lines that look like thinking)
+  // These are lines that start with "We need to", "We'll", "The user said", "So we"
+  const lines = clean.split('\n');
+  const filteredLines = [];
+  let tableStarted = false;
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Detect start of actual content (table or ##heading or **bold)
+    if (trimmed.startsWith('|') || trimmed.startsWith('#') || trimmed.startsWith('**')) {
+      tableStarted = true;
+    }
+    
+    // Skip reasoning-like lines before actual content starts
+    if (!tableStarted && (
+      line.match(/^(We need|We'll|We can|We will|The user|So we|The document|Let's|I'll|I will|Based on this|This is|The output contract|The instruction)/i)
+    )) {
+      continue; // Skip this reasoning line
+    }
+    
+    filteredLines.push(line);
+  }
+  
+  clean = filteredLines.join('\n');
+
+  // 4. Fix incomplete table rendering during streaming
+  // If table is not complete (no closing row after last |), 
+  // hold back incomplete table rows to prevent "---" gray bar glitches.
+  const tableRegex = /\|(.+)\|/;
+  if (tableRegex.test(clean)) {
+    const allLines = clean.split('\n');
+    const tableLines = allLines.filter(l => l.trim().startsWith('|'));
+    const lastTableLine = tableLines[tableLines.length - 1];
+    
+    // If last line looks incomplete (no ending |), remove it from the display
+    if (lastTableLine && !lastTableLine.trim().endsWith('|')) {
+      const lastIndex = clean.lastIndexOf(lastTableLine);
+      clean = clean.substring(0, lastIndex);
+    }
+  }
+  
+  return clean.trim();
+}
+
 // ─── Unified O(n) Markdown Parser ────────────────────────────────────────────
 // Rules guaranteed by this implementation:
 //   Rule 1: Never re-parse the whole string on every chunk — rAF throttle controls parse cadence
@@ -81,24 +145,55 @@ import FileTokenBadge from '../components/FileTokenBadge';
 //   Rule 3: ONE parser for both streaming and final — byte-identical HTML, no visual jump
 //   Rule 4: DOM writes capped to ~12/sec via rAF + 80ms throttle
 //
+// Fix PDF extraction artifacts: number fragments produced when a PDF stores digits
+// at absolute coordinates get spaces inserted between them by the extractor.
+// e.g. "201 6" → "2016", "100 72" → "10072", "200 3" → "2003".
+// Word-level fragmentation ("FACT UAL MAT RI X") is corrected upstream by DeepSeek
+// via the rendering contract instruction — we only handle numbers here since the
+// frontend cannot reconstruct correct word boundaries without language knowledge.
+// Skips fenced code blocks to avoid corrupting code samples.
+function normalizePdfText(text) {
+  if (!text) return text;
+  const parts = text.split(/(```[\s\S]*?```)/g);
+  return parts.map((part, i) => {
+    if (i % 2 === 1) return part; // inside a fenced code block — leave verbatim
+    return part
+      // Merge a 2-4 digit prefix + 1-2 digit suffix into a single number.
+      // Catches year fragments ("201 6" → "2016") and case-number fragments ("100 72" → "10072").
+      // The right fragment must be ≤2 digits to stay conservative and avoid
+      // accidentally joining two genuinely separate numbers (e.g. "Section 10 20").
+      .replace(/\b(\d{2,4}) (\d{1,2})\b/g, (m, a, b) => {
+        const merged = a + b;
+        return merged.length <= 6 ? merged : m;
+      });
+  }).join('');
+}
+
 // Handles: headings, bold/italic/bold-italic, inline code, fenced code blocks,
 // links, blockquotes, HR, ordered/unordered lists, GFM tables (with escaped pipes).
 // Mid-stream incomplete table rows fall through to <p> and snap into the table
 // on the next parse — no broken markup ever emitted.
 function parseMarkdown(md) {
   if (!md || typeof md !== 'string') return '';
+  md = ensureTableSeparators(normalizeMarkdownFormatting(normalizePdfText(md)));
 
   const esc = (s) =>
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-  // inline() escapes first, then applies formatting so injected < > & are safe
+  // inline() escapes first, then applies formatting so injected < > & are safe.
+  // Attribute-free formatting tags are then re-allowed: convertMarkdownMarkers
+  // (inside normalizeMarkdownFormatting) intentionally emits <strong>/<em>, and
+  // models occasionally emit them too — without this they render as literal tags.
   const inline = (s) =>
     esc(s)
+      .replace(/&lt;br\s*\/?&gt;/gi, '<br/>')
+      .replace(/&lt;(?:strong|b)&gt;([\s\S]*?)&lt;\/(?:strong|b)&gt;/gi, '<strong>$1</strong>')
+      .replace(/&lt;(?:em|i)&gt;([\s\S]*?)&lt;\/(?:em|i)&gt;/gi, '<em>$1</em>')
       .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-        '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-      .replace(/\*\*\*([^*\n]+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-      .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, '$1<em>$2</em>')
+        '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:#0f766e;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:2px;font-weight:600;background:#e6fbf9;padding:0 4px;border-radius:4px">$1</a>')
+      .replace(/\*\*\*([^\n]+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+      .replace(/\*\*([^\n]+?)\*\*(?!\*)/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\*([^\n]+?)\*(?!\*)/g, '$1<em>$2</em>')
       .replace(/`([^`\n]+?)`/g, '<code>$1</code>');
 
   const splitRow = (row) => {
@@ -157,19 +252,25 @@ function parseMarkdown(md) {
       continue;
     }
 
-    // Table separator — triggers thead→tbody transition, then skipped
-    if (/^\|?[\s:|-]+\|?$/.test(t) && t.includes('-') && t.includes('|')) {
+    // Table separator — triggers thead→tbody transition, then skipped.
+    // Accepts both "|---|---|" (standard) and "---|---" (no wrapping pipes).
+    if (/^\|?[\s:|-]+\|?$/.test(t) && t.includes('-') && (t.includes('|') || inTable)) {
       if (inTable && !hasHead) { out.push('</thead><tbody>'); hasHead = true; }
       continue;
     }
 
-    // Table row — accepts rows with or without trailing | (LLMs often omit it)
-    // Requires at least two | characters: one at start + one elsewhere.
-    if (t.startsWith('|') && t.indexOf('|', 1) >= 0) {
+    // Table row — DeepSeek sometimes omits the leading/trailing |.
+    // Detect any line that contains ≥2 pipe characters, OR starts with | and has one more.
+    // Guard: must not be a heading, list item, or HR (already handled above).
+    const pipeCount = (t.match(/\|/g) || []).length;
+    const isTableRow = (t.startsWith('|') && pipeCount >= 2) || pipeCount >= 3;
+    if (isTableRow) {
       endList();
       if (!inTable) { out.push('<div class="md-table-scroll"><table><thead>'); inTable = true; hasHead = false; }
       const tag = hasHead ? 'td' : 'th';
-      out.push(`<tr>${splitRow(t).map((c) => `<${tag}>${inline(c)}</${tag}>`).join('')}</tr>`);
+      // Normalise: wrap in pipes if missing so splitRow works correctly
+      const normalised = t.startsWith('|') ? t : `|${t}|`;
+      out.push(`<tr>${splitRow(normalised).map((c) => `<${tag}>${inline(c)}</${tag}>`).join('')}</tr>`);
       continue;
     }
     if (inTable) endTable();
@@ -343,21 +444,241 @@ function wrapBareHtmlTables(html) {
   );
 }
 
+/** Renders a list of sources with links. */
+const SourcesSection = React.memo(function SourcesSection({ sources }) {
+  if (!sources || !Array.isArray(sources) || sources.length === 0) return null;
+  return (
+    <div className="mt-4 pt-4 border-t border-gray-100">
+      <div className="flex items-center gap-2 mb-3">
+        <div className="w-1.5 h-1.5 rounded-full bg-[#21C1B6]" />
+        <span className="text-[11px] font-bold uppercase tracking-wider text-gray-400">Verified Court Judgments</span>
+      </div>
+      <div className="flex flex-col gap-2">
+        {sources.map((source, idx) => (
+          <a
+            key={idx}
+            href={source.url || source.uri || '#'}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center justify-between group px-3 py-2.5 text-sm font-semibold text-[#0f766e] bg-[#f0fdfa] border border-[#b2f5ea] rounded-xl hover:bg-[#e6fbf9] hover:border-[#21C1B6] transition-all"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-6 h-6 rounded-lg bg-[#21C1B6]/10 flex items-center justify-center flex-shrink-0 group-hover:bg-[#21C1B6]/20 transition-colors">
+                <FileText size={12} className="text-[#21C1B6]" />
+              </div>
+              <span className="truncate">{source.title || source.name || `Judgment ${idx + 1}`}</span>
+            </div>
+            <ArrowUpRight size={14} className="shrink-0 text-[#21C1B6] opacity-50 group-hover:opacity-100 transition-opacity" />
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+});
+
+/**
+ * Styled card wrapper for a single judgment section.
+ * Extracts the case name from the "## Similar Judgment:" header, renders it as a
+ * pill label + title above the card, and shows the body content inside the card.
+ * A verified source link badge is appended at the bottom when available.
+ */
+const JudgmentCard = React.memo(function JudgmentCard({ sectionText, source }) {
+  // Extract case name and body from the section
+  const HEADER_RE = /^\n?(?:##\s+|\*\*)?Similar Judgment:\s*\*?([^*\n]+?)\*?(?:\*\*)?\n([\s\S]*)/i;
+  const headerMatch = sectionText.match(HEADER_RE);
+  const caseName = headerMatch ? headerMatch[1].trim() : '';
+
+  // Replace any URL_NOT_FOUND placeholder in body with a real Indian Kanoon search URL
+  const ikanoonSearch = (name) =>
+    `https://indiankanoon.org/search/?formInput=${encodeURIComponent(name)}`;
+  const rawBody = headerMatch ? headerMatch[2].trim() : sectionText.trim();
+  const body = rawBody.replace(
+    /\(URL_NOT_FOUND\)/gi,
+    `(${ikanoonSearch(caseName)})`
+  ).replace(
+    /URL_NOT_FOUND/gi,
+    ikanoonSearch(caseName)
+  );
+
+  // Check if the body already contains a real source link so we don't double-show the badge
+  const bodyHasLink = /indiankanoon\.org|sci\.gov\.in/i.test(body);
+
+  return (
+    <div className="mb-5">
+      {/* Card header label + case name */}
+      <div className="flex items-center gap-2 mb-2">
+        <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-[#21C1B6]/10 text-[#21C1B6] rounded-full">
+          Similar Judgment
+        </span>
+      </div>
+      <div className="border border-gray-200 rounded-xl overflow-hidden bg-white shadow-sm">
+        {/* Case name title bar */}
+        <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/70">
+          <p className="text-[15px] font-bold text-gray-800 leading-snug">{caseName || 'Judgment'}</p>
+        </div>
+        {/* Body content */}
+        <div className="px-4 py-3 prose prose-sm prose-gray max-w-none
+          [&_strong]:text-gray-800
+          [&_h3]:text-[13px] [&_h3]:font-bold [&_h3]:text-gray-700 [&_h3]:mt-3 [&_h3]:mb-1
+          [&_blockquote]:border-l-4 [&_blockquote]:border-[#21C1B6]/40 [&_blockquote]:pl-3 [&_blockquote]:text-gray-600 [&_blockquote]:italic [&_blockquote]:my-2
+          [&_ul]:my-1 [&_li]:my-0.5
+          [&_a]:text-[#0f766e] [&_a]:font-semibold [&_a]:underline">
+          <FinalMarkdown text={body} />
+        </div>
+        {/* Source badge — shown when body has no inline link; always has a working URL */}
+        {!bodyHasLink && (() => {
+          const href =
+            (source?.url && source.url !== 'URL_NOT_FOUND' ? source.url : null) ||
+            (source?.uri && source.uri !== 'URL_NOT_FOUND' ? source.uri : null) ||
+            ikanoonSearch(caseName);
+          const domainLabel = (() => {
+            try {
+              const d = new URL(href).hostname.replace('www.', '');
+              if (d.includes('indiankanoon')) return 'Indian Kanoon';
+              if (d.includes('casemine')) return 'CaseMine';
+              if (d.includes('sci.gov') || d.includes('judis.nic') || d.includes('supremecourt')) return 'Supreme Court of India';
+              if (d.includes('ecourts')) return 'eCourts India';
+              if (d.endsWith('.gov.in') || d.endsWith('.nic.in')) return 'Govt. Court Portal';
+              return 'Indian Kanoon'; // fallback label for search URLs
+            } catch { return 'Indian Kanoon'; }
+          })();
+          return (
+            <div className="px-4 py-2.5 border-t border-gray-100 bg-gray-50/50">
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-semibold text-[#0f766e] bg-[#f0fdfa] border border-[#b2f5ea] rounded-lg hover:bg-[#e6fbf9] hover:border-[#21C1B6] transition-all"
+              >
+                <FileText size={11} className="text-[#21C1B6]" />
+                <span>{source?.title || caseName}</span>
+                <span className="text-[10px] text-[#21C1B6]/70 font-normal">— {domainLabel}</span>
+                <ArrowUpRight size={11} className="text-[#21C1B6] opacity-60" />
+              </a>
+            </div>
+          );
+        })()}
+      </div>
+    </div>
+  );
+});
+
+/** Strip tool_code / thought markdown blocks that Gemini may emit as plain text. */
+function cleanJudgmentText(text) {
+  if (!text || typeof text !== 'string') return text;
+  // Remove "tool_code\nprint(google_search.search(...))\n" blocks
+  let out = text.replace(/\btool_code\s*\nprint\([\s\S]*?\)\s*\n/g, '');
+  // Remove standalone "tool_code" line + following code block up to next blank line
+  out = out.replace(/^\s*tool_code\s*\n[\s\S]*?\n\n/gm, '');
+  // Remove "thought\n<paragraph(s)>\n\n" where the paragraph doesn't start a judgment section
+  out = out.replace(/^\s*thought\s*\n((?!##|\*\*Similar Judgment)[\s\S])*?\n\n/gm, '');
+  return out.trim();
+}
+
+/**
+ * Split judgment-search text into sections at "Similar Judgment:" markers.
+ * Handles "## Similar Judgment:" (H2) and "**Similar Judgment:**" (bold).
+ * When sources are available each section is matched to one; sections without a
+ * matching source get the next unassigned source sequentially.
+ * Returns null when the text contains no judgment sections at all.
+ */
+function splitIntoJudgmentSections(text, sources) {
+  // Match: newline + optional "## " or "**" + "Similar Judgment:"
+  const SPLIT_RE = /(?=\n(?:##\s+|\*\*)?Similar Judgment:)/gi;
+  const parts = text.split(SPLIT_RE);
+  if (parts.length <= 1) return null; // no judgment sections — fall through
+
+  const safeSources = Array.isArray(sources) ? sources : [];
+  const intro = parts[0];
+  const matchedSourceIds = new Set();
+
+  // Extract case name from any heading style:
+  //   ## Similar Judgment: Case Name
+  //   **Similar Judgment: Case Name**   ← what the model usually outputs
+  //   Similar Judgment: Case Name
+  const CASE_NAME_RE = /(?:##\s+|\*\*)?Similar Judgment:\s*\*?([^*\n]+?)\*?(?:\*\*)?(?:\n|$)/i;
+
+  const judgments = parts.slice(1).map((section) => {
+    const headerMatch = section.match(CASE_NAME_RE);
+    const caseName = (headerMatch ? headerMatch[1].trim() : '').toLowerCase();
+
+    let source = null;
+    if (caseName && safeSources.length) {
+      source = safeSources.find((s, idx) => {
+        if (matchedSourceIds.has(idx)) return false;
+        const st = (s.title || '').toLowerCase();
+        const baseSt = st.split('(')[0].trim();
+        const baseCn = caseName.split('(')[0].trim();
+        return st.includes(baseCn) || baseSt.includes(baseCn) || baseCn.includes(baseSt);
+      }) || null;
+      if (source) matchedSourceIds.add(safeSources.indexOf(source));
+    }
+
+    // Sequential fallback: assign next unmatched source so every section gets one
+    if (!source && safeSources.length) {
+      const firstUnmatched = safeSources.findIndex((_, idx) => !matchedSourceIds.has(idx));
+      if (firstUnmatched !== -1) {
+        source = safeSources[firstUnmatched];
+        matchedSourceIds.add(firstUnmatched);
+      }
+    }
+
+    return { text: section, source };
+  });
+
+  const unmatchedSources = safeSources.filter((_, idx) => !matchedSourceIds.has(idx));
+  return { intro, judgments, unmatchedSources };
+}
+
 /** Renders full secret-prompt HTML or markdown via FinalMarkdown (never hybrid HTML+md). */
 const AssistantMessageBody = React.memo(
-  function AssistantMessageBody({ content }) {
+  function AssistantMessageBody({ content, sources }) {
     if (!content) return null;
+
+    // When the response contains multiple judgment sections, render each with its
+    // own source link immediately after the section (instead of one grouped block).
+    if (!chatResponseLooksLikeHtml(content)) {
+      const cleaned = cleanJudgmentText(content);
+      const sections = splitIntoJudgmentSections(cleaned, sources);
+      if (sections) {
+        return (
+          <div className="flex flex-col">
+            {sections.intro && (
+              <div className="mb-4">
+                <FinalMarkdown text={sections.intro} />
+              </div>
+            )}
+            {sections.judgments.map((j, idx) => (
+              <JudgmentCard key={idx} sectionText={j.text} source={j.source} />
+            ))}
+            {sections.unmatchedSources.length > 0 && (
+              <SourcesSection sources={sections.unmatchedSources} />
+            )}
+          </div>
+        );
+      }
+    }
+
     if (chatResponseLooksLikeHtml(content)) {
       return (
-        <div
-          className="formatted-assistant-markdown formatted-assistant-html"
-          dangerouslySetInnerHTML={{ __html: wrapBareHtmlTables(content) }}
-        />
+        <div className="flex flex-col">
+          <div
+            className="formatted-assistant-markdown formatted-assistant-html"
+            dangerouslySetInnerHTML={{ __html: wrapBareHtmlTables(content) }}
+          />
+          <SourcesSection sources={sources} />
+        </div>
       );
     }
-    return <FinalMarkdown text={content} />;
+
+    return (
+      <div className="flex flex-col">
+        <FinalMarkdown text={cleanJudgmentText(content)} />
+        <SourcesSection sources={sources} />
+      </div>
+    );
   },
-  (a, b) => a.content === b.content,
+  (a, b) => a.content === b.content && JSON.stringify(a.sources) === JSON.stringify(b.sources),
 );
 
 // ── Gemini-style typing dots — shown while waiting for first token ───────────
@@ -561,6 +882,19 @@ const RealTimeProgressPanel = ({ processingStatus }) => {
 const CHAT_INPUT_MIN_HEIGHT = 24;
 const CHAT_INPUT_MAX_HEIGHT = 200;
 
+const BUILTIN_PROMPT_CHIPS = [
+  { id: 'citation-search-chip', name: 'Citation Search', isCitation: true },
+  { id: 'drafting-mode-chip', name: 'Drafting Mode', isDrafting: true },
+];
+
+const BUILTIN_PROMPT_NAMES = new Set(
+  BUILTIN_PROMPT_CHIPS.map((c) => c.name.trim().toLowerCase()),
+);
+
+const isDraftingPromptChip = (secret) =>
+  Boolean(secret?.isDrafting) ||
+  String(secret?.name || '').trim().toLowerCase() === 'drafting mode';
+
 const ChatModelPage = () => {
   const location = useLocation();
   const { fileId: paramFileId, sessionId: paramSessionId } = useParams();
@@ -600,11 +934,37 @@ const ChatModelPage = () => {
   const [showDropdown, setShowDropdown] = useState(false);
   const [showStyleDropdown, setShowStyleDropdown] = useState(false);
   const [learningModeActive, setLearningModeActive] = useState(false);
+  // Chat mode dropdown in the input box: 'chat' (default) | 'citation' (web-search judgement finder)
+  const [chatMode, setChatMode] = useState('chat');
+  const [showModeDropdown, setShowModeDropdown] = useState(false);
+  const citationMode = chatMode === 'citation';
+  // Drafting Mode — specialized template-driven drafting pipeline; opens a
+  // dedicated modal and only runs when the user explicitly triggers it here.
+  const [showDraftingModal, setShowDraftingModal] = useState(false);
+  const openDraftingMode = useCallback(() => {
+    setShowDraftingModal(true);
+    setChatMode('chat');
+    setLearningModeActive(false);
+    setIsSecretPromptSelected(false);
+    setActiveDropdown('Custom Query');
+    setSelectedSecretId(null);
+    setSelectedLlmName(null);
+    setShowStyleDropdown(false);
+  }, []);
   const [turnCount, setTurnCount] = useState(0);
   const [turnThreshold, setTurnThreshold] = useState(4);
 
   const [secrets, setSecrets] = useState([]);
   const [isLoadingSecrets, setIsLoadingSecrets] = useState(false);
+  const promptChips = useMemo(
+    () => [
+      ...BUILTIN_PROMPT_CHIPS,
+      ...secrets.filter(
+        (s) => !BUILTIN_PROMPT_NAMES.has(String(s?.name || '').trim().toLowerCase()),
+      ),
+    ],
+    [secrets],
+  );
   const [selectedSecretId, setSelectedSecretId] = useState(null);
   const [selectedLlmName, setSelectedLlmName] = useState(null);
 
@@ -622,6 +982,9 @@ const ChatModelPage = () => {
  
   const [streamingStatus, setStreamingStatus] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState('');
+  // True once the first visible answer token has arrived — until then we show only
+  // a Gemini-style 3-dot loader (no empty assistant box).
+  const [streamStarted, setStreamStarted] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState(null);
   const [processingTimeline, setProcessingTimeline] = useState([]);
   const [showProcessingTimeline, setShowProcessingTimeline] = useState(true);
@@ -859,6 +1222,8 @@ const ChatModelPage = () => {
   const appendStreamChunk = (text) => {
     if (typeof text !== 'string' || !text) return;
 
+    // First visible token → switch the loader off and reveal the answer card.
+    if (!streamBufferRef.current) setStreamStarted(true);
     // Only update the ref — StreamingMarkdown reads from it directly via rAF.
     streamBufferRef.current += text;
     loopCharsRef.current += text.length;
@@ -1555,7 +1920,7 @@ const ChatModelPage = () => {
     }
   };
 
-  const askGeneralQuestionToChat = async (question) => {
+  const askGeneralQuestionToChat = async (question, displayLabel = null) => {
     try {
       setIsLoading(true);
       setIsGeneratingInsights(true);
@@ -1563,6 +1928,7 @@ const ChatModelPage = () => {
       setCurrentResponse('');
       streamBufferRef.current = '';
       streamingGeneratingFiredRef.current = false;
+      setStreamStarted(false);
       loopAbortedRef.current = false;
       loopCharsRef.current   = 0;
       loopAbortControllerRef.current = new AbortController();
@@ -1591,6 +1957,7 @@ const ChatModelPage = () => {
           : adminModel
             ? { llm_name: adminModel }
             : {}),
+        ...(citationMode ? { web_search: true } : {}),
       };
 
       await apiService.askGeneralChatStream(
@@ -1653,7 +2020,7 @@ const ChatModelPage = () => {
             session_id: resolvedSessionId,
             question: question.trim(),
             answer: finalResponse,
-            display_text_left_panel: question.trim(),
+            display_text_left_panel: displayLabel || question.trim(),
             timestamp: new Date().toISOString(),
             type: 'general_chat',
             used_secret_prompt: false,
@@ -1707,7 +2074,7 @@ const ChatModelPage = () => {
     }
   };
 
-  const askQuestionToChat = async (question, fileId, fileIdsOverride = null) => {
+  const askQuestionToChat = async (question, fileId, fileIdsOverride = null, displayLabel = null) => {
     let messageId = null;
     try {
       setIsLoading(true);
@@ -1716,6 +2083,7 @@ const ChatModelPage = () => {
       setCurrentResponse('');
       streamBufferRef.current = '';
       streamingGeneratingFiredRef.current = false;
+      setStreamStarted(false);
       loopAbortedRef.current = false;
       loopCharsRef.current   = 0;
       loopAbortControllerRef.current = new AbortController();
@@ -1760,11 +2128,12 @@ const ChatModelPage = () => {
         session_id: sessionId,
         question: question.trim(),
         answer: '',
-        display_text_left_panel: question.trim(),
+        display_text_left_panel: displayLabel || question.trim(),
         timestamp: new Date().toISOString(),
         type: 'chat',
         used_secret_prompt: false,
         isStreaming: true,
+        sources: [],
       };
      
       // Clear isStreaming on any stuck previous messages before adding the new one
@@ -1818,17 +2187,21 @@ const ChatModelPage = () => {
             setCacheSessionData(metadata.cache_session_metrics);
             setUseCache(true);
           }
-          if (metadata.session_id) {
-            newSessionId = metadata.session_id;
+          if (metadata.session_id || metadata.sources) {
+            if (metadata.session_id) newSessionId = metadata.session_id;
             setMessages((prev) => {
               const updated = prev.map((msg) =>
                 msg.id === messageId
-                  ? { ...msg, session_id: metadata.session_id }
+                  ? {
+                      ...msg,
+                      ...(metadata.session_id ? { session_id: metadata.session_id } : {}),
+                      ...(metadata.sources ? { sources: metadata.sources } : {}),
+                    }
                   : msg
               );
               return updated;
             });
-            setSessionId(metadata.session_id);
+            if (metadata.session_id) setSessionId(metadata.session_id);
           }
         },
         (doneData) => {
@@ -1889,6 +2262,7 @@ const ChatModelPage = () => {
                     isStreaming: false,
                     learning_payload: doneData?.learning_payload || null,
                     learning_mode: !!doneData?.learning_mode,
+                    sources: doneData?.sources || msg.sources || [],
                   }
                 : msg
             );
@@ -1953,6 +2327,7 @@ const ChatModelPage = () => {
           ...chatModelStreamFetchParams,
           learning_mode: learningModeActive,
           document_context: learningModeActive ? getLearningDocumentContext() : undefined,
+          ...(citationMode ? { web_search: true } : {}),
         },
         ids.length > 1 ? ids : null,
         (thoughtText) => {
@@ -2724,8 +3099,18 @@ const ChatModelPage = () => {
               console.log('Stream metadata:', parsed);
               newSessionId = parsed.session_id || newSessionId;
             } else if (parsed.type === 'chunk') {
-              appendStreamChunk(parsed.text || '');
-              setHasResponse(true);
+              const chunkText = parsed.text || '';
+              if (chunkText) {
+                // Append raw chunk to buffer ref
+                streamBufferRef.current += chunkText;
+                // Get safe version of the WHOLE accumulated buffer for display
+                const safeContent = getSafeMarkdown(streamBufferRef.current);
+                // Update current response with safe content
+                setCurrentResponse(safeContent);
+                setHasResponse(true);
+                // We still schedule the UI update but setCurrentResponse handles the immediate display
+                scheduleStreamUiUpdate();
+              }
             } else if (parsed.type === 'done') {
               finalMetadata = parsed;
               const fd = typeof parsed.answer === 'string' ? parsed.answer : '';
@@ -3186,6 +3571,7 @@ const ChatModelPage = () => {
         setCurrentResponse('');
         streamBufferRef.current = '';
         streamingGeneratingFiredRef.current = false;
+      setStreamStarted(false);
         loopAbortedRef.current = false;
         loopCharsRef.current   = 0;
         loopAbortControllerRef.current = new AbortController();
@@ -3221,6 +3607,7 @@ const ChatModelPage = () => {
           prompt_label: promptLabel,
           secret_id: effectiveSecretId,
           isStreaming: true,
+          sources: [],
         };
         setMessages((prev) => [
           ...prev.map((m) => m.isStreaming ? { ...m, isStreaming: false } : m),
@@ -3253,9 +3640,23 @@ const ChatModelPage = () => {
           },
           (metadata) => {
             console.log('[Secret Prompt] Metadata:', metadata);
-            if (metadata.session_id) {
-              newSessionId = metadata.session_id;
-              setSessionId(metadata.session_id);
+            if (metadata.session_id || metadata.sources) {
+              if (metadata.session_id) {
+                newSessionId = metadata.session_id;
+                setSessionId(metadata.session_id);
+              }
+              setMessages((prev) => {
+                const updated = prev.map((msg) =>
+                  msg.id === messageId
+                    ? {
+                        ...msg,
+                        ...(metadata.session_id ? { session_id: metadata.session_id } : {}),
+                        ...(metadata.sources ? { sources: metadata.sources } : {}),
+                      }
+                    : msg
+                );
+                return updated;
+              });
             }
           },
           (doneData) => {
@@ -3335,6 +3736,7 @@ const ChatModelPage = () => {
                     secret_id: effectiveSecretId,
                     learning_payload: doneData?.learning_payload || null,
                     learning_mode: !!doneData?.learning_mode,
+                    sources: doneData?.sources || msg.sources || [],
                   };
                 }
                 return msg;
@@ -3394,6 +3796,7 @@ const ChatModelPage = () => {
           effectiveLlmName,
           {
             ...chatModelStreamFetchParams,
+            web_search: citationMode,
             learning_mode: learningModeActive,
             document_context: learningModeActive ? getLearningDocumentContext() : undefined,
           },
@@ -3420,9 +3823,14 @@ const ChatModelPage = () => {
         streamReaderRef.current = null;
       }
     } else {
-      if (!chatInput.trim()) {
-        setError('Please enter a question.');
-        return;
+      let question = chatInput.trim();
+      if (!question) {
+        if (citationMode) {
+          question = "Find relevant judgements and case law for this matter.";
+        } else {
+          setError('Please enter a question.');
+          return;
+        }
       }
 
       const currentStatus = processingStatus?.status;
@@ -3449,17 +3857,19 @@ const ChatModelPage = () => {
 
       try {
         const currentFileId = uploadedFileId || fileId;
+        const displayLabel = (citationMode && !chatInput.trim()) ? "Citation Search" : null;
+        
         if (currentFileId) {
           const attachmentIds =
             chatAttachmentFileIdsRef.current.length > 0
               ? chatAttachmentFileIdsRef.current
               : [currentFileId];
           console.log('[handleSend] Document chat — file_id(s):', attachmentIds, 'session_id:', sessionId);
-          await askQuestionToChat(chatInput, attachmentIds[0], attachmentIds);
+          await askQuestionToChat(question, attachmentIds[0], attachmentIds, displayLabel);
         } else {
           // No document uploaded — use general legal chat
           console.log('[handleSend] No document — routing to general legal chat, session_id:', sessionId);
-          await askGeneralQuestionToChat(chatInput);
+          await askGeneralQuestionToChat(question, displayLabel);
         }
       } catch (error) {
         console.error('[handleSend] Chat error:', error);
@@ -3692,6 +4102,19 @@ const ChatModelPage = () => {
     loadSecrets();
     fetchChatSessions();
   }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get('mode') === 'drafting') {
+      openDraftingMode();
+      params.delete('mode');
+      const next = params.toString();
+      navigate(
+        { pathname: location.pathname, search: next ? `?${next}` : '' },
+        { replace: true, state: location.state },
+      );
+    }
+  }, [location.pathname, location.search, location.state, navigate, openDraftingMode]);
 
   // Refresh sessions list when a new message is sent (so sessions panel stays current)
   useEffect(() => {
@@ -4166,7 +4589,7 @@ const ChatModelPage = () => {
     li: ({ node, ...props }) => <li className="leading-[1.9] text-[#2f2a22] text-[17px] analysis-page-ai-response" {...props} />,
     a: ({ node, ...props }) => (
       <a
-        className="text-[#21C1B6] hover:text-[#1AA49B] underline font-medium transition-colors"
+        className="text-[#0f766e] hover:text-[#1AA49B] underline decoration-2 underline-offset-2 font-semibold bg-[#e6fbf9] px-1 py-0.5 rounded transition-colors"
         target="_blank"
         rel="noopener noreferrer"
         {...props}
@@ -4209,11 +4632,17 @@ const ChatModelPage = () => {
     pre: ({ node, ...props }) => (
       <pre className="bg-[#f3f4f6] text-[#243124] p-4 rounded my-4 overflow-x-auto text-[13px] border border-[#d8d1c5]" {...props} />
     ),
-    table: ({ node, ...props }) => (
-      <div className="my-6 rounded-lg border border-[#d6d0c4] block max-w-full overflow-hidden">
-        <table className="border-collapse text-[14px] w-full" {...props} />
-      </div>
-    ),
+    table: ({ node, ...props }) => {
+      const data = extractTableData(node);
+      if (data) {
+        return <InteractiveTable headers={data.headers} rows={data.rows} />;
+      }
+      return (
+        <div className="my-6 rounded-lg border border-[#d6d0c4] block max-w-full overflow-hidden">
+          <table className="border-collapse text-[14px] w-full" {...props} />
+        </div>
+      );
+    },
     thead: ({ node, ...props }) => <thead className="bg-gray-50" {...props} />,
     th: ({ node, ...props }) => (
       <th
@@ -4335,6 +4764,9 @@ const ChatModelPage = () => {
     setLearningModeActive(style === 'learning');
     setTurnCount(0);
     setShowStyleDropdown(false);
+    if (style !== 'learning') {
+      setShowDraftingModal(false);
+    }
   };
 
   const handleLearningOptionSelect = async (optionText) => {
@@ -4387,7 +4819,8 @@ const ChatModelPage = () => {
     const isLast = idx === sessionMessages.length - 1;
 
     if (isLiveStream) {
-      return raw || currentResponse || animatedResponseContent || '';
+      const out = raw || currentResponse || animatedResponseContent || '';
+      return out.trim() ? out : '';
     }
     if (isLast && isSelected && isAnimatingResponse && animatedResponseContent) {
       return animatedResponseContent;
@@ -4439,13 +4872,31 @@ const ChatModelPage = () => {
       <UpgradePlanBanner className="mb-2 w-full" />
 
       {/* ── Prompt chips ────────────────────────────────────────────── */}
-      {!isSecretPromptSelected && (isLoadingSecrets || secrets.length > 0) && (
+      {/* Always rendered: Citation Search + Drafting Mode are built-in modes
+          and must not disappear when the secrets list fails to load. */}
+      {!isSecretPromptSelected && (
         <PromptChipsBar
-          secrets={secrets}
+          secrets={promptChips}
           isLoading={isLoadingSecrets}
-          selectedSecretId={selectedSecretId}
+          selectedSecretId={
+            showDraftingModal
+              ? 'drafting-mode-chip'
+              : citationMode
+                ? 'citation-search-chip'
+                : selectedSecretId
+          }
           activeLabel={null}
-          onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
+          onSelect={(s) => {
+            if (isDraftingPromptChip(s)) {
+              openDraftingMode();
+            } else if (s.isCitation) {
+              setChatMode('citation');
+              void handleSend({ preventDefault: () => {} });
+            } else {
+              setChatMode('chat');
+              handleDropdownSelect(s.name, s.id, s.llm_name);
+            }
+          }}
           disabled={isLoading || isGeneratingInsights}
           className="mb-2 w-full"
         />
@@ -4548,13 +4999,13 @@ const ChatModelPage = () => {
                     : <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" />}
                 </button>
                 {showStyleDropdown && (
-                  <div className="absolute bottom-full left-0 mb-2 w-44 bg-white border border-gray-100 rounded-2xl shadow-2xl z-30 overflow-hidden py-1">
+                  <div className="absolute bottom-full left-0 mb-2 w-52 bg-white border border-gray-100 rounded-2xl shadow-2xl z-30 overflow-hidden py-1">
                     <button type="button" onClick={() => handleSelectStyle('normal')}
                       className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50">
                       <span className="flex items-center gap-2">
                         <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" /> Normal
                       </span>
-                      {!learningModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                      {!learningModeActive && !showDraftingModal && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
                     </button>
                     <button type="button" onClick={() => handleSelectStyle('learning')} disabled={!fileId}
                       className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-40">
@@ -4562,6 +5013,16 @@ const ChatModelPage = () => {
                         <Sparkles className="h-3.5 w-3.5 text-[#21C1B6]" /> Learning
                       </span>
                       {learningModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={openDraftingMode}
+                      className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50 border-t border-gray-50"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Layers className="h-3.5 w-3.5 text-[#21C1B6]" /> Drafting Mode
+                      </span>
+                      {showDraftingModal && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
                     </button>
                   </div>
                 )}
@@ -4608,6 +5069,7 @@ const ChatModelPage = () => {
 
   return (
     <div className="flex flex-col lg:flex-row h-[90vh] bg-white overflow-hidden">
+      <DraftingModal open={showDraftingModal} onClose={() => setShowDraftingModal(false)} />
       <ChatQuotaErrorModal
         error={error}
         onDismiss={() => setError(null)}
@@ -5034,6 +5496,11 @@ const ChatModelPage = () => {
                               <div className="chat-thread-card__body">{questionLabel}</div>
                             </div>
                             {(assistantContent || (msg.isStreaming && msg.id === selectedMessageId)) && (
+                              (!assistantContent && msg.isStreaming && msg.id === selectedMessageId && !streamStarted) ? (
+                                <div className="px-2 py-3">
+                                  <TypingDots />
+                                </div>
+                              ) : (
                               <div
                                 className={`chat-thread-card ${assistantContent ? 'cursor-pointer hover:shadow-md transition-shadow' : ''} ${selectedMessageId === msg.id ? 'ring-2 ring-[#21C1B6]/35' : ''}`}
                                 onClick={() => assistantContent && handleMessageClick(msg)}
@@ -5072,7 +5539,6 @@ const ChatModelPage = () => {
                                         )}
                                       </>
                                     )}
-                                    {/* Gemini-style bouncing dots while waiting for first token */}
                                     <TypingDots />
                                   </div>
                                 ) : (
@@ -5081,13 +5547,16 @@ const ChatModelPage = () => {
                                       {msg.isStreaming && msg.id === selectedMessageId ? (
                                         <>
                                           <StreamingMarkdown key={`stream-${selectedMessageId}-${streamResetKey}`} bufferRef={streamBufferRef} scrollTargetRef={chatThreadRef} />
-                                          {/* Dots shown in the gap between status='generating' and first visible text */}
-                                          {streamingStatus === 'generating' && !streamBufferRef.current && (
+                                          {(!streamBufferRef.current || !streamBufferRef.current.trim()) && (
                                             <TypingDots />
                                           )}
                                         </>
                                       ) : (
-                                        <AssistantMessageBody content={assistantContent} />
+                                        assistantContent ? (
+                                          <AssistantMessageBody content={assistantContent} sources={msg.sources} />
+                                        ) : msg.isStreaming ? (
+                                          <TypingDots />
+                                        ) : null
                                       )}
                                     </div>
                                     {assistantContent && (
@@ -5109,6 +5578,7 @@ const ChatModelPage = () => {
                                   </>
                                 )}
                               </div>
+                              )
                             )}
                           </div>
                         );
@@ -5119,33 +5589,9 @@ const ChatModelPage = () => {
                           <div className="chat-thread-card__label">You</div>
                           <div className="chat-thread-card__body">{pendingQuestion}</div>
                         </div>
-                        <div className="chat-thread-card">
-                          <div className="chat-thread-card__label">Assistant</div>
-                          <div className="p-4">
-                            <button
-                              type="button"
-                              onClick={() => setShowProcessingTimeline((prev) => !prev)}
-                              className="flex items-center gap-2 text-xs font-medium text-[#1f6b5f] mb-3"
-                            >
-                              <Loader2 className="h-3 w-3 animate-spin flex-shrink-0" />
-                              <span>{showProcessingTimeline ? 'Hide thinking' : 'Show thinking'}</span>
-                              <ChevronDown className={`h-3 w-3 transition-transform ${showProcessingTimeline ? 'rotate-180' : ''}`} />
-                            </button>
-                            {showProcessingTimeline && processingTimeline.length > 0 && (
-                              <div className="border-l border-[#c9ddd5] pl-3 space-y-3 mb-3">
-                                {processingTimeline.map((step) => (
-                                  <div key={step.id}>
-                                    <p className="text-[13px] font-semibold italic text-[#2b3528]">{step.title}</p>
-                                    <p className="text-xs text-[#4f5b56]">{step.description}</p>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                            <div className="flex items-center gap-2 text-sm text-[#1f6b5f]">
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                              <span>{streamingMessage || getStatusMessage(streamingStatus) || 'Model thinking...'}</span>
-                            </div>
-                          </div>
+                        {/* Gemini-style 3-dot loader only — no empty assistant box */}
+                        <div className="px-2 py-3">
+                          <TypingDots />
                         </div>
                       </div>
                     )}

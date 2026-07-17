@@ -5,6 +5,7 @@ const { protect } = require('../middleware/auth');
 
 router.post('/firm/staff', protect, rbacController.createFirmUser);
 router.get('/firm/staff', protect, rbacController.getFirmUsers);
+router.patch('/firm/staff/:userId/status', protect, rbacController.updateFirmUserActiveStatus);
 router.post('/firm/staff/:userId/resend-password-setup', protect, rbacController.resendFirmUserPasswordSetupEmail);
 router.delete('/firm/staff/:userId', protect, rbacController.deleteFirmUser);
 router.get('/permissions/me', protect, rbacController.getCurrentUserPermissions);

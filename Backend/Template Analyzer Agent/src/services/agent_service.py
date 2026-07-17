@@ -1,134 +1,277 @@
+"""
+Template Analyzer Agent — production pipeline.
+
+Design
+------
+1. ONE structured-output Gemini call returns section boundaries + metadata +
+   fields (schema-enforced JSON, so no regex/JSON-repair guesswork).
+2. The actual section text (``source_clauses``) is NEVER copied by the LLM —
+   it is sliced verbatim from the uploaded template using resolved line
+   boundaries, guaranteeing byte-exact fidelity to the source document.
+3. Per-section drafting prompts are built deterministically around the
+   verbatim segment (no per-section LLM calls), so downstream drafting
+   reproduces each section exactly as it appears in the template.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import random
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
 from google import genai
-try:
-    import google.adk as adk
-except ImportError:
-    adk = None
+from google.genai import errors as genai_errors
+
 try:
     import json_repair
 except ImportError:
     json_repair = None
-import json
-import re
-import asyncio
-import os
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+
 from ..config import settings
+
+logger = logging.getLogger(__name__)
+
+# Cap the template text embedded in the analysis prompt. Slicing always runs
+# against the FULL text, so a cap here only limits what the LLM sees.
+MAX_PROMPT_TEMPLATE_CHARS = int(os.getenv("ANALYZER_MAX_PROMPT_CHARS", "180000"))
+
+SECTION_CATEGORIES = [
+    "header", "parties", "recitals", "facts", "grounds", "prayer",
+    "terms", "verification", "signatures", "schedules", "annexures", "other",
+]
+
+FIELD_TYPES = ["string", "date", "number", "currency", "address", "text_long", "boolean"]
+
+LEGAL_TYPES = [
+    "Date", "PartyName", "MonetaryAmount", "Address", "StatuteReference",
+    "CaseReference", "Relief", "Prayer", "Ground", "GeneralText", "Identifier",
+]
+
+UI_HINTS = ["date_picker", "text_input", "textarea", "number_input", "currency_input", "multi_select"]
+
+# Structured-output schema for the single analysis call (OpenAPI subset
+# accepted by google-genai `response_schema`).
+ANALYSIS_SCHEMA: Dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "template_name": {"type": "STRING"},
+        "document_type": {"type": "STRING"},
+        "estimated_draft_length": {"type": "STRING"},
+        "sections": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "section_name": {"type": "STRING"},
+                    "section_category": {"type": "STRING", "enum": SECTION_CATEGORIES},
+                    "section_purpose": {"type": "STRING"},
+                    "start_marker": {
+                        "type": "STRING",
+                        "description": "EXACT phrase copied verbatim from one source line where this section begins.",
+                    },
+                    "template_logic": {"type": "STRING"},
+                    "drafting_guidance": {
+                        "type": "STRING",
+                        "description": "Tone, legal terminology, formatting and conditional-logic notes for drafting this section.",
+                    },
+                    "page_break_before": {"type": "BOOLEAN"},
+                    "fields": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "key": {"type": "STRING"},
+                                "label": {"type": "STRING"},
+                                "type": {"type": "STRING", "enum": FIELD_TYPES},
+                                "required": {"type": "BOOLEAN"},
+                                "description": {"type": "STRING"},
+                                "legal_type": {"type": "STRING", "enum": LEGAL_TYPES},
+                                "ui_hint": {"type": "STRING", "enum": UI_HINTS},
+                                "validation_hint": {"type": "STRING"},
+                            },
+                            "required": ["key", "label", "type", "description"],
+                        },
+                    },
+                },
+                "required": ["section_name", "section_category", "section_purpose", "start_marker", "fields"],
+            },
+        },
+    },
+    "required": ["template_name", "document_type", "sections"],
+}
+
+VALIDATION_SCHEMA: Dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "valid": {"type": "BOOLEAN"},
+        "error_prompt": {"type": "STRING"},
+        "suggestion": {"type": "STRING"},
+    },
+    "required": ["valid"],
+}
+
+SECTION_CONTENT_SCHEMA: Dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "section_name": {"type": "STRING"},
+        "content": {"type": "STRING"},
+    },
+    "required": ["content"],
+}
+
+# Placeholder patterns used for deterministic per-segment field detection.
+_PLACEHOLDER_PATTERNS: List[Tuple[re.Pattern, float]] = [
+    (re.compile(r"\{\{\s*([A-Za-z][A-Za-z0-9_ \-]{0,60}?)\s*\}\}"), 0.98),
+    (re.compile(r"__\s*([A-Za-z][A-Za-z0-9_ \-]{0,60}?)\s*__"), 0.96),
+    # Name must start and end alphanumeric so we never match fragments inside
+    # a __double_underscore__ placeholder (e.g. "_amount__" → "amount").
+    (re.compile(r"(?<!_)_([A-Za-z][A-Za-z0-9_]{0,59}[A-Za-z0-9])_(?!_)"), 0.95),
+    (re.compile(r"\[\s*([A-Za-z][A-Za-z0-9_ \-]{1,60}?)\s*\]"), 0.85),
+]
+
+_TRANSIENT_MARKERS = ("429", "500", "502", "503", "504", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE_EXCEEDED", "overloaded")
+
+
+def _normalize_key(raw: str) -> str:
+    key = re.sub(r"[^a-zA-Z0-9_]+", "_", str(raw or "").strip().lower()).strip("_")
+    return key[:80]
+
+
+def _humanize(key: str) -> str:
+    return key.replace("_", " ").strip().title()
+
+
+def _infer_field_type(key: str) -> str:
+    if any(t in key for t in ("date", "dated", "day", "month", "year_of")):
+        return "date"
+    if any(t in key for t in ("amount", "rent", "fee", "price", "consideration", "salary", "cost")):
+        return "currency"
+    if any(t in key for t in ("number", "count", "age", "year", "quantity")):
+        return "number"
+    if any(t in key for t in ("address", "place", "location")):
+        return "address"
+    if any(t in key for t in ("facts", "grounds", "prayer", "description", "details", "clause", "relief")):
+        return "text_long"
+    return "string"
+
+
+def _legal_type_for(field_type: str, key: str) -> str:
+    if field_type == "date":
+        return "Date"
+    if field_type == "currency":
+        return "MonetaryAmount"
+    if field_type == "address":
+        return "Address"
+    if "prayer" in key or "relief" in key:
+        return "Relief"
+    if "ground" in key:
+        return "Ground"
+    if any(t in key for t in ("name", "petitioner", "respondent", "party", "advocate", "deponent")):
+        return "PartyName"
+    if any(t in key for t in ("pan", "aadhar", "gstin", "enrollment", "uid", "fir", "case_no", "petition_no")):
+        return "Identifier"
+    if any(t in key for t in ("section", "article", "act", "statute")):
+        return "StatuteReference"
+    return "GeneralText"
+
+
+def _ui_hint_for(field_type: str) -> str:
+    return {
+        "date": "date_picker",
+        "number": "number_input",
+        "currency": "currency_input",
+        "text_long": "textarea",
+        "address": "textarea",
+    }.get(field_type, "text_input")
 
 
 class AntigravityAgent:
     def __init__(self):
-        self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        self.model_name = "gemini-2.5-pro"
+        self._client: Optional[genai.Client] = None
+        self.model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+        self.fallback_model_name = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+        self.gemini_timeout = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "240"))
+        self.max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "2"))
 
-    def _attempt_json_repair(self, text: str) -> str:
-        open_braces = 0
-        open_brackets = 0
-        in_string = False
-        escape_next = False
+    @property
+    def client(self) -> genai.Client:
+        # Lazy init so importing the module never fails/costs anything.
+        if self._client is None:
+            self._client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        return self._client
 
-        for char in text:
-            if escape_next:
-                escape_next = False
-                continue
+    # ------------------------------------------------------------------
+    # LLM invocation (structured output + retry + model fallback)
+    # ------------------------------------------------------------------
 
-            if char == "\\":
-                escape_next = True
-                continue
+    async def _invoke_model(self, model: str, prompt: str, schema: Optional[Dict[str, Any]]) -> str:
+        config: Dict[str, Any] = {
+            "response_mime_type": "application/json",
+            "max_output_tokens": 65536,
+            "temperature": 0.1,
+        }
+        if schema is not None:
+            config["response_schema"] = schema
+        response = await asyncio.wait_for(
+            self.client.aio.models.generate_content(model=model, contents=prompt, config=config),
+            timeout=self.gemini_timeout,
+        )
+        text = (response.text or "").strip()
+        if not text:
+            raise ValueError(f"Empty response from {model}")
+        return text
 
-            if char == '"' and not in_string:
-                in_string = True
-            elif char == '"' and in_string:
-                in_string = False
-            elif not in_string:
-                if char == "{":
-                    open_braces += 1
-                elif char == "}":
-                    open_braces -= 1
-                elif char == "[":
-                    open_brackets += 1
-                elif char == "]":
-                    open_brackets -= 1
+    @staticmethod
+    def _is_transient(err: Exception) -> bool:
+        if isinstance(err, asyncio.TimeoutError):
+            return True
+        if isinstance(err, genai_errors.APIError):
+            return getattr(err, "code", 0) in (429, 500, 502, 503, 504)
+        message = str(err)
+        return any(marker in message for marker in _TRANSIENT_MARKERS)
 
-        text = text.rstrip()
-        if text.endswith(","):
-            text = text[:-1]
-        return text + ("]" * open_brackets) + ("}" * open_braces)
+    async def _call_gemini(self, prompt: str, schema: Optional[Dict[str, Any]] = None) -> Any:
+        models = [self.model_name]
+        if self.fallback_model_name and self.fallback_model_name != self.model_name:
+            models.append(self.fallback_model_name)
 
-    async def _call_gemini(self, prompt: str):
-        print(f"DEBUG: Calling Gemini model {self.model_name} (Async)...")
+        last_error: Optional[Exception] = None
+        for model in models:
+            for attempt in range(self.max_retries + 1):
+                try:
+                    text = await self._invoke_model(model, prompt, schema)
+                    return self._parse_json(text)
+                except Exception as err:  # noqa: BLE001 — classified below
+                    last_error = err
+                    transient = self._is_transient(err)
+                    logger.warning(
+                        "Gemini call failed (model=%s attempt=%d transient=%s): %s",
+                        model, attempt + 1, transient, err,
+                    )
+                    if not transient:
+                        break  # non-transient → try the fallback model directly
+                    if attempt < self.max_retries:
+                        await asyncio.sleep((2 ** attempt) + random.uniform(0, 0.5))
+        raise ValueError(f"Gemini analysis failed after retries: {last_error}")
+
+    def _parse_json(self, text: str) -> Any:
+        # Structured output normally returns clean JSON; strip fences defensively.
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
         try:
-            response = await asyncio.wait_for(
-                self.client.aio.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                    config={
-                        "response_mime_type": "application/json",
-                        "max_output_tokens": 65536,
-                        "temperature": 0.1,
-                    },
-                ),
-                timeout=120.0,
-            )
-            print("DEBUG: Gemini response received.")
-        except asyncio.TimeoutError:
-            print("DEBUG: Gemini call timed out after 120s.")
-            raise ValueError("Gemini AI analysis timed out. Please try again.")
-        except Exception as e:
-            print(f"DEBUG: Gemini call failed: {e}")
-            raise e
-
-        text = response.text.strip()
-        print(f"DEBUG: Gemini response length: {len(text)} characters")
-
-        json_match = re.search(r"```(?:json)?\s*\n?({[\s\S]*})\s*\n?```", text)
-        if json_match:
-            clean_text = json_match.group(1)
-        else:
-            json_match = re.search(r"({[\s\S]*})", text)
-            clean_text = json_match.group(1) if json_match else text
-
-        clean_text = re.sub(r",\s*([\]}])", r"\1", clean_text)
-        clean_text = re.sub(r"[\x00-\x1F\x7F]", "", clean_text)
-        clean_text = re.sub(r'\\(?!["\\/bfnrt])(?!u[0-9a-fA-F]{4})', r"\\\\", clean_text)
-
-        try:
-            return json.loads(clean_text)
-        except json.JSONDecodeError as e:
-            print(f"JSON Parse Error: {str(e)}")
-            error_pos = getattr(e, "pos", 0)
-
-            if error_pos >= len(clean_text) - 10:
-                repaired_text = self._attempt_json_repair(clean_text)
-                if repaired_text != clean_text:
-                    try:
-                        return json.loads(repaired_text)
-                    except json.JSONDecodeError:
-                        pass
-
+            return json.loads(cleaned)
+        except json.JSONDecodeError as err:
             if json_repair is not None:
                 try:
-                    return json_repair.loads(clean_text)
-                except Exception as repair_err:
-                    print(f"json_repair fallback failed: {repair_err}")
+                    return json_repair.loads(cleaned)
+                except Exception:
+                    pass
+            raise ValueError(f"Failed to parse Gemini response as JSON: {err}") from err
 
-            try:
-                return json.loads(self._attempt_json_repair(clean_text))
-            except json.JSONDecodeError:
-                pass
-
-            try:
-                debug_dir = "debug_json_errors"
-                os.makedirs(debug_dir, exist_ok=True)
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                debug_file = os.path.join(debug_dir, f"failed_json_{timestamp}.txt")
-                with open(debug_file, "w", encoding="utf-8") as f:
-                    f.write(clean_text)
-                print(f"DEBUG: Saved problematic JSON to {debug_file}")
-            except Exception as save_error:
-                print(f"WARNING: Could not save debug file: {save_error}")
-
-            raise ValueError(f"Failed to parse Gemini response as JSON: {str(e)}")
+    # ------------------------------------------------------------------
+    # Deterministic layout analysis
+    # ------------------------------------------------------------------
 
     def _compute_page_metrics(self, template_text: str) -> Dict[str, int]:
         lines = template_text.splitlines() or [template_text]
@@ -137,273 +280,11 @@ class AntigravityAgent:
         page_width = max(line_lengths, default=80)
         sorted_indents = sorted(indents)
         std_indent = sorted_indents[len(sorted_indents) // 2] if sorted_indents else 0
-        deep_indent = std_indent + 8
-        right_zone_start = max(int(page_width * 0.65), std_indent + 20)
         return {
             "page_width": page_width,
             "std_indent": std_indent,
-            "deep_indent": deep_indent,
-            "right_zone_start": right_zone_start,
-        }
-
-    def _classify_line(self, line: str, metrics: Dict[str, int]) -> str:
-        stripped = line.rstrip("\n")
-        if not stripped.strip():
-            return "BLANK"
-
-        indent = len(stripped) - len(stripped.lstrip(" "))
-        text = stripped.strip()
-        text_len = len(text)
-
-        if re.fullmatch(r"[-_=]{3,}", text):
-            return "SEPARATOR"
-        if "|" in text or re.search(r"\s{3,}\S+\s{3,}\S+", stripped):
-            return "TABLE_ROW"
-        if indent >= metrics["right_zone_start"]:
-            return "RIGHT"
-        if indent >= metrics["deep_indent"]:
-            return "LEFT_INDENT_MORE"
-        if indent > metrics["std_indent"]:
-            return "LEFT_INDENT"
-        left_padding = indent
-        right_padding = max(metrics["page_width"] - (indent + text_len), 0)
-        if abs(left_padding - right_padding) <= 6 and left_padding > 0:
-            return "CENTER"
-        return "LEFT"
-
-    def _extract_layout_blueprint(self, template_text: str, metrics: Dict[str, int]) -> List[Dict[str, Any]]:
-        blueprint: List[Dict[str, Any]] = []
-        pages = template_text.split("\f")
-        for page_index, page_text in enumerate(pages, start=1):
-            for line_index, line in enumerate(page_text.splitlines(), start=1):
-                blueprint.append(
-                    {
-                        "page": page_index,
-                        "line_no": line_index,
-                        "align": self._classify_line(line, metrics),
-                        "text": line.strip(),
-                        "indent": len(line) - len(line.lstrip(" ")),
-                    }
-                )
-        return blueprint
-
-    def _blueprint_to_display(self, blueprint: List[Dict[str, Any]], max_lines: int = 500) -> str:
-        rendered: List[str] = []
-        for item in blueprint[:max_lines]:
-            text = item["text"] if item["text"] else "<blank>"
-            rendered.append(
-                f"[P{item['page']:02d}:L{item['line_no']:03d}] [{item['align']}] indent={item['indent']} {text}"
-            )
-        return "\n".join(rendered)
-
-    def _extract_segment_by_markers(self, template_text: str, start_marker: str, end_marker: str) -> str:
-        text = str(template_text or "")
-        start = str(start_marker or "").strip()
-        end = str(end_marker or "").strip()
-        if not text or not start:
-            return ""
-        lower_text = text.lower()
-        start_idx = lower_text.find(start.lower())
-        if start_idx == -1:
-            return ""
-        if end:
-            end_idx = lower_text.find(end.lower(), start_idx + len(start))
-            if end_idx > start_idx:
-                return text[start_idx:end_idx].strip()
-        return text[start_idx:].strip()
-
-    def _line_number_for_marker(self, template_text: str, marker: str) -> int:
-        marker_text = str(marker or "").strip().lower()
-        if not marker_text:
-            return 0
-        for idx, line in enumerate(str(template_text or "").splitlines(), start=1):
-            if marker_text in line.strip().lower():
-                return idx
-        return 0
-
-    async def _identify_section_anchors(self, template_text: str) -> List[Dict[str, Any]]:
-        prompt = f"""
-You are doing PASS 1: Anchor Identification for a legal template.
-
-Goal:
-- Do NOT draft or summarize.
-- Identify exact section boundaries using explicit markers from the source text.
-- Return section anchors only.
-
-Return strict JSON with this shape:
-{{
-  "sections": [
-    {{
-      "section_id": "2",
-      "title": "BRIEF FACTS AND BACKGROUND",
-      "start_marker": "2. BRIEF FACTS",
-      "end_marker": "3. GROUNDS",
-      "start_line": 42,
-      "end_line": 79,
-      "fields_found": ["petitioner_brief_description", "initial_event_date"]
-    }}
-  ]
-}}
-
-Rules:
-- start_marker must be an exact phrase that exists in the source text.
-- end_marker should be the next section's heading phrase when possible.
-- If final section has no next heading, use empty string for end_marker.
-- fields_found should list likely field keys inferred from that section context.
-- start_line/end_line should be best-effort line numbers for the section bounds.
-- Cover the ENTIRE template from first page to last page; do not skip middle sections.
-- Include every major heading in sequence from top to bottom.
-- Return ONLY valid JSON.
-
-SOURCE TEMPLATE:
-\"\"\"{template_text}\"\"\"
-"""
-        result = await self._call_gemini(prompt)
-        sections = result.get("sections") if isinstance(result, dict) else []
-        return sections if isinstance(sections, list) else []
-
-    def _extract_deterministic_anchors(self, template_text: str) -> List[Dict[str, Any]]:
-        anchors: List[Dict[str, Any]] = []
-        seen = set()
-        lines = str(template_text or "").splitlines()
-        for idx, raw in enumerate(lines, start=1):
-            line = self._clean_heading_text(raw)
-            if not line:
-                continue
-            # Prefer numbered headings and all-caps legal headings for stable section boundaries.
-            if not (
-                re.match(r"^\s*(?:\d+(?:\.\d+){0,3}|[IVXLCM]+)[\.\)]?\s+[A-Z]", line)
-                or bool(re.match(r"^[A-Z][A-Z0-9\s,&/\-\(\)]{3,}$", line))
-            ):
-                continue
-            key = re.sub(r"[^a-z0-9]+", "_", line.lower()).strip("_")
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            anchors.append(
-                {
-                    "section_id": f"det_{len(anchors) + 1:03d}",
-                    "title": self._section_name_from_marker(line) or line,
-                    "start_marker": line,
-                    "start_line": idx,
-                    "end_marker": "",
-                    "end_line": 0,
-                    "fields_found": [],
-                }
-            )
-        return anchors
-
-    def _merge_and_finalize_anchors(self, llm_anchors: List[Dict[str, Any]], template_text: str) -> List[Dict[str, Any]]:
-        merged: List[Dict[str, Any]] = []
-        by_marker = set()
-
-        def _push(anchor: Dict[str, Any]) -> None:
-            marker = self._clean_heading_text(anchor.get("start_marker", ""))
-            if not marker:
-                return
-            key = marker.lower()
-            if key in by_marker:
-                return
-            line = int(anchor.get("start_line") or 0)
-            if line <= 0:
-                line = self._line_number_for_marker(template_text, marker)
-            merged.append(
-                {
-                    "section_id": anchor.get("section_id") or f"section_{len(merged) + 1:03d}",
-                    "title": anchor.get("title") or self._section_name_from_marker(marker) or marker,
-                    "start_marker": marker,
-                    "start_line": line,
-                    "end_marker": self._clean_heading_text(anchor.get("end_marker", "")),
-                    "end_line": int(anchor.get("end_line") or 0),
-                    "fields_found": anchor.get("fields_found") or [],
-                }
-            )
-            by_marker.add(key)
-
-        for anchor in llm_anchors or []:
-            if isinstance(anchor, dict):
-                _push(anchor)
-        for anchor in self._extract_deterministic_anchors(template_text):
-            _push(anchor)
-
-        merged.sort(key=lambda item: item.get("start_line") or 10**9)
-        for i, item in enumerate(merged):
-            nxt = merged[i + 1] if i + 1 < len(merged) else None
-            if nxt:
-                item["end_marker"] = nxt.get("start_marker", "")
-                item["end_line"] = int(nxt.get("start_line") or 0)
-            else:
-                item["end_marker"] = ""
-                item["end_line"] = 0
-        return merged
-
-    async def contextualize_fields(self, template_text: str, fields: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        keys = []
-        for f in fields or []:
-            key = str((f or {}).get("key") or "").strip()
-            if key:
-                keys.append(key)
-        keys = list(dict.fromkeys(keys))
-        if not keys:
-            return {}
-
-        prompt = f"""
-You are a legal field classifier for template drafting.
-
-Given template text and field keys, assign contextual legal meaning.
-Return strict JSON object:
-{{
-  "field_context": {{
-    "field_key": {{
-      "legal_type": "Date|PartyName|MonetaryAmount|Address|StatuteReference|CaseReference|Relief|Prayer|Ground|GeneralText|Identifier",
-      "description": "what user should provide",
-      "ui_hint": "date_picker|text_input|textarea|number_input|currency_input|multi_select",
-      "validation_hint": "short rule"
-    }}
-  }}
-}}
-
-FIELD KEYS:
-{json.dumps(keys, indent=2)}
-
-TEMPLATE TEXT:
-\"\"\"{template_text}\"\"\"
-"""
-        result = await self._call_gemini(prompt)
-        payload = result.get("field_context") if isinstance(result, dict) else {}
-        return payload if isinstance(payload, dict) else {}
-
-    def _normalize_field(self, field: Any, section_id: str) -> Dict[str, Any]:
-        # Gemini sometimes emits string items in fields/all_fields. Coerce them safely.
-        if isinstance(field, dict):
-            raw_key = field.get("key", "")
-            field_type = field.get("type", "string")
-            label = field.get("label")
-            required = bool(field.get("required", False))
-            default_value = field.get("default_value", "")
-            validation_rules = field.get("validation_rules", "")
-            description = field.get("description")
-            source_section_id = field.get("section_id")
-        else:
-            raw_key = str(field or "")
-            field_type = "string"
-            label = None
-            required = False
-            default_value = ""
-            validation_rules = ""
-            description = None
-            source_section_id = None
-
-        key = re.sub(r"[^a-zA-Z0-9_]+", "_", str(raw_key).strip().lower()).strip("_") or "unnamed_field"
-        return {
-            "key": key,
-            "type": field_type,
-            "label": label or key.replace("_", " ").title(),
-            "required": required,
-            "default_value": default_value,
-            "validation_rules": validation_rules,
-            "description": description or f"Field for {key.replace('_', ' ')}",
-            "section_id": source_section_id or section_id,
+            "deep_indent": std_indent + 8,
+            "right_zone_start": max(int(page_width * 0.65), std_indent + 20),
         }
 
     def _clean_heading_text(self, text: str) -> str:
@@ -416,22 +297,10 @@ TEMPLATE TEXT:
         text = self._clean_heading_text(marker)
         if not text:
             return ""
-        text = re.sub(r"^\s*(?:\d+(?:\.\d+){0,3}|[IVXLCM]+)[\.\)]?\s*", "", text, flags=re.IGNORECASE).strip()
+        # Roman numerals must be followed by punctuation so we never eat the
+        # leading letters of real words (e.g. the "M" in "MOST RESPECTFULLY").
+        text = re.sub(r"^\s*(?:\d+(?:\.\d+){0,3}[\.\)]?|[IVXLCM]+[\.\)])\s*", "", text).strip()
         return self._clean_heading_text(text)
-
-    def _normalize_section_name(self, section_name: str, start_marker: str, index: int) -> str:
-        name = self._clean_heading_text(section_name)
-        marker_name = self._section_name_from_marker(start_marker)
-        noisy = (
-            not name
-            or len(name) > 90
-            or len(name.split()) > 10
-            or "," in name
-            or ";" in name
-        )
-        if marker_name and (noisy or name.lower().startswith("section ")):
-            return marker_name
-        return name or marker_name or f"Section {index + 1}"
 
     def _looks_like_heading(self, line: str) -> bool:
         text = self._clean_heading_text(line)
@@ -439,476 +308,468 @@ TEMPLATE TEXT:
             return False
         if "{{" in text or "}}" in text or "__" in text:
             return False
-        if text.count(":") > 1:
-            return False
-
-        # Exclude lines that are clearly part of a header block and not a structural section
         upper_text = text.upper()
-        exclude_phrases = [
+        exclude_phrases = (
             "IN THE HIGH COURT", "IN THE SUPREME COURT", "IN THE MATTER OF",
             "UNDER ARTICLE", "ORIGINAL JURISDICTION", "CIVIL JURISDICTION",
             "WRIT PETITION NO", "APPLICATION NO", "SUIT NO", "VERSUS", "BETWEEN",
-            "AND IN THE MATTER", "PETITION UNDER", "AFFIDAVIT ON BEHALF", 
-            "DATED THIS", "PRESENTED ON"
-        ]
+            "AND IN THE MATTER", "PETITION UNDER", "AFFIDAVIT ON BEHALF",
+            "DATED THIS", "PRESENTED ON", "RESPECTFULLY SHOWETH",
+            "ADVOCATE FOR", "COUNSEL FOR", "APPELLATE JURISDICTION",
+        )
         if any(phrase in upper_text for phrase in exclude_phrases):
             return False
-
         numbered = re.match(r"^(?:\d+(?:\.\d+){0,3}|[IVXLCM]+)[\.\)]?\s+[A-Z]", text)
         uppercase = bool(re.match(r"^[A-Z][A-Z0-9\s,&/\-\(\)]{3,}$", text)) and not re.search(r"[a-z]", text)
-        titled_legal = bool(
-            re.match(
-                r"^(agreement|parties|party details|definitions|interpretation|recitals|background|facts|grounds|prayer|consideration|term|termination|confidentiality|indemnity|governing law|jurisdiction|dispute resolution|notices|signature|execution|schedule|annexure|witness|property|payment|obligations|rights)\b",
-                text,
-                re.IGNORECASE,
-            )
-        )
-        # Avoid broad title-case matching; it over-captures long clause sentences.
+        titled_legal = bool(re.match(
+            r"^(agreement|parties|party details|definitions|interpretation|recitals|background|facts|grounds|"
+            r"prayer|consideration|term|termination|confidentiality|indemnity|governing law|jurisdiction|"
+            r"dispute resolution|notices|signature|execution|schedule|annexure|witness|property|payment|"
+            r"obligations|rights|verification|declaration|synopsis|list of dates)\b",
+            text, re.IGNORECASE,
+        ))
         return bool(numbered or uppercase or titled_legal)
 
-    def _extract_heading_candidates(self, template_text: str, max_candidates: int = 18) -> List[str]:
-        candidates: List[str] = []
+    _STRONG_HEADING_KEYWORDS = re.compile(
+        r"^(parties|party details|definitions|interpretation|recitals|background|facts|brief facts|grounds|"
+        r"prayer|interim prayer|consideration|term|termination|confidentiality|indemnity|governing law|"
+        r"jurisdiction clause|dispute resolution|notices|signature|execution|schedule|annexure|witness|"
+        r"payment|obligations|verification|declaration|synopsis|list of dates|memo of parties|index)\b",
+        re.IGNORECASE,
+    )
+
+    def _is_strong_heading(self, line: str) -> bool:
+        """Conservative check used for backfilling sections the LLM missed:
+        only numbered headings or canonical legal section keywords qualify,
+        so generic ALL-CAPS boilerplate lines never split real sections."""
+        text = self._clean_heading_text(line)
+        if not self._looks_like_heading(text):
+            return False
+        if re.match(r"^(?:\d+(?:\.\d+){0,3}[\.\)]?|[IVXLCM]+[\.\)])\s+\S", text):
+            return True
+        return bool(self._STRONG_HEADING_KEYWORDS.match(self._section_name_from_marker(text) or text))
+
+    def _heading_candidates(self, template_text: str, max_candidates: int = 60, strict: bool = False) -> List[Dict[str, Any]]:
+        """Detected headings with 1-based line numbers — fed to the LLM as anchor hints."""
+        candidates: List[Dict[str, Any]] = []
         seen = set()
-        for raw_line in str(template_text or "").splitlines():
-            line = self._clean_heading_text(raw_line)
-            if not self._looks_like_heading(line):
+        for idx, raw in enumerate(str(template_text or "").splitlines(), start=1):
+            line = self._clean_heading_text(raw)
+            if strict:
+                if not self._is_strong_heading(line):
+                    continue
+            elif not self._looks_like_heading(line):
                 continue
-            normalized_key = re.sub(r"[^a-z0-9]+", "_", line.lower()).strip("_")
-            if not normalized_key or normalized_key in seen:
+            key = re.sub(r"[^a-z0-9]+", "_", line.lower()).strip("_")
+            if not key or key in seen:
                 continue
-            seen.add(normalized_key)
-            candidates.append(line)
+            seen.add(key)
+            candidates.append({"line": idx, "text": line})
             if len(candidates) >= max_candidates:
                 break
         return candidates
 
-    def _infer_section_category(self, section_name: str) -> str:
-        name = str(section_name or "").lower()
-        if any(k in name for k in ("party", "parties", "vendor", "purchaser", "lessor", "lessee")):
-            return "parties"
-        if any(k in name for k in ("recital", "background", "whereas")):
-            return "recitals"
-        if any(k in name for k in ("fact", "synopsis", "brief facts")):
-            return "facts"
-        if any(k in name for k in ("ground", "basis")):
-            return "grounds"
-        if any(k in name for k in ("prayer", "relief")):
-            return "prayer"
-        if any(k in name for k in ("signature", "execution", "witness")):
-            return "signatures"
-        if any(k in name for k in ("term", "obligation", "consideration", "payment", "confidentiality", "indemnity", "liability")):
-            return "terms"
-        return "other"
+    # ------------------------------------------------------------------
+    # Marker → line resolution and verbatim slicing
+    # ------------------------------------------------------------------
 
-    def _build_missing_sections_from_headings(self, sections: List[Dict[str, Any]], template_text: str) -> List[Dict[str, Any]]:
-        heading_candidates = self._extract_heading_candidates(template_text)
-        if not heading_candidates:
-            return sections
+    @staticmethod
+    def _norm_for_match(text: str) -> str:
+        return re.sub(r"\s+", " ", str(text or "").strip().lower())
 
-        existing_names = {
-            re.sub(r"[^a-z0-9]+", "_", str(section.get("section_name") or "").lower()).strip("_")
-            for section in sections
+    def _resolve_marker_line(self, lines: List[str], marker: str, search_from: int = 1) -> int:
+        """Return 1-based line number of the marker, 0 when unresolved."""
+        target = self._norm_for_match(marker)
+        if not target:
+            return 0
+        # Pass 1: containment match scanning forward from `search_from`.
+        for idx in range(max(search_from, 1), len(lines) + 1):
+            if target in self._norm_for_match(lines[idx - 1]):
+                return idx
+        # Pass 2: relaxed prefix match (first ~30 chars) over the whole document.
+        prefix = target[:30]
+        if len(prefix) >= 8:
+            for idx, line in enumerate(lines, start=1):
+                if prefix in self._norm_for_match(line):
+                    return idx
+        return 0
+
+    def _slice_lines(self, lines: List[str], start_line: int, end_line: int) -> str:
+        start = max(start_line, 1)
+        end = end_line if end_line >= start else len(lines)
+        return "\n".join(lines[start - 1:end]).strip("\n")
+
+    def _detect_segment_fields(self, segment: str) -> List[Dict[str, Any]]:
+        fields: List[Dict[str, Any]] = []
+        seen = set()
+        for pattern, confidence in _PLACEHOLDER_PATTERNS:
+            for match in pattern.finditer(segment):
+                key = _normalize_key(match.group(1))
+                if not key or len(key) < 2 or key in seen:
+                    continue
+                seen.add(key)
+                field_type = _infer_field_type(key)
+                fields.append({
+                    "key": key,
+                    "type": field_type,
+                    "label": _humanize(key),
+                    "required": True,
+                    "description": f"Value for {_humanize(key).lower()} found as a placeholder in the template.",
+                    "legal_type": _legal_type_for(field_type, key),
+                    "ui_hint": _ui_hint_for(field_type),
+                    "confidence": confidence,
+                    "extraction_methods": ["segment_placeholder"],
+                })
+        return fields
+
+    # ------------------------------------------------------------------
+    # Field normalisation
+    # ------------------------------------------------------------------
+
+    def _normalize_field(self, field: Any, section_id: str) -> Dict[str, Any]:
+        if isinstance(field, dict):
+            raw_key = field.get("key") or field.get("field_id") or ""
+            base = dict(field)
+        else:
+            raw_key = str(field or "")
+            base = {}
+        key = _normalize_key(raw_key) or "unnamed_field"
+        field_type = base.get("type") if base.get("type") in FIELD_TYPES else _infer_field_type(key)
+        return {
+            "key": key,
+            "type": field_type,
+            "label": base.get("label") or _humanize(key),
+            "required": bool(base.get("required", True)),
+            "default_value": base.get("default_value", ""),
+            "validation_rules": base.get("validation_rules") or base.get("validation_hint") or "",
+            "description": base.get("description") or f"Field for {_humanize(key).lower()}",
+            "legal_type": base.get("legal_type") or _legal_type_for(field_type, key),
+            "ui_hint": base.get("ui_hint") or _ui_hint_for(field_type),
+            "section_id": base.get("section_id") or section_id,
         }
-        next_order = len(sections)
 
-        for heading in heading_candidates:
-            normalized_name = re.sub(r"[^a-z0-9]+", "_", heading.lower()).strip("_")
-            if not normalized_name or normalized_name in existing_names:
-                continue
-            existing_names.add(normalized_name)
-            sections.append(
-                {
-                    "section_id": f"section_{next_order + 1:03d}",
-                    "section_name": heading,
-                    "section_purpose": f"Draft the {heading} section using the structure and placeholders visible in the source template.",
-                    "section_category": self._infer_section_category(heading),
-                    "order": next_order,
-                    "page_break_before": False,
-                    "estimated_words": 150,
-                    "depends_on": [],
-                    "drafting_prompt": f"Preserve the source heading '{heading}' and reproduce the corresponding clause block in the final draft with the same legal role and formatting intent.",
-                    "format_blueprint": {"alignment": "LEFT", "notes": "Derived from source template heading detection."},
-                    "is_subsection": False,
-                    "parent_section_id": None,
-                    "fields": [],
-                }
-            )
-            next_order += 1
+    # ------------------------------------------------------------------
+    # Deterministic drafting prompt (fidelity-first)
+    # ------------------------------------------------------------------
 
-        sections.sort(key=lambda item: item.get("order", 0))
-        return sections
+    def _build_drafting_prompt(self, section: Dict[str, Any], document_type: str) -> str:
+        source = section.get("source_clauses") or ""
+        fields = section.get("fields") or []
+        field_lines = "\n".join(
+            f'- "{f["key"]}" ({f.get("type", "string")}): {f.get("label", "")} — {f.get("description", "")}'
+            for f in fields if isinstance(f, dict) and f.get("key")
+        ) or "- (no fillable fields detected in this section)"
+        guidance = str(section.get("drafting_guidance") or "").strip()
+        guidance_block = f"\nADDITIONAL DRAFTING GUIDANCE:\n{guidance}\n" if guidance else ""
 
-    def _post_process_analysis(self, result: Dict[str, Any], metrics: Dict[str, int], template_text: str = "") -> Dict[str, Any]:
-        sections = result.get("sections") or []
-        normalized_sections: List[Dict[str, Any]] = []
-        all_fields: List[Dict[str, Any]] = []
-        seen_field_keys = set()
+        return f"""You are drafting the "{section.get('section_name', 'Untitled Section')}" section of a {document_type or 'legal document'}.
 
-        for index, section in enumerate(sections):
-            section_id = section.get("section_id") or f"section_{index + 1:03d}"
-            raw_fields = section.get("fields") or []
-            normalized_fields: List[Dict[str, Any]] = []
-            for field in raw_fields:
-                normalized = self._normalize_field(field, section_id)
-                normalized_fields.append({k: v for k, v in normalized.items() if k != "section_id"})
-                if normalized["key"] not in seen_field_keys:
-                    seen_field_keys.add(normalized["key"])
-                    all_fields.append(normalized)
+SOURCE TEMPLATE SEGMENT (AUTHORITATIVE — extracted verbatim from the uploaded template):
+\"\"\"{source}\"\"\"
 
-            normalized_sections.append(
-                {
-                    "section_id": section_id,
-                    "section_name": self._normalize_section_name(
-                        section.get("section_name", ""),
-                        section.get("start_marker", ""),
-                        index,
-                    ),
-                    "section_purpose": section.get("section_purpose", ""),
-                    "section_category": section.get("section_category", "other"),
-                    "order": section.get("order", index),
-                    "page_break_before": bool(section.get("page_break_before", False)),
-                    "estimated_words": section.get("estimated_words", 150),
-                    "source_clauses": section.get("source_clauses", ""),
-                    "start_marker": section.get("start_marker", ""),
-                    "end_marker": section.get("end_marker", ""),
-                    "start_line": section.get("start_line", 0),
-                    "end_line": section.get("end_line", 0),
-                    "depends_on": section.get("depends_on") or [],
-                    "drafting_prompt": section.get("drafting_prompt", ""),
-                    "format_blueprint": section.get("format_blueprint") or {},
-                    "template_logic": section.get("template_logic", ""),
-                    "required_fields": section.get("required_fields") or [],
-                    "ai_drafting_instruction": section.get("ai_drafting_instruction", ""),
-                    "is_subsection": bool(section.get("is_subsection", False)),
-                    "parent_section_id": section.get("parent_section_id"),
-                    "fields": normalized_fields,
-                }
-            )
+TASK:
+Reproduce this section EXACTLY as it appears in the source segment above — same wording, same clause order, same numbering style, same ALL-CAPS headings, same line breaks and indentation — replacing only the fillable placeholders with the provided values.
 
-            if not normalized_sections[-1]["source_clauses"]:
-                extracted = self._extract_segment_by_markers(
-                    template_text,
-                    normalized_sections[-1].get("start_marker", ""),
-                    normalized_sections[-1].get("end_marker", ""),
-                )
-                if extracted:
-                    normalized_sections[-1]["source_clauses"] = extracted
-            if not normalized_sections[-1]["required_fields"]:
-                normalized_sections[-1]["required_fields"] = [f.get("key") for f in normalized_sections[-1]["fields"] if isinstance(f, dict) and f.get("key")]
-
-        if result.get("all_fields"):
-            for field in result["all_fields"]:
-                default_section_id = field.get("section_id", "") if isinstance(field, dict) else ""
-                normalized = self._normalize_field(field, default_section_id)
-                if normalized["key"] not in seen_field_keys:
-                    seen_field_keys.add(normalized["key"])
-                    all_fields.append(normalized)
-
-        normalized_sections.sort(key=lambda item: item.get("order", 0))
-        # Do not auto-append heuristic "missing sections" here; this can create
-        # noisy subsection-like titles from long numbered clause lines.
-        result["sections"] = normalized_sections
-        result["all_fields"] = all_fields
-        result["total_sections"] = len(normalized_sections)
-        result["page_metrics"] = result.get("page_metrics") or metrics
-        result["document_type"] = result.get("document_type") or "Template"
-        result["template_name"] = result.get("template_name") or "Untitled Template"
-        result["estimated_draft_length"] = result.get("estimated_draft_length") or "Unknown"
-        return result
-
-    async def analyze_template(self, template_text: str, template_file_signed_url: Optional[str] = None):
-        char_count = len(template_text)
-        word_count = len(template_text.split())
-        metrics = self._compute_page_metrics(template_text)
-        blueprint = self._extract_layout_blueprint(template_text, metrics)
-        blueprint_display = self._blueprint_to_display(blueprint, max_lines=700)
-
-        url_context = ""
-        if template_file_signed_url:
-            url_context = f"""
-TEMPLATE DOCUMENT URL (Visual Reference):
-{template_file_signed_url}
-Use this URL to understand the visual layout, tables, and signature blocks that might be hard to parse from raw text.
-"""
-
-        anchor_sections = await self._identify_section_anchors(template_text)
-        for sec in anchor_sections:
-            if not isinstance(sec, dict):
-                continue
-            if not sec.get("start_line"):
-                sec["start_line"] = self._line_number_for_marker(template_text, sec.get("start_marker", ""))
-            if not sec.get("end_line") and sec.get("end_marker"):
-                sec["end_line"] = self._line_number_for_marker(template_text, sec.get("end_marker", ""))
-        anchor_sections = self._merge_and_finalize_anchors(anchor_sections, template_text)
-
-        prompt = f"""
-You are an Advanced Legal Document Engineer and Template Architect.
-Your task is to perform PASS 2 analysis using PASS 1 anchor map.
-
-DOCUMENT CONTEXT:
-- Word Count: {word_count}
-- Character Count: {char_count}
-{url_context}
-
-PAGE METRICS & LAYOUT:
-{json.dumps(metrics, indent=2)}
-
-LAYOUT BLUEPRINT (Line-by-line classification):
-{blueprint_display}
-
-RAW TEMPLATE CONTENT:
-\"\"\"{template_text}\"\"\"
-
-PASS 1 ANCHOR MAP (authoritative boundaries):
-{json.dumps(anchor_sections, indent=2)}
-
-=== CORE ANALYSIS REQUIREMENTS ===
-
-1. STRUCTURAL SECTIONS (ANCHOR-DRIVEN):
-   - Use PASS 1 start_marker/end_marker boundaries as primary section segmentation.
-   - Do NOT invent arbitrary boundaries that conflict with markers.
-   - For each section, return start_marker and end_marker, and extract source_clauses from that exact segment.
-   - Assign clear section_category (header, parties, recitals, facts, grounds, prayer, terms, signatures, schedules, other).
-
-2. INTELLIGENT FIELD EXTRACTION (ENTITY MAPPING):
-   - Extract EVERY fillable field including:
-     - Placeholder tags: _name_, __date__, {{name}}, [amount], etc.
-     - Blanks: "I, _______", "Dated this ___ day of ___".
-     - Implied fields: Even if there are no underscores, if a specific piece of data is required (e.g., the name of the Court in a Petition), mark it as a field.
-   - Format fields PRECISELY:
-     - 'key': snake_case_unique_identifier
-     - 'label': Human-readable Title (e.g., "Monthly Rent Amount", "Petitioner Age")
-     - 'type': string|date|number|currency|address|text_long|boolean
-     - 'description': Clear instruction on what the user should provide.
-
-3. DRAFTING BLUEPRINT (INSTRUCTION SYNTHESIS):
-   - For every section, provide a 'drafting_prompt' that is EXTREMELY detailed and must include:
-     - "Draft based on this structure: [Extracted Template Segment]"
-     - A legal terminology constraint (e.g., use terms like "mala fide", "ultra vires" when relevant to section context)
-   - It should also describe:
-     - The legal tone and intent.
-     - How the placeholders are integrated into the boilerplate.
-     - Specific formatting rules (ALL CAPS, Centered, Numbered lists).
-     - Any conditional logic found (e.g., "if Party B is a company, add GSTIN").
-
-4. JSON OUTPUT CONTRACT:
-{{
-  "template_name": "Accurate, formal name of the template",
-  "document_type": "The specific legal document type",
-  "total_sections": 0,
-  "estimated_draft_length": "e.g., 5-8 Pages",
-  "all_fields": [
-    {{
-      "key": "field_key",
-      "type": "string|date|number|currency|address|text_long|boolean",
-      "label": "Proper Label",
-      "required": true,
-      "description": "Intelligent description of the field's purpose",
-      "section_id": "section_001"
-    }}
-  ],
-  "sections": [
-    {{
-      "section_id": "section_001",
-      "section_name": "Formal Section Heading",
-      "section_purpose": "Briefly explains the legal role of this section",
-      "section_category": "header|parties|recitals|facts|grounds|prayer|terms|signatures|schedules|other",
-      "order": 0,
-      "start_marker": "2. BRIEF FACTS",
-      "end_marker": "3. GROUNDS",
-      "start_line": 42,
-      "end_line": 79,
-      "source_clauses": "THE ACTUAL CORE TEXT OR CLAUSES FROM THE TEMPLATE FOR THIS SECTION",
-      "drafting_prompt": "Draft based on this structure: [Extracted Template Segment]. Ensure legal terminology like 'mala fide' or 'ultra vires' is used where relevant.",
-      "template_logic": "One-line legal logic summary for this section",
-      "required_fields": ["field_one", "field_two"],
-      "ai_drafting_instruction": "A precise production-grade drafting instruction for this section",
-      "format_blueprint": {{"alignment": "LEFT|CENTER|RIGHT", "is_bold": true, "has_border": false}},
-      "fields": []
-    }}
-  ]
-}}
+FIELDS TO FILL:
+{field_lines}
 
 STRICT RULES:
-- Return ONLY valid JSON.
-- Ensure every field is tied to its correct section.
-- Be thorough. Do not skip any part of the template.
-- Identify at least 5-15 sections for complex documents.
-"""
+1. ZERO REWRITING: Do not paraphrase, shorten, expand, or "improve" any clause. The source segment is legally settled boilerplate.
+2. PLACEHOLDER RESOLUTION: Replace placeholders (__field__, {{{{field}}}}, [field], blanks) with the supplied values. If a value is missing, keep the placeholder exactly as-is — never guess.
+3. FORMATTING FIDELITY: Preserve line breaks, indentation, numbering (1., 1.1, (a), A.), ALL-CAPS headings, and centered header blocks.
+4. LEGAL LANGUAGE: Keep court phrases verbatim (e.g. "MOST RESPECTFULLY SHOWETH", "It is most respectfully prayed").
+5. SCOPE: Output ONLY this section — no preceding or following sections, no commentary, no markdown.
+{guidance_block}"""
 
-        result = await self._call_gemini(prompt)
-        result = self._post_process_analysis(result, metrics, template_text)
-        print(f"DEBUG: Extracted {len(result.get('sections', []))} logical sections from {word_count} word document")
-        return result
+    # ------------------------------------------------------------------
+    # Main analysis pipeline
+    # ------------------------------------------------------------------
 
-    async def generate_section_prompts(self, section_data: dict):
-        # We now use the 'source_clauses' and 'drafting_prompt' from the analysis phase
-        # to generate a PERECT, comprehensive prompt for the draft generator.
-        
+    def _build_analysis_prompt(
+        self,
+        template_text: str,
+        headings: List[Dict[str, Any]],
+        metrics: Dict[str, int],
+        template_file_signed_url: Optional[str],
+    ) -> str:
+        prompt_text = template_text
+        truncated_note = ""
+        if len(prompt_text) > MAX_PROMPT_TEMPLATE_CHARS:
+            prompt_text = prompt_text[:MAX_PROMPT_TEMPLATE_CHARS]
+            truncated_note = "\nNOTE: the template was truncated for this prompt; still identify every section heading you can see.\n"
+
+        headings_block = "\n".join(f"  line {h['line']}: {h['text']}" for h in headings) or "  (no headings auto-detected)"
+        url_block = f"\nTEMPLATE DOCUMENT URL (visual reference for layout/tables/signature blocks):\n{template_file_signed_url}\n" if template_file_signed_url else ""
+
+        return f"""You are an expert Legal Document Engineer analyzing an uploaded legal template (Indian legal practice).
+
+Your job: segment the template into its logical drafting sections and identify every fillable field. You do NOT copy section text — boundaries only. Another system slices the text verbatim using your start_marker values, so marker accuracy is critical.
+{url_block}
+PAGE METRICS: {json.dumps(metrics)}
+
+AUTO-DETECTED HEADING CANDIDATES (line numbers are 1-based; use these as anchors, correct or extend them as needed):
+{headings_block}
+
+REQUIREMENTS:
+1. SECTIONS — cover the ENTIRE template top to bottom, in document order, with no gaps:
+   - The court/document header block (cause title, party blocks, "IN THE MATTER OF", VERSUS) is its own "header" section.
+   - Every numbered or ALL-CAPS heading (FACTS, GROUNDS, PRAYER, VERIFICATION, schedules, annexures, signature blocks…) is a section.
+   - start_marker MUST be an EXACT phrase copied verbatim from a single line of the source where the section begins (prefer the heading line itself, including its number, e.g. "2. BRIEF FACTS AND BACKGROUND").
+   - section_name: clean formal heading (no clause text). section_purpose: one sentence on its legal role.
+   - drafting_guidance: tone, mandatory legal terminology (e.g. "mala fide", "ultra vires" where relevant), formatting rules (ALL CAPS / centered / numbered list style), and any conditional logic visible in the template.
+2. FIELDS — for each section list every fillable field:
+   - Explicit placeholders: {{{{name}}}}, __date__, _field_, [amount], "I, _______", "___ day of ___".
+   - Implied fields: data a drafter must supply even without a blank (court name, party names, dates, amounts).
+   - key = snake_case; label = human readable; type/legal_type/ui_hint per the schema enums.
+3. Also return template_name (formal), document_type (specific legal document type), estimated_draft_length (e.g. "5-8 pages").
+
+SOURCE TEMPLATE:
+\"\"\"{prompt_text}\"\"\"{truncated_note}"""
+
+    def _finalize_sections(
+        self,
+        llm_sections: List[Dict[str, Any]],
+        template_text: str,
+        document_type: str,
+    ) -> List[Dict[str, Any]]:
+        lines = template_text.splitlines()
+
+        # 1. Resolve every LLM section's start_marker to a line number.
+        resolved: List[Dict[str, Any]] = []
+        seen_lines = set()
+        cursor = 1
+        for section in llm_sections:
+            if not isinstance(section, dict):
+                continue
+            marker = self._clean_heading_text(section.get("start_marker", ""))
+            line_no = self._resolve_marker_line(lines, marker, search_from=cursor)
+            if line_no == 0 or line_no in seen_lines:
+                # Unresolvable/duplicate boundary — merge its fields into the previous section.
+                if resolved and section.get("fields"):
+                    resolved[-1].setdefault("_extra_fields", []).extend(section["fields"])
+                logger.info("Dropping unresolvable section boundary: %r", marker)
+                continue
+            seen_lines.add(line_no)
+            cursor = line_no
+            resolved.append({**section, "start_marker": marker, "start_line": line_no})
+
+        # 2. Backfill with deterministic heading anchors the LLM missed
+        #    (strict mode: numbered or canonical legal headings only).
+        for heading in self._heading_candidates(template_text, strict=True):
+            if heading["line"] in seen_lines:
+                continue
+            near_existing = any(abs(heading["line"] - ln) <= 1 for ln in seen_lines)
+            if near_existing:
+                continue
+            seen_lines.add(heading["line"])
+            resolved.append({
+                "section_name": self._section_name_from_marker(heading["text"]) or heading["text"],
+                "section_category": "other",
+                "section_purpose": f"Draft the {heading['text']} section as structured in the source template.",
+                "start_marker": heading["text"],
+                "start_line": heading["line"],
+                "drafting_guidance": "",
+                "fields": [],
+            })
+
+        if not resolved:
+            resolved = [{
+                "section_name": "Full Document",
+                "section_category": "other",
+                "section_purpose": "Complete template content.",
+                "start_marker": lines[0].strip() if lines else "",
+                "start_line": 1,
+                "drafting_guidance": "",
+                "fields": [],
+            }]
+
+        resolved.sort(key=lambda s: s["start_line"])
+        # The first section owns everything from the top of the document
+        # (court header lines usually precede the first detected heading).
+        resolved[0]["start_line"] = 1
+
+        # 3. Compute end boundaries, slice verbatim text, normalise fields,
+        #    and build the deterministic drafting prompt.
+        finalized: List[Dict[str, Any]] = []
+        for index, section in enumerate(resolved):
+            nxt = resolved[index + 1] if index + 1 < len(resolved) else None
+            end_line = (nxt["start_line"] - 1) if nxt else len(lines)
+            source_clauses = self._slice_lines(lines, section["start_line"], end_line)
+
+            section_id = f"section_{index + 1:03d}"
+            raw_fields = list(section.get("fields") or []) + list(section.get("_extra_fields") or [])
+            normalized_fields: List[Dict[str, Any]] = []
+            seen_keys = set()
+            for field in raw_fields:
+                normalized = self._normalize_field(field, section_id)
+                if normalized["key"] in seen_keys:
+                    continue
+                seen_keys.add(normalized["key"])
+                normalized_fields.append(normalized)
+            # Deterministic sweep: placeholders physically present in this segment.
+            for field in self._detect_segment_fields(source_clauses):
+                if field["key"] in seen_keys:
+                    continue
+                seen_keys.add(field["key"])
+                field["section_id"] = section_id
+                normalized_fields.append(self._normalize_field(field, section_id))
+
+            name = self._clean_heading_text(section.get("section_name", "")) or \
+                self._section_name_from_marker(section.get("start_marker", "")) or f"Section {index + 1}"
+            category = section.get("section_category") if section.get("section_category") in SECTION_CATEGORIES else "other"
+
+            entry = {
+                "section_id": section_id,
+                "section_name": name,
+                "section_purpose": section.get("section_purpose", ""),
+                "section_category": category,
+                "order": index,
+                "page_break_before": bool(section.get("page_break_before", False)),
+                "estimated_words": max(len(source_clauses.split()), 50),
+                "source_clauses": source_clauses,
+                "start_marker": section.get("start_marker", ""),
+                "end_marker": (nxt or {}).get("start_marker", ""),
+                "start_line": section["start_line"],
+                "end_line": end_line,
+                "depends_on": [],
+                "drafting_guidance": section.get("drafting_guidance", ""),
+                "template_logic": section.get("template_logic", ""),
+                "required_fields": [f["key"] for f in normalized_fields],
+                "format_blueprint": {"alignment": "LEFT", "notes": "Reproduce alignment exactly as in source_clauses."},
+                "is_subsection": False,
+                "parent_section_id": None,
+                "fields": normalized_fields,
+            }
+            entry["drafting_prompt"] = self._build_drafting_prompt(entry, document_type)
+            entry["ai_drafting_instruction"] = entry["drafting_prompt"]
+            finalized.append(entry)
+        return finalized
+
+    async def analyze_template(self, template_text: str, template_file_signed_url: Optional[str] = None) -> Dict[str, Any]:
+        template_text = str(template_text or "")
+        if not template_text.strip():
+            raise ValueError("Template text is empty — nothing to analyze.")
+
+        word_count = len(template_text.split())
+        metrics = self._compute_page_metrics(template_text)
+        headings = self._heading_candidates(template_text)
+
+        prompt = self._build_analysis_prompt(template_text, headings, metrics, template_file_signed_url)
+        result = await self._call_gemini(prompt, schema=ANALYSIS_SCHEMA)
+        if not isinstance(result, dict):
+            raise ValueError("Analysis response was not a JSON object.")
+
+        document_type = str(result.get("document_type") or "Legal Document")
+        sections = self._finalize_sections(result.get("sections") or [], template_text, document_type)
+
+        all_fields: List[Dict[str, Any]] = []
+        seen_keys = set()
+        for section in sections:
+            for field in section["fields"]:
+                if field["key"] in seen_keys:
+                    continue
+                seen_keys.add(field["key"])
+                all_fields.append(dict(field))
+
+        analysis = {
+            "template_name": str(result.get("template_name") or "Untitled Template"),
+            "document_type": document_type,
+            "estimated_draft_length": str(result.get("estimated_draft_length") or f"~{max(word_count // 350, 1)} pages"),
+            "total_sections": len(sections),
+            "page_metrics": metrics,
+            "sections": sections,
+            "all_fields": all_fields,
+        }
+        logger.info(
+            "Template analyzed: %d sections, %d fields from a %d-word document.",
+            len(sections), len(all_fields), word_count,
+        )
+        return analysis
+
+    # ------------------------------------------------------------------
+    # Downstream helpers (deterministic — no extra LLM latency)
+    # ------------------------------------------------------------------
+
+    async def generate_section_prompts(self, section_data: dict) -> Dict[str, Any]:
+        """
+        Build the per-section master drafting instruction deterministically.
+        The verbatim source segment is already the ground truth, so an extra
+        LLM round-trip per section adds latency without adding fidelity.
+        """
         section_name = section_data.get("section_name", "Untitled Section")
-        source_text = section_data.get("source_clauses", "")
-        base_prompt = section_data.get("drafting_prompt", "")
-        fields = section_data.get("fields", [])
-        start_marker = section_data.get("start_marker", "")
-        end_marker = section_data.get("end_marker", "")
-        
-        prompt = f"""
-You are creating a PERFECT DRAFTING INSTRUCTION for a legal document section: "{section_name}".
+        source_text = str(section_data.get("source_clauses") or "")
+        fields = section_data.get("fields", []) or []
+        word_count = len(source_text.split())
 
-INPUT DATA:
-- Source Template Clauses:
-\"\"\"{source_text}\"\"\"
+        master_prompt = section_data.get("drafting_prompt") or self._build_drafting_prompt(
+            section_data, section_data.get("document_type", "legal document"),
+        )
+        complexity = "simple" if word_count < 120 else ("moderate" if word_count < 450 else "complex")
 
-- Section Anchors:
-  start_marker: "{start_marker}"
-  end_marker: "{end_marker}"
+        return {
+            "section_intro": (
+                f'The "{section_name}" section will be reproduced exactly as structured in your uploaded template, '
+                f"with {len(fields)} fillable field(s) merged into the original legal language."
+            ),
+            "drafting_complexity": complexity,
+            "estimated_output_words": max(word_count, 50),
+            "constraint_set": [
+                "Reproduce the source template segment verbatim — no paraphrasing or restructuring.",
+                "Replace only the fillable placeholders with user-provided values; keep missing placeholders as-is.",
+                "Preserve numbering, indentation, ALL-CAPS headings, and court-style phrases exactly.",
+                "Do not add clauses, facts, or legal citations that are not in the source segment.",
+            ],
+            "field_prompts": [{"field_id": "master_instruction", "prompt": master_prompt}],
+            "dependencies": section_data.get("depends_on", []) or [],
+            "legal_references": [],
+        }
 
-- Intermediate Drafting Blueprint:
-{base_prompt}
+    async def contextualize_fields(self, template_text: str, fields: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """
+        Deterministic legal-type/ui-hint enrichment for fields that were merged
+        in from the hybrid extractor (analysis-call fields already carry these).
+        """
+        context: Dict[str, Dict[str, Any]] = {}
+        for field in fields or []:
+            if not isinstance(field, dict):
+                continue
+            key = _normalize_key(field.get("key") or "")
+            if not key:
+                continue
+            field_type = field.get("type") if field.get("type") in FIELD_TYPES else _infer_field_type(key)
+            context[key] = {
+                "legal_type": field.get("legal_type") or _legal_type_for(field_type, key),
+                "ui_hint": field.get("ui_hint") or _ui_hint_for(field_type),
+                "description": field.get("description") or f"Provide the {_humanize(key).lower()}.",
+                "validation_hint": field.get("validation_rules") or "",
+            }
+        return context
 
-- Associated Fields:
-{json.dumps(fields, indent=2)}
+    # ------------------------------------------------------------------
+    # Drafting-time endpoints
+    # ------------------------------------------------------------------
 
-YOUR TASK:
-Generate a comprehensive, expert-level master instruction that will guide an AI to draft this section PERFECTLY.
-The instruction must ensure:
-1. Legal precision: Maintain the exact legal tone and binding language found in the source clauses.
-2. Perfect Placeholder Integration: Explain exactly how each field should be woven into the text.
-3. Formatting Fidelity: Specify alignment, numbering, bolding, and spacing to match the template.
-4. Completeness: Ensure no boilerplate or critical legal proviso is omitted.
-5. Constraint Set: Include explicit drafting constraints and terminology guardrails.
+    async def validate_input(self, field_info: dict, user_input: str) -> Dict[str, Any]:
+        prompt = f"""Validate a user's input for a legal template field.
 
-Return strict JSON:
-{{
-    "section_intro": "A high-level conversational summary of how this section will be drafted professionally.",
-    "drafting_complexity": "simple|moderate|complex",
-    "estimated_output_words": 300,
-    "constraint_set": [
-        "Draft based on this structure: [Extracted Template Segment]",
-        "Use legal terminology like mala fide or ultra vires where contextually relevant",
-        "Do not add facts not inferable from the template segment"
-    ],
-    "field_prompts": [
-        {{
-            "field_id": "master_instruction",
-            "prompt": "THE PERFECT MASTER PROMPT: A detailed, step-by-step drafting guide for the entire section, incorporating legal nuances and field placement."
-        }}
-    ],
-    "dependencies": ["List any preceding sections whose context is needed"],
-    "legal_references": ["Relevant Acts or standard legal practices identified in this section"]
-}}
-"""
-        return await self._call_gemini(prompt)
-
-    async def validate_input(self, field_info: dict, user_input: str):
-        prompt = f"""
-Act as Antigravity validation system.
-
-FIELD RULES: {json.dumps(field_info)}
+FIELD RULES: {json.dumps(field_info, ensure_ascii=False)}
 USER INPUT: "{user_input}"
 
-OUTPUT:
-{{"valid": true}}
-OR
-{{"valid": false, "error_prompt": "Explain the problem", "suggestion": "Optional guidance"}}
-"""
-        return await self._call_gemini(prompt)
+Return valid=true when the input satisfies the field's type and rules; otherwise valid=false with a short error_prompt and an optional suggestion."""
+        result = await self._call_gemini(prompt, schema=VALIDATION_SCHEMA)
+        return result if isinstance(result, dict) else {"valid": True}
 
-    async def generate_section_content(self, section_data: dict, field_values: dict):
-        # This function is used when drafting the actual document
-        prompt = f"""
-You are a Senior Legal Drafting Engine specialized in Indian court pleadings and legal templates.
+    async def generate_section_content(self, section_data: dict, field_values: dict) -> str:
+        drafting_prompt = section_data.get("drafting_prompt") or self._build_drafting_prompt(
+            section_data, section_data.get("document_type", "legal document"),
+        )
+        prompt = f"""{drafting_prompt}
 
-Your role is NOT to generate new content.
-Your role is to STRICTLY COMPILE a legal section from a template blueprint using provided values.
+USER VALUES (FINAL DATA):
+{json.dumps(field_values, indent=2, ensure_ascii=False)}
 
-=====================================
-SECTION METADATA
-=====================================
-{json.dumps({
-  "section_name": section_data.get("section_name"),
-  "section_category": section_data.get("section_category"),
-  "format_blueprint": section_data.get("format_blueprint")
-}, indent=2)}
-
-=====================================
-SOURCE TEMPLATE (AUTHORITATIVE)
-=====================================
-\"\"\"{section_data.get("source_clauses", "")}\"\"\"
-
-=====================================
-DRAFTING INSTRUCTIONS (STRICT)
-=====================================
-{section_data.get("drafting_prompt", "")}
-
-=====================================
-FIELDS (STRICT MAPPING REQUIRED)
-=====================================
-{json.dumps(section_data.get("fields", []), indent=2)}
-
-=====================================
-USER VALUES (FINAL DATA)
-=====================================
-{json.dumps(field_values, indent=2)}
-
-=====================================
-COMPILATION RULES (CRITICAL)
-=====================================
-
-1. ZERO HALLUCINATION:
-   - Do NOT invent legal clauses.
-   - Do NOT add new sentences unless required for grammar.
-   - Stay максимально faithful to SOURCE TEMPLATE.
-
-2. TEMPLATE COMPILATION MODE:
-   - Treat SOURCE TEMPLATE as base code.
-   - Replace placeholders using USER VALUES.
-   - Preserve original legal language, tone, and structure.
-
-3. PLACEHOLDER RESOLUTION:
-   - Replace ALL placeholders like:
-     - __field__
-     - {{field}}
-     - blanks
-   - If value is missing:
-     - KEEP placeholder AS-IS (do NOT guess)
-
-4. FORMATTING STRICTNESS:
-   - Maintain:
-     - line breaks
-     - indentation
-     - numbering (1., 1.1, a), etc.)
-     - ALL CAPS sections
-   - Follow:
-     {json.dumps(section_data.get("format_blueprint", {}), indent=2)}
-
-5. LEGAL STYLE ENFORCEMENT:
-   - Maintain court language like:
-     - "MOST RESPECTFULLY SHOWETH"
-     - "It is most respectfully prayed"
-   - Do NOT simplify or paraphrase legal phrases
-
-6. SECTION BOUNDARY:
-   - Generate ONLY this section
-   - Do NOT include next/previous sections
-
-7. OUTPUT PURITY:
-   - No explanations
-   - No JSON inside content
-   - No markdown
-
-=====================================
-FINAL OUTPUT FORMAT
-=====================================
-
-Return STRICT JSON ONLY:
-
-{{
-  "section_name": "{section_data.get("section_name")}",
-  "content": "FULLY COMPILED LEGAL SECTION TEXT"
-}}
-"""
-        response = await self._call_gemini(prompt)
-        return response.get("content", "")
-
-
+Return the fully compiled section text in the "content" field. Output the section text only — no explanations, no markdown."""
+        result = await self._call_gemini(prompt, schema=SECTION_CONTENT_SCHEMA)
+        if isinstance(result, dict):
+            return str(result.get("content") or "")
+        return ""

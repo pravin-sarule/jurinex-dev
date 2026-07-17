@@ -10,6 +10,7 @@ POST /api/extract-fields — InjectionAgent: extract template fields from docume
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from typing import Any, Dict, List, Optional
@@ -57,7 +58,8 @@ async def ingest_document(
 
     try:
         from agents.ingestion.agent import run_ingestion_agent
-        result = run_ingestion_agent(payload)
+        # Blocking pipeline (GCS + Document AI + embeddings) — keep it off the event loop.
+        result = await asyncio.to_thread(run_ingestion_agent, payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -122,7 +124,8 @@ async def extract_fields(
             "source_document_id": body.source_document_id,
             "raw_text": body.raw_text,
         }
-        result = run_autopopulation_agent(payload)
+        # Multiple LLM calls inside — run in a worker thread, not on the event loop.
+        result = await asyncio.to_thread(run_autopopulation_agent, payload)
 
     except Exception as e:
         logger.exception("[API] extract-fields failed unexpectedly")
@@ -190,7 +193,10 @@ async def orchestrate_upload(
 
     try:
         orchestrator = get_orchestrator()
-        result = orchestrator.run(user_input="upload document", upload_payload=upload_payload)
+        # Blocking pipeline (GCS + Document AI + embeddings) — keep it off the event loop.
+        result = await asyncio.to_thread(
+            orchestrator.run, user_input="upload document", upload_payload=upload_payload
+        )
         logger.info("Orchestrator run completed. Agent tasks: %s", result.get("agent_tasks", []))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -226,7 +232,9 @@ async def orchestrate_upload(
                 "draft_session_id": draft_id_from_upload,
                 "file_ids": [file_id],
             }
-            autopopulation_result = run_autopopulation_agent(autopopulation_payload)
+            autopopulation_result = await asyncio.to_thread(
+                run_autopopulation_agent, autopopulation_payload
+            )
             logger.info(
                 "Autopopulation completed: status=%s, extracted=%d fields",
                 autopopulation_result.get("status"),

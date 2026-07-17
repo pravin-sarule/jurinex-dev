@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import logging
 import re
 import time
@@ -413,10 +414,16 @@ def _split_text_for_sse_stream(text: str, *, max_chunk_chars: int = 48) -> list[
     separator, and rows must each stay on their own line) when a table row is split
     across several stream deltas. We break on a nearby space/newline for nicer
     word-by-word streaming, but never add, drop, or collapse any character.
+
+    Only for answers that arrive WHOLE (vector path / non-stream fallback — notably Gemma
+    under GEMMA_DISABLE_STREAMING, whose reply lands in one piece). A live provider stream
+    already emits its own deltas: never re-split those here, or the UI is paced twice.
     """
     text = text or ""
     if not text:
         return []
+    if len(text) <= max_chunk_chars:
+        return [text]
     chunks: list[str] = []
     i, n = 0, len(text)
     while i < n:
@@ -495,9 +502,13 @@ async def _yield_text_as_streaming_chunks(
     sse_fn,
     text: str,
     *,
-    delay_ms: int,
+    delay_ms: int = 0,
 ) -> AsyncGenerator[str, None]:
-    """Emit type=chunk SSE events; optional delay between chunks from summarization_chat_config."""
+    """Emit type=chunk SSE events; optional delay between chunks from summarization_chat_config.
+
+    delay_ms is admin-configurable (llm_chat_config.get_streaming_delay_ms) and defaults to 0, i.e.
+    no pacing — so callers that omit it behave exactly as if the parameter did not exist.
+    """
     import asyncio
 
     for piece in _split_text_for_sse_stream(text):
@@ -505,6 +516,117 @@ async def _yield_text_as_streaming_chunks(
             yield sse_fn({"type": "chunk", "text": piece})
         if delay_ms > 0:
             await asyncio.sleep(delay_ms / 1000.0)
+
+
+async def _stream_blocking_generator(loop, gen_factory, *, label: str) -> AsyncGenerator[str, None]:
+    """
+    Bridge a blocking token generator (Claude/DeepSeek SDK stream) into async.
+
+    Runs the generator in a worker thread, pushes deltas through a queue, and
+    coalesces whatever deltas are already waiting into a single yield so slow
+    consumers get fewer, larger SSE frames instead of thousands of tiny ones.
+    """
+    import asyncio
+
+    sentinel = object()
+    queue: asyncio.Queue = asyncio.Queue()
+    errors: list[str] = []
+    done = False
+
+    def _run() -> None:
+        try:
+            for piece in gen_factory():
+                loop.call_soon_threadsafe(queue.put_nowait, piece)
+        except Exception as exc:  # surfaced after drain below
+            errors.append(str(exc))
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, sentinel)
+
+    future = loop.run_in_executor(None, _run)
+    while not done:
+        piece = await queue.get()
+        if piece is sentinel:
+            break
+        parts: list[str] = [piece] if piece else []
+        while True:  # drain already-queued deltas into one frame
+            try:
+                nxt = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if nxt is sentinel:
+                done = True
+                break
+            if nxt:
+                parts.append(nxt)
+        if parts:
+            yield "".join(parts)
+    try:
+        await future
+    except Exception as exc:
+        errors.append(str(exc))
+    if errors:
+        raise RuntimeError(f"{label}_stream_failed: {errors[0]}")
+
+
+def _text_flag(value: Any) -> bool:
+    """
+    Parse folder_chats.used_secret_prompt — a TEXT column holding 'true'/'false'.
+    bool('false') is True in Python, so a plain bool() cast misclassifies every
+    custom question as a preset.
+    """
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("true", "t", "1", "yes")
+
+
+# Document-context character budgets sized to each provider's real context
+# window (≈4 chars/token, leaving room for system prompt + question + output).
+# A fixed small cap here silently drops document text and makes the model
+# answer "Not mentioned in the document." for anything past the cutoff.
+_PROVIDER_CONTEXT_CHAR_BUDGET = {
+    "gemini": 800_000,   # ~200k tokens of a 1M-token window
+    "claude": 600_000,   # ~150k tokens of a 200k-token window
+    "deepseek": 380_000,  # ~95k tokens of a 128k-token window
+}
+
+
+def _build_document_context(doc_texts: list[dict[str, Any]], char_limit: int) -> str:
+    """
+    Join document texts into one context block within char_limit.
+
+    When the combined text exceeds the budget, every document receives a fair
+    share (smaller documents donate unused allowance to larger ones) instead of
+    the first document consuming the entire budget and later ones being dropped.
+    """
+    docs = [
+        (str(d.get("name") or "document"), (d.get("text") or "").strip())
+        for d in doc_texts or []
+    ]
+    docs = [(name, text) for name, text in docs if text]
+    if not docs:
+        return ""
+    overhead = sum(len(f"[Document: {name}]\n") for name, _ in docs) + 7 * (len(docs) - 1)
+    budget = max(0, char_limit - overhead)
+    total = sum(len(text) for _, text in docs)
+    allocations: dict[int, int] = {}
+    if total <= budget:
+        allocations = {i: len(text) for i, (_, text) in enumerate(docs)}
+    else:
+        remaining = budget
+        # Smallest docs first: they fit whole and donate leftover share.
+        pending = sorted(range(len(docs)), key=lambda i: len(docs[i][1]))
+        while pending:
+            share = remaining // len(pending)
+            index = pending.pop(0)
+            take = min(len(docs[index][1]), share)
+            allocations[index] = take
+            remaining -= take
+    parts = [
+        f"[Document: {name}]\n{text[: allocations[i]]}"
+        for i, (name, text) in enumerate(docs)
+        if allocations.get(i)
+    ]
+    return "\n\n---\n\n".join(parts)
 
 
 @router.post("/internal/analytics/users")
@@ -1939,6 +2061,27 @@ def import_google_drive_documents(
     return queue_result
 
 
+@router.post("/{folder_name}/clean-chunks")
+def clean_case_chunk_text(
+    folder_name: str,
+    llm: bool = Query(default=True, description="Use LLM reconstruction for chunks still fragmented after the deterministic pass."),
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """
+    Re-clean the text of a case's ALREADY-stored chunks IN PLACE (no PDF re-OCR,
+    no re-embedding; embeddings and chat history are kept).
+
+    Two passes per chunk: a free deterministic OCR-artefact repair, then — when
+    `llm=true` (default) and the chunk still looks fragmented — an LLM
+    reconstruction pass that repairs arbitrary fragments (names/places, "p .a .",
+    "18 %") a dictionary cannot. Run once per case after the OCR-cleanup work.
+    Pass `?llm=false` for the deterministic-only (free) pass.
+    """
+    user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
+    return get_folder_service().clean_existing_chunk_text(user_id, folder_name, use_llm=llm)
+
+
 def _build_signed_upload(user_id: str, folder_name: str, request: GenerateUploadUrlRequest, llm_config: dict[str, Any] | None = None) -> dict[str, Any]:
     safe_name = (request.filename or f"upload-{uuid.uuid4().hex[:8]}").replace("\\", "_").replace("/", "_")
     object_path = str(PurePosixPath(user_id) / "documents" / folder_name / f"{uuid.uuid4().hex[:10]}_{safe_name}")
@@ -2762,6 +2905,10 @@ async def intelligent_chat_stream(
             deepseek_stream_generator,
             normalize_markdown_render_output,
         )
+        from app.services.prompt_orchestration import (
+            PERMANENT_SYSTEM_PROMPT,
+            format_instruction_for_query,
+        )
 
         async def _run_blocking(func, *, timeout_s: float, timeout_message: str):
             try:
@@ -2859,9 +3006,19 @@ async def intelligent_chat_stream(
         if not query_text:
             yield _sse({"type": "error", "message": "Please enter a question."})
             return
-        requested_model_name = (chat_request.llm_name or "").strip()
-        if requested_model_name.lower() in {"", "gemini", "claude", "deepseek", "default"}:
+        requested_model_name = str(chat_request.llm_name or "").strip()
+        # The UI may send a bare provider label instead of a concrete model id.
+        # Map "deepseek"/"claude" to their configured model so the request actually
+        # routes to that provider; "gemini"/"default"/"" fall back to the agent's
+        # own model (Gemini). Without this, "deepseek" was blanked and free-text
+        # questions silently fell back to the Gemini QA agent.
+        _provider_label = requested_model_name.lower()
+        if _provider_label in {"", "gemini", "default"}:
             requested_model_name = ""
+        elif _provider_label == "deepseek":
+            requested_model_name = get_settings().deepseek_model
+        elif _provider_label == "claude":
+            requested_model_name = get_settings().claude_model
         selected_model_name = resolve_secret_prompt_llm_name(chat_request.secret_id) or requested_model_name or None
         # ── Admin-panel model control ────────────────────────────────────────────────
         # When the user did NOT explicitly pick a model in chat (no secret-prompt model, no dropdown),
@@ -3003,16 +3160,7 @@ async def intelligent_chat_stream(
             )
             return
 
-        resolved_chat_request = chat_request.model_copy(
-            update={
-                "question": query_text,
-                "prompt_label": display_question,
-            }
-        )
-
         # Conversation continuity: include last N Q/A pairs (case-wise) when configured.
-        # The vector path (answer_case_folder_chat → FolderService.answer_folder_chat) already
-        # applies this. The DB+Gemini fallback path below must do it explicitly too.
         effective_query_text = query_text
         try:
             effective_query_text = folder_service._build_query_with_recent_history(  # noqa: SLF001
@@ -3068,10 +3216,14 @@ async def intelligent_chat_stream(
         yield _sse({"type": "status", "status": "analyzing", "message": "Analyzing query intent..."})
         yield _sse({"type": "thinking", "text": "Understanding your question and selecting the best answer path...\n"})
 
-        # ── Step 2: try the in-memory vector store path (disabled in learning mode) ──
-        vector_result = None
+        # ── Step 2: direct streaming generation ──
+        # NOTE: the old "vector path" pre-attempt was removed deliberately. It ran
+        # a full non-stream RAG+LLM call under a 3s timeout that always expired;
+        # the abandoned executor thread then finished minutes later and saved a
+        # DUPLICATE chat row under a NEW session (with the resolved prompt body
+        # leaked as the question) — doubling LLM cost per message and splitting
+        # chat history into one-off sessions in the sidebar.
         vector_error: str | None = None
-        vector_timeout_s = 3.0
         if learning_mode:
             yield _sse(
                 {
@@ -3086,150 +3238,13 @@ async def intelligent_chat_stream(
                     "text": "Using Learning Mode: case-grounded teaching (system prompt from configuration)...\n",
                 }
             )
-        else:
-            # Vector "fast path" disabled. answer_case_folder_chat() runs a FULL non-stream Gemma
-            # generation that can't finish within vector_timeout_s for a thinking model, so it
-            # always timed out — and since a worker thread can't be cancelled, that discarded
-            # generation kept running to completion, costing a SECOND Gemma call per answer
-            # (wasted tokens + rate-limit pressure). The DB+Gemini fallback below now performs the
-            # same focused retrieval and streams the answer, so this path is redundant. Skipping
-            # it removes the waste; behaviour is otherwise identical (the fallback always ran).
-            vector_result = None
-            yield _sse({"type": "thinking", "text": "Retrieving the most relevant passages...\n"})
-
-        # ── Step 3: if vector path succeeded and has a real answer, stream it ──
-        if vector_result is not None:
-            answer_segments = vector_result.get("answer_segments") or []
-            full_answer = vector_result.get("answer") or ""
-            has_real_content = bool(answer_segments) or bool(full_answer.strip())
-
-            if has_real_content:
-                yield _sse({"type": "thinking", "text": "Found relevant chunks. Drafting grounded answer...\n"})
-                session_id = vector_result.get("session_id") or chat_request.session_id or ""
-                yield _sse({
-                    "type": "metadata",
-                    "session_id": session_id,
-                    "method": "grounded_retrieval",
-                    "routing_decision": "vector_search",
-                })
-                if answer_segments:
-                    vector_answer_text = "\n".join(
-                        (
-                            segment.get("statement", "")
-                            if isinstance(segment, dict)
-                            else getattr(segment, "statement", "")
-                        )
-                        for segment in answer_segments
-                    ).strip()
-                else:
-                    vector_answer_text = (full_answer or "").strip()
-
-                request_id = uuid.uuid4().hex[:12]
-                model_name = str(selected_model_name or (llm_config or {}).get("llm_model") or "unknown")
-                usage_totals = flush_aggregated_token_usage_table(
-                    usage_session_key,
-                    endpoint="/api/files/{folder}/intelligent-chat/stream",
-                    user_id=uid_int,
-                    session_id=str(session_id or ""),
-                    request_id=request_id,
-                    model_name=model_name,
-                    answer_length=len(vector_answer_text),
-                    routing="grounded_retrieval",
-                ) or {
-                    "inputTokens": estimate_tokens_from_text(query_text),
-                    "outputTokens": estimate_tokens_from_text(vector_answer_text),
-                    "totalTokens": estimate_tokens_from_text(query_text) + estimate_tokens_from_text(vector_answer_text),
-                }
-                log_llm_usage(
-                    user_id=uid_int,
-                    model_name=model_name,
-                    input_tokens=usage_totals.get("inputTokens") or 0,
-                    output_tokens=usage_totals.get("outputTokens") or 0,
-                    endpoint="/api/files/{folder}/intelligent-chat/stream",
-                    request_id=request_id,
-                    session_id=str(session_id or ""),
-                )
-
-                # Learning mode: parse JSON payload from vector answer before streaming
-                vector_learning_payload = None
-                vector_learning_popup_public = None
-                display_answer_text = vector_answer_text
-                if learning_mode:
-                    vector_learning_payload, _json_ok, _pq_extra = parse_learning_model_output(vector_answer_text)
-                    if not _json_ok:
-                        logger.warning(
-                            "[Route:intelligent_chat_stream] learning mode JSON parse failed (vector path) folder=%s raw=%s",
-                            folder_name,
-                            vector_answer_text[:800],
-                        )
-                    if (
-                        isinstance(vector_learning_payload, dict)
-                        and not vector_learning_payload.get("citations")
-                        and isinstance(vector_result.get("citations"), list)
-                    ):
-                        packed = []
-                        for cit in (vector_result.get("citations") or [])[:8]:
-                            if not isinstance(cit, dict):
-                                continue
-                            snippet = str(cit.get("text") or cit.get("content") or cit.get("quote") or "").strip()
-                            if len(snippet) > 220:
-                                snippet = f"{snippet[:220]}..."
-                            packed.append(
-                                {
-                                    "source_id": str(cit.get("chunk_id") or cit.get("id") or "").strip(),
-                                    "doc_id": str(cit.get("filename") or cit.get("document_name") or "document").strip(),
-                                    "page": cit.get("page") or cit.get("pageStart"),
-                                    "text_snippet": snippet,
-                                    "pincite": "",
-                                }
-                            )
-                        vector_learning_payload["citations"] = packed
-                    display_answer_text = LearningAgentController.to_display_text(vector_learning_payload)
-                    if isinstance((vector_learning_payload or {}).get("popup_question"), dict):
-                        pq_v = vector_learning_payload["popup_question"]
-                        LearningAgentController.register_popup_question(
-                            user_id=user_id,
-                            folder_name=folder_name,
-                            session_id=session_id,
-                            popup=pq_v,
-                        )
-                        vector_learning_popup_public = sanitize_public_popup(pq_v)
-
-                # Pipeline often returns one large segment; split into many SSE chunks for real-time UI.
-                stream_delay_ms = get_streaming_delay_ms(llm_config)
-                async for sse_line in _yield_text_as_streaming_chunks(
-                    _sse,
-                    display_answer_text,
-                    delay_ms=stream_delay_ms,
-                ):
-                    yield sse_line
-
-                citations = vector_result.get("citations") or []
-                serialized_citations = []
-                for c in citations:
-                    if isinstance(c, dict):
-                        serialized_citations.append(c)
-                    else:
-                        try:
-                            serialized_citations.append(c.model_dump(mode="json"))
-                        except Exception:
-                            serialized_citations.append({"document_name": str(c)})
-
-                yield _sse({
-                    "type": "done",
-                    "session_id": session_id,
-                    "method": "grounded_retrieval",
-                    "routing_decision": "vector_search",
-                    "answer": display_answer_text,
-                    "learning_mode": learning_mode,
-                    "learning_payload": vector_learning_payload,
-                    "learning_popup_question": vector_learning_popup_public if learning_mode else None,
-                    "turn_count": learning_state.turn_count if learning_state else None,
-                    "turn_threshold": LearningAgentController.TURN_THRESHOLD if learning_mode else None,
-                    "citations": serialized_citations,
-                    "used_chunk_ids": [c.get("chunk_id", "") for c in serialized_citations if isinstance(c, dict)],
-                })
-                return  # done via vector path
+        # The vector 'fast path' (answer_case_folder_chat) is GONE, not merely skipped: it ran a
+        # FULL non-stream generation that could not finish within vector_timeout_s for a thinking
+        # model, so it always timed out — and because a worker thread cannot be cancelled, the
+        # discarded generation kept running to completion, costing a SECOND model call per answer
+        # (wasted tokens + rate-limit pressure). The DB+Gemini path below does the same focused
+        # retrieval and streams the answer, so this was redundant; it always fell through anyway.
+        yield _sse({"type": "thinking", "text": "Retrieving the most relevant passages...\n"})
 
         yield _sse(
             {
@@ -3501,6 +3516,9 @@ async def intelligent_chat_stream(
             source_names: list[str] = [str(d.get("name") or "document").strip() for d in doc_texts if d.get("name")]
             citations_payload: list[dict[str, Any]] = []
             streamed = False
+            # Per-chunk SSE pacing for _yield_text_as_streaming_chunks. Every streaming branch below
+            # (gemini / claude / deepseek / the non-stream fallbacks) reads this, so it must be bound
+            # before the try — an unbound name here fails the whole chat with "not defined".
             stream_delay_ms = get_streaming_delay_ms(llm_config)
             # Will be set to the resolved model from agent_prompts (used for token usage logging)
             actual_model_name: str = str((llm_config or {}).get("llm_model") or "unknown")
@@ -3955,9 +3973,22 @@ async def intelligent_chat_stream(
                             "=== DETAILED ANSWER ==="
                         )
                     else:
+                        # Prompt Orchestration Layer:
+                        #   Layer 1 (permanent system prompt) → SYSTEM INSTRUCTION block.
+                        #   Layer 3 (dynamic format instruction) → detected from the
+                        #     user's actual query and appended as the OUTPUT CONTRACT.
+                        #   The user's wording (effective_query_text) is never modified.
+                        orchestrated_format = format_instruction_for_query(effective_query_text)
+                        system_block = f"SYSTEM INSTRUCTION:\n{PERMANENT_SYSTEM_PROMPT}"
+                        if system_instruction:
+                            system_block = f"{system_block}\n\n{system_instruction}"
                         prompt = (
-                            f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n"
+                            # system_block (not system_instruction) — it prepends PERMANENT_SYSTEM_PROMPT,
+                            # which interpolating system_instruction alone would silently drop.
+                            f"{system_block}\n\n"
                             "Answer the user's question based ONLY on the following legal documents. "
+                            # Deliberately NOT "be concise": length is matched to the ask, because a
+                            # blanket concision instruction caps the detailed/comprehensive tier.
                             "Match the length and depth to what the user actually asked for: when they request "
                             "a detailed, comprehensive, full, or in-depth summary/answer, produce a thorough, "
                             "well-structured, multi-section response that covers all relevant material from the "
@@ -3965,10 +3996,17 @@ async def intelligent_chat_stream(
                             "grounded. If the answer is not in the documents, say so clearly.\n\n"
                             f"=== DOCUMENTS ===\n{context}\n\n"
                             f"=== QUESTION ===\n{effective_query_text}\n\n"
+                            "=== OUTPUT CONTRACT — OVERRIDES ALL PRIOR INSTRUCTIONS ===\n"
+                            f"{orchestrated_format}\n\n"
                             "=== ANSWER ==="
                         )
-                    prompt = _truncate_prompt(prompt, max_chars=220000, label="model_prompt")
-                    # Resolve provider + model + config from agent_prompts (or summarization fallback)
+                    prompt = _truncate_prompt(prompt, max_chars=char_limit + 60_000, label="model_prompt")
+                    # Resolve provider + model + config from agent_prompts (or summarization fallback).
+                    # MUST stay unconditional: the draft branch below only assigns stream_provider when
+                    # `is_draft and _draft_model_name`, so without this a normal chat reaches the
+                    # `elif stream_provider == ...` dispatch with the name unbound — which raises
+                    # UnboundLocalError inside the streaming try, gets swallowed as "streaming
+                    # unavailable", and silently degrades every answer to the non-stream fallback.
                     stream_provider, resolved_model_name, stream_cfg = stream_config_for_folder_chat(
                         for_summary=True,
                         summarization_llm_config=llm_config,
@@ -4490,6 +4528,15 @@ async def intelligent_chat_stream(
                         # not between later chunks. `streamed` (which gates the non-stream fallback) is
                         # still set only when real ANSWER text flows.
                         _got_content = False
+                        # Stream diagnostics: how many type=chunk events actually left this loop, and
+                        # when. "Answer appears all at once" has three different causes that look
+                        # identical in the UI — the provider emitted ONE big delta, the stream never
+                        # produced answer text (so the non-stream fallback replayed it whole), or the
+                        # deltas were real but arrived faster than a repaint. These numbers separate them.
+                        _dbg_chunks = 0
+                        _dbg_chars = 0
+                        _dbg_t0 = time.monotonic()
+                        _dbg_t_first: float | None = None
                         while True:
                             chunk_timeout_s = first_chunk_timeout_s if not _got_content else next_chunk_timeout_s
                             try:
@@ -4544,11 +4591,20 @@ async def intelligent_chat_stream(
                             if not delta:
                                 continue
                             streamed = True
+                            if _dbg_t_first is None:
+                                _dbg_t_first = time.monotonic() - _dbg_t0
+                            _dbg_chunks += 1
+                            _dbg_chars += len(delta)
                             answer_parts.append(delta)
-                            async for sse_line in _yield_text_as_streaming_chunks(
-                                _sse, delta, delay_ms=stream_delay_ms
-                            ):
-                                yield sse_line
+                            yield _sse({"type": "chunk", "text": delta})
+                        logger.info(
+                            "[Route:intelligent_chat_stream] STREAM-STATS folder=%s model=%s streamed=%s "
+                            "chunks=%d chars=%d avg_delta=%.0f first_token=%s total=%.2fs",
+                            folder_name, resolved_model_name, streamed, _dbg_chunks, _dbg_chars,
+                            (_dbg_chars / _dbg_chunks) if _dbg_chunks else 0,
+                            ("%.2fs" % _dbg_t_first) if _dbg_t_first is not None else "never",
+                            time.monotonic() - _dbg_t0,
+                        )
                     if streamed:
                         yield _sse({"type": "thinking", "text": "Finalizing response and citations...\n"})
             except Exception as stream_exc:
@@ -5140,11 +5196,15 @@ def list_folder_chats(
     if is_db_available():
         try:
             with get_db_connection() as conn, conn.cursor() as cur:
-                # Group by session_id to return unique sessions for the list
-                if user_id:
-                    cur.execute(
-                        """
-                        SELECT DISTINCT ON (session_id)
+                # One row per session: the session's FIRST chat provides the title,
+                # while chat_count/last_activity aggregate the whole session so the
+                # sidebar can group and sort conversations by recency.
+                user_filter = "AND user_id::text = %s" if user_id else ""
+                params = [folder_name, str(user_id)] if user_id else [folder_name]
+                cur.execute(
+                    f"""
+                    SELECT * FROM (
+                        SELECT
                             id,
                             question,
                             answer,
@@ -5154,36 +5214,20 @@ def list_folder_chats(
                             used_secret_prompt,
                             prompt_label,
                             secret_id,
-                            created_at
+                            created_at,
+                            COUNT(*) OVER (PARTITION BY session_id) AS chat_count,
+                            MAX(created_at) OVER (PARTITION BY session_id) AS last_activity,
+                            ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at ASC) AS rn
                         FROM folder_chats
                         WHERE folder_name = %s
-                          AND user_id::text = %s
+                          {user_filter}
                           AND session_id IS NOT NULL
-                        ORDER BY session_id, created_at ASC
-                        """,
-                        [folder_name, user_id],
-                    )
-                else:
-                    cur.execute(
-                        """
-                        SELECT DISTINCT ON (session_id)
-                            id,
-                            question,
-                            answer,
-                            session_id,
-                            citations,
-                            used_chunk_ids,
-                            used_secret_prompt,
-                            prompt_label,
-                            secret_id,
-                            created_at
-                        FROM folder_chats
-                        WHERE folder_name = %s
-                          AND session_id IS NOT NULL
-                        ORDER BY session_id, created_at ASC
-                        """,
-                        [folder_name],
-                    )
+                    ) sessions_first
+                    WHERE rn = 1
+                    ORDER BY last_activity DESC
+                    """,
+                    params,
+                )
                 rows = list(cur.fetchall())
 
             for row in rows:
@@ -5201,15 +5245,14 @@ def list_folder_chats(
                         "message": row.get("answer") or "",
                         "citations": citations if isinstance(citations, list) else [],
                         "used_chunk_ids": [str(item) for item in (used_chunk_ids or [])],
-                        "used_secret_prompt": bool(row.get("used_secret_prompt")),
+                        "used_secret_prompt": _text_flag(row.get("used_secret_prompt")),
                         "prompt_label": row.get("prompt_label"),
                         "secret_id": str(row.get("secret_id")) if row.get("secret_id") else None,
                         "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                        "updated_at": row.get("last_activity").isoformat() if row.get("last_activity") else None,
+                        "chat_count": int(row.get("chat_count") or 1),
                     }
                 )
-            
-            # Sort by created_at DESC for the UI
-            chats.sort(key=lambda x: x.get("created_at") or "", reverse=True)
             return {"chats": chats}
         except Exception as exc:
             logger.exception(
@@ -5281,7 +5324,9 @@ def get_session(
                         "answer": row.get("answer"),
                         "citations": row.get("citations") if isinstance(row.get("citations"), list) else [],
                         "used_chunk_ids": [str(c) for c in (row.get("used_chunk_ids") or [])],
+                        "used_secret_prompt": _text_flag(row.get("used_secret_prompt")),
                         "prompt_label": row.get("prompt_label"),
+                        "secret_id": str(row.get("secret_id")) if row.get("secret_id") else None,
                         "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
                     })
                 return {
@@ -5368,3 +5413,91 @@ def delete_single_folder_chat(folder_name: str, session_id: str) -> dict:
 @router.delete("/{folder_name}/chats")
 def delete_all_folder_chats(folder_name: str) -> dict:
     return get_folder_service().delete_all_sessions(folder_name)
+
+
+# ── Merged Q&A export ─────────────────────────────────────────────────────────
+
+class MergedDocxSection(BaseModel):
+    question: str
+    answer: str
+    source: str | None = None
+    origin_label: str | None = None
+
+
+class MergedDocxRequest(BaseModel):
+    title: str = "Merged Legal Analysis"
+    sections: list[MergedDocxSection]
+    include_questions: bool = True
+
+
+@router.post("/export/merged-docx")
+def export_merged_docx(request: MergedDocxRequest):
+    """Assemble selected Q&A answers into a single downloadable .docx."""
+    from fastapi.responses import Response as FastAPIResponse
+
+    from app.services.merged_docx_service import build_merged_docx
+
+    if not request.sections:
+        raise HTTPException(status_code=400, detail="Select at least one answer to export.")
+    if len(request.sections) > 200:
+        raise HTTPException(status_code=400, detail="Too many sections (max 200).")
+    try:
+        data = build_merged_docx(
+            request.title,
+            [section.model_dump() for section in request.sections],
+            include_questions=request.include_questions,
+        )
+    except Exception as exc:
+        logger.exception("[Route:export_merged_docx] build failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to build the document.") from exc
+    safe_title = re.sub(r"[^\w\- ]+", "", request.title).strip().replace(" ", "_") or "Merged_Legal_Analysis"
+    return FastAPIResponse(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{safe_title}.docx"'},
+    )
+
+
+@router.post("/export/merged-pdf")
+def export_merged_pdf(request: MergedDocxRequest):
+    """Assemble selected Q&A answers into a single downloadable .pdf."""
+    from fastapi.responses import Response as FastAPIResponse
+
+    from app.services import branding_pdf_service
+    from app.services.merged_pdf_service import (
+        MERGED_PDF_PRINT_PROFILE,
+        build_merged_html,
+        build_merged_pdf,
+    )
+
+    if not request.sections:
+        raise HTTPException(status_code=400, detail="Select at least one answer to export.")
+    if len(request.sections) > 200:
+        raise HTTPException(status_code=400, detail="Too many sections (max 200).")
+    sections = [section.model_dump() for section in request.sections]
+
+    # Prefer Chromium: it shapes complex scripts (Marathi/Hindi Devanagari) that
+    # reportlab's Helvetica cannot render. reportlab remains the fallback.
+    data = None
+    if branding_pdf_service.is_pdf_renderer_available():
+        try:
+            html = build_merged_html(
+                request.title, sections, include_questions=request.include_questions
+            )
+            data = branding_pdf_service.html_to_pdf(html, MERGED_PDF_PRINT_PROFILE)
+        except Exception as exc:
+            logger.warning("[Route:export_merged_pdf] chromium render failed, falling back to reportlab: %s", exc)
+    if data is None:
+        try:
+            data = build_merged_pdf(
+                request.title, sections, include_questions=request.include_questions
+            )
+        except Exception as exc:
+            logger.exception("[Route:export_merged_pdf] build failed: %s", exc)
+            raise HTTPException(status_code=500, detail="Failed to build the document.") from exc
+    safe_title = re.sub(r"[^\w\- ]+", "", request.title).strip().replace(" ", "_") or "Merged_Legal_Analysis"
+    return FastAPIResponse(
+        content=data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{safe_title}.pdf"'},
+    )

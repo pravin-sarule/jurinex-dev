@@ -1,0 +1,789 @@
+/* ══════════════════════════════════════════════════════════
+   DeepSeekSidebarChat — slide-over panel
+   ══════════════════════════════════════════════════════════ */
+
+/* ── backdrop ────────────────────────────────────────────── */
+.ds-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.40);
+  z-index: 1000;
+  animation: dsBackdropIn 0.18s ease;
+}
+
+@keyframes dsBackdropIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* ── panel ───────────────────────────────────────────────── */
+.ds-panel {
+  position: fixed;
+  top: 0;
+  /* left + width set inline via sidebarCollapsed prop: fills remaining screen */
+  height: 100vh;
+  background: #f8fafc;
+  border-left: 1px solid #e2e8f0;
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.08);
+  z-index: 1001;
+  display: flex;
+  flex-direction: column;
+  animation: dsPanelIn 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  overflow: hidden;
+}
+
+@keyframes dsPanelIn {
+  from { transform: translateX(-20px); opacity: 0; }
+  to   { transform: translateX(0);     opacity: 1; }
+}
+
+/* ── header ──────────────────────────────────────────────── */
+.ds-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, #0d1117 0%, #1a1d23 100%);
+  border-bottom: 1px solid #21C1B6;
+  flex-shrink: 0;
+}
+
+.ds-header__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #ffffff;
+  letter-spacing: 0.02em;
+}
+
+.ds-header__icon {
+  width: 30px;
+  height: 30px;
+  background: linear-gradient(135deg, #21C1B6, #0ea5e9);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.ds-header__close {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  cursor: pointer;
+  color: #9ca3af;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+.ds-header__close:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+}
+
+/* ── case selector ───────────────────────────────────────── */
+.ds-case-selector {
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid #f1f5f9;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.ds-case-selector__label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6b7280;
+  margin-bottom: 6px;
+}
+
+.ds-case-selector__trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f9fafb;
+  cursor: pointer;
+  font-size: 13.5px;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.ds-case-selector__trigger:hover,
+.ds-case-selector__trigger--open {
+  border-color: #21C1B6;
+  background: #fff;
+}
+
+.ds-case-selector__value {
+  font-weight: 600;
+  color: #111827;
+  text-align: left;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ds-case-selector__placeholder {
+  color: #9ca3af;
+  font-style: italic;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  flex: 1;
+}
+
+.ds-case-selector__chevron {
+  color: #9ca3af;
+  flex-shrink: 0;
+  transition: transform 0.2s;
+}
+
+.ds-case-selector__chevron--up {
+  transform: rotate(180deg);
+}
+
+.ds-case-dropdown {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  top: calc(100% - 4px);
+  background: #fff;
+  border: 1.5px solid #21C1B6;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  z-index: 50;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.ds-case-dropdown__item {
+  width: 100%;
+  text-align: left;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #374151;
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.ds-case-dropdown__item:hover {
+  background: #f0fdfa;
+  color: #0d9488;
+}
+
+.ds-case-dropdown__item--active {
+  background: #f0fdfa;
+  color: #0d9488;
+  font-weight: 600;
+}
+
+.ds-case-dropdown__empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 13px;
+  color: #9ca3af;
+}
+
+/* ── tab badge (used in presets header) ─────────────────── */
+.ds-tab__badge {
+  background: #21C1B6;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 10px;
+  padding: 1px 6px;
+  line-height: 1.4;
+}
+
+/* ── two-column body ─────────────────────────────────────── */
+.ds-body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── LEFT column: preset prompts ─────────────────────────── */
+.ds-presets {
+  width: 300px;
+  min-width: 260px;
+  max-width: 340px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border-right: 1px solid #e5e7eb;
+  overflow: hidden;
+}
+
+.ds-presets__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #374151;
+  border-bottom: 1px solid #f1f5f9;
+  flex-shrink: 0;
+}
+
+/* ── RIGHT column: chat ──────────────────────────────────── */
+.ds-chat-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+/* ── presets search ──────────────────────────────────────── */
+.ds-presets__search {
+  position: relative;
+  padding: 10px 14px 8px;
+  flex-shrink: 0;
+}
+
+.ds-presets__search-icon {
+  position: absolute;
+  left: 28px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #9ca3af;
+  pointer-events: none;
+}
+
+.ds-presets__search-input {
+  width: 100%;
+  padding: 8px 12px 8px 34px;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 13px;
+  background: #f9fafb;
+  color: #111827;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.ds-presets__search-input:focus {
+  border-color: #21C1B6;
+  background: #fff;
+}
+
+.ds-presets__list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 12px 12px;
+}
+
+.ds-presets__loading,
+.ds-presets__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 120px;
+  color: #9ca3af;
+  font-size: 13px;
+}
+
+.ds-preset-item {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, border-color 0.12s;
+  margin-bottom: 4px;
+}
+
+.ds-preset-item:hover {
+  background: #f0fdfa;
+  border-color: #99f6e4;
+}
+
+.ds-preset-item__icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: #21C1B6;
+}
+
+.ds-preset-item__name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: #1f2937;
+  line-height: 1.4;
+}
+
+.ds-preset-item__hint {
+  font-size: 11px;
+  color: #f59e0b;
+  white-space: nowrap;
+  background: #fef3c7;
+  padding: 2px 7px;
+  border-radius: 6px;
+  align-self: center;
+}
+
+/* ── messages ────────────────────────────────────────────── */
+.ds-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ds-messages__empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #9ca3af;
+  text-align: center;
+  padding: 32px;
+}
+
+.ds-messages__empty-icon {
+  color: #d1d5db;
+}
+
+.ds-messages__empty p {
+  font-size: 13.5px;
+  line-height: 1.6;
+  max-width: 260px;
+}
+
+/* ── individual messages ─────────────────────────────────── */
+.ds-msg {
+  display: flex;
+  gap: 10px;
+  animation: dsMsgIn 0.18s ease;
+}
+
+@keyframes dsMsgIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.ds-msg--user {
+  justify-content: flex-end;
+}
+
+.ds-msg--user .ds-msg__body {
+  background: linear-gradient(135deg, #21C1B6, #0891b2);
+  color: #fff;
+  border-radius: 16px 16px 4px 16px;
+  padding: 10px 14px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  max-width: 82%;
+}
+
+.ds-msg--preset .ds-msg__body {
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+}
+
+.ds-msg__preset-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-style: italic;
+}
+
+.ds-msg--assistant {
+  align-items: flex-start;
+}
+
+.ds-msg__avatar {
+  width: 28px;
+  height: 28px;
+  background: linear-gradient(135deg, #21C1B6, #0ea5e9);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.ds-msg--assistant .ds-msg__body {
+  /* document-style surface: clean white card, near-black legal text */
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px 16px 16px 16px;
+  padding: 14px 18px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #1f1f1f;
+  font-family: -apple-system, 'Segoe UI', Roboto, Arial, 'Helvetica Neue', sans-serif;
+  /* Fill the full chat-pane width (minus the avatar) so wide tables are usable.
+     flex-grow makes the card expand; min-width:0 lets very wide tables scroll
+     inside it instead of overflowing the panel. */
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* markdown inside assistant messages — bold SANS section headings (DeepSeek look:
+   one consistent font for headings + body, no serif). */
+.ds-msg--assistant .ds-msg__body h1,
+.ds-msg--assistant .ds-msg__body h2,
+.ds-msg--assistant .ds-msg__body h3,
+.ds-msg--assistant .ds-msg__body h4 {
+  font-family: inherit;
+  font-weight: 700;
+  color: #111111;
+  line-height: 1.3;
+  margin: 18px 0 10px;
+}
+
+.ds-msg--assistant .ds-msg__body h1 { font-size: 21px; }
+.ds-msg--assistant .ds-msg__body h2 {
+  font-size: 18px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid #e5e7eb;
+}
+.ds-msg--assistant .ds-msg__body h3 { font-size: 15.5px; }
+
+.ds-msg--assistant .ds-msg__body p {
+  margin: 0 0 10px;
+}
+
+.ds-msg--assistant .ds-msg__body ul,
+.ds-msg--assistant .ds-msg__body ol {
+  padding-left: 22px;
+  margin: 6px 0 12px;
+}
+
+.ds-msg--assistant .ds-msg__body li {
+  margin-bottom: 6px;
+  line-height: 1.6;
+}
+
+.ds-msg--assistant .ds-msg__body strong { font-weight: 700; color: #111111; }
+.ds-msg--assistant .ds-msg__body em { font-style: italic; }
+
+.ds-msg--assistant .ds-msg__body hr {
+  border: none;
+  border-top: 1px solid #e5e7eb;
+  margin: 16px 0;
+}
+
+.ds-msg--assistant .ds-msg__body code {
+  background: #1e293b;
+  color: #e2e8f0;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'Fira Code', 'JetBrains Mono', monospace;
+}
+
+.ds-msg--assistant .ds-msg__body pre {
+  background: #1e293b;
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+.ds-msg--assistant .ds-msg__body pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+}
+
+/* ── error msg ───────────────────────────────────────────── */
+.ds-msg--error {
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #dc2626;
+  justify-content: center;
+}
+
+/* ── input bar ───────────────────────────────────────────── */
+.ds-input-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 12px 14px;
+  background: #ffffff;
+  border-top: 1px solid #f1f5f9;
+  flex-shrink: 0;
+}
+
+.ds-input-bar__clear {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+  background: none;
+  cursor: pointer;
+  color: #9ca3af;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: color 0.15s, border-color 0.15s;
+  align-self: flex-end;
+  margin-bottom: 1px;
+}
+
+.ds-input-bar__clear:hover {
+  color: #ef4444;
+  border-color: #fca5a5;
+}
+
+.ds-input-bar__textarea {
+  flex: 1;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 13.5px;
+  font-family: inherit;
+  background: #f9fafb;
+  color: #1f2937;
+  resize: none;
+  min-height: 38px;
+  max-height: 120px;
+  line-height: 1.5;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s;
+  overflow-y: auto;
+}
+
+.ds-input-bar__textarea:focus {
+  border-color: #21C1B6;
+  background: #fff;
+}
+
+.ds-input-bar__textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.ds-input-bar__send {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: none;
+  background: linear-gradient(135deg, #21C1B6, #0891b2);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: opacity 0.15s, transform 0.1s;
+  align-self: flex-end;
+  margin-bottom: 1px;
+}
+
+.ds-input-bar__send:hover:not(.ds-input-bar__send--disabled) {
+  transform: scale(1.05);
+  opacity: 0.9;
+}
+
+.ds-input-bar__send--disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ── spinner ─────────────────────────────────────────────── */
+.ds-spin {
+  animation: dsSpin 0.8s linear infinite;
+}
+
+@keyframes dsSpin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* ── sidebar button ──────────────────────────────────────── */
+.ds-sidebar-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 16px;
+  border-radius: 10px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: #6b7280;
+  transition: background 0.15s, color 0.15s;
+  position: relative;
+}
+
+.ds-sidebar-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #e5e7eb;
+}
+
+.ds-sidebar-btn--active {
+  background: #1c2128;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.ds-sidebar-btn__icon {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  flex-shrink: 0;
+}
+
+.ds-sidebar-btn__label {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.ds-sidebar-btn__dot {
+  width: 7px;
+  height: 7px;
+  background: #21C1B6;
+  border-radius: 50%;
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* ── scrollbar styling ───────────────────────────────────── */
+.ds-messages::-webkit-scrollbar,
+.ds-presets__list::-webkit-scrollbar,
+.ds-case-dropdown::-webkit-scrollbar {
+  width: 4px;
+}
+
+.ds-messages::-webkit-scrollbar-track,
+.ds-presets__list::-webkit-scrollbar-track,
+.ds-case-dropdown::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ds-messages::-webkit-scrollbar-thumb,
+.ds-presets__list::-webkit-scrollbar-thumb,
+.ds-case-dropdown::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 4px;
+}
+
+/* ── table (DeepSeek-web style) ──────────────────────────────
+   No vertical grid lines. Light horizontal row dividers only.
+   Bold first column. Generous padding. Clean header underline. */
+.ds-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 16px 0;
+}
+
+.ds-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #374151;
+  background: transparent;
+  font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+}
+
+/* Header row — bold, left-aligned, single underline (no fill, no boxes) */
+.ds-table thead th {
+  text-align: left;
+  font-weight: 600;
+  color: #111827;
+  padding: 12px 18px;
+  border-bottom: 1.5px solid #d1d5db;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+/* Body cells — light horizontal divider only, roomy padding */
+.ds-table tbody td {
+  padding: 13px 18px;
+  border-bottom: 1px solid #ececf1;
+  vertical-align: top;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  white-space: normal;
+}
+
+/* First column = the "Field"/key column → bold, darker (DeepSeek look) */
+.ds-table tbody td:first-child {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.ds-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.ds-table tbody tr:hover td {
+  background: #fafafa;
+}
+
+/* ── responsive ──────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .ds-body {
+    flex-direction: column;
+  }
+
+  .ds-presets {
+    width: 100%;
+    max-width: 100%;
+    max-height: 240px;
+    border-right: none;
+    border-bottom: 1px solid #e5e7eb;
+  }
+}
+
+@media (max-width: 640px) {
+  .ds-panel {
+    left: 0 !important;
+    width: 100vw !important;
+  }
+}

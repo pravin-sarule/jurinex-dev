@@ -457,20 +457,28 @@
   font-size: 14px !important;
 }
 
-/* Scrollable table wrapper — injected by markdownTableComponents */
+/* ── Markdown table (chat interface) ─────────────────────────────────────────
+   .md-table-scroll wraps every table injected by parseMarkdown.
+   - width:100% + overflow-x:auto → container never overflows; wide tables scroll.
+   - table width:max-content     → table expands to its natural width so many-column
+     tables (e.g. 8-column chronological timelines) are never crushed.
+─────────────────────────────────────────────────────────────────────────── */
 .formatted-assistant-markdown .md-table-scroll,
 .analysis-page-response .md-table-scroll {
+  width: 100%;
   overflow-x: auto;
-  margin: 12px 0;
-  border-radius: 6px;
-  border: 1px solid #e5e7eb;
+  -webkit-overflow-scrolling: touch;
+  margin: 1em 0;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
 }
 
 .formatted-assistant-markdown table,
 .analysis-page-response table {
   border-collapse: collapse;
-  min-width: 480px;
   width: max-content;
+  min-width: 100%;
+  table-layout: auto;
   font-size: 13px;
   font-family: 'DM Sans', sans-serif;
   margin: 0;
@@ -480,29 +488,33 @@
 .analysis-page-response table th {
   background: #f8fafc;
   font-weight: 600;
-  border: 1px solid #d1d5db;
-  padding: 7px 12px;
+  border: 1px solid #e2e8f0;
+  padding: 10px 14px;
   text-align: left;
   white-space: nowrap;
-  color: #1f2937;
+  color: #334155;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  min-width: 140px;
 }
 
 .formatted-assistant-markdown table td,
 .analysis-page-response table td {
-  border: 1px solid #e5e7eb;
-  padding: 6px 12px;
+  border: 1px solid #f1f5f9;
+  padding: 10px 14px;
   vertical-align: top;
   word-break: normal;
-  word-wrap: normal;
-  white-space: normal;
-  min-width: 70px;
-  color: #374151;
-  line-height: 1.55;
+  overflow-wrap: break-word;
+  min-width: 180px;
+  color: #1e293b;
+  line-height: 1.6;
+  font-size: 13px;
 }
 
 .formatted-assistant-markdown table tbody tr:nth-child(even) td,
 .analysis-page-response table tbody tr:nth-child(even) td {
-  background: #f9fafb;
+  background: #f8fafc;
 }
 
 .formatted-assistant-markdown table tbody tr:hover td,
@@ -575,45 +587,6 @@
   padding: 0;
   white-space: pre;
 }
-
-.formatted-assistant-markdown .md-table-scroll {
-  width: 100%;
-  overflow-x: auto;           /* wide tables scroll inside the bubble, never blow out page */
-  margin: 1em 0;
-  border: 1px solid #d6d0c4;
-  border-radius: 8px;
-  -webkit-overflow-scrolling: touch;
-}
-
-.formatted-assistant-markdown table {
-  border-collapse: collapse;
-  width: 100%;
-  font-size: 14px;
-}
-
-.formatted-assistant-markdown th,
-.formatted-assistant-markdown td {
-  border: 1px solid #ece7de;
-  padding: 9px 12px;
-  text-align: left;
-  vertical-align: top;
-  word-break: break-word;
-  min-width: 90px;
-}
-
-.formatted-assistant-markdown th {
-  background: #f6f8f7;
-  font-weight: 600;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: #5b554a;
-}
-
-.formatted-assistant-markdown tr:last-child td { border-bottom: none; }
-
-.formatted-assistant-markdown th:last-child,
-.formatted-assistant-markdown td:last-child { border-right: none; }
 
 .formatted-assistant-markdown.stream-active { will-change: contents; }
 
@@ -731,4 +704,16 @@
 
 .prompt-chips-scroll::-webkit-scrollbar {
   display: none;
+}
+
+/* Hide the --- separator gray bars during streaming */
+.content-divider {
+  display: none !important;
+}
+
+.formatted-assistant-markdown hr {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 12px 0;
+  display: none; /* Hide separator bars inside tables */
 }

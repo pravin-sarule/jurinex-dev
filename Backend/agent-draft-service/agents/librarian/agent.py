@@ -14,7 +14,6 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from agents.librarian.tools import fetch_relevant_chunks, fetch_template
-from services.embedding_service import generate_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -93,21 +92,14 @@ def run_librarian_agent(payload: Dict[str, Any]) -> Dict[str, Any]:
     
     context = "\n\n---\n\n".join(context_parts)
 
-    # Query embedding for orchestrator state (optional)
-    query_embedding: List[float] = []
-    try:
-        embs = generate_embeddings([query])
-        if embs and embs[0]:
-            query_embedding = embs[0]
-    except Exception:
-        pass
-
+    # NOTE: the query was already embedded inside the retrieval tool; re-embedding
+    # it here just for orchestrator state doubled embedding latency per section.
     logger.info("Librarian: reported %s chunks to orchestrator (top_k=%s)", len(chunks), top_k)
     result: dict = {
         "chunks": chunks,
         "context": context,
         "raw_text": context,
-        "embeddings": [query_embedding] if query_embedding else [],
+        "embeddings": [],
     }
 
     # ── Optional template fetching (for HTML draft pipeline) ─────────────────

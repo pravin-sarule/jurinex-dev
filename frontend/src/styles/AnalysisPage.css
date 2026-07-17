@@ -7,6 +7,24 @@
   color: #1f1f1f;
 }
 
+/* Source / citation links must clearly read as links: highlighted + underlined */
+.analysis-page-ai-response a,
+.analysis-page-ai-response a:visited {
+  color: #0f766e !important;
+  text-decoration: underline !important;
+  text-decoration-thickness: 2px !important;
+  text-underline-offset: 2px !important;
+  font-weight: 600 !important;
+  background: #e6fbf9;
+  padding: 0 4px;
+  border-radius: 4px;
+  word-break: break-word;
+}
+.analysis-page-ai-response a:hover {
+  color: #1aa49b !important;
+  background: #d2f5f1;
+}
+
 /* Scrollable table wrapper injected by markdownTableComponents */
 .analysis-page-ai-response .md-table-scroll {
   overflow-x: auto;

@@ -6,11 +6,25 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
-from app.schemas.models import BookDemoRequest
-from app.services.demo_service import get_available_slots, book_demo
+from app.schemas.models import BookDemoRequest, SaveLeadRequest
+from app.services.demo_service import get_available_slots, book_demo, save_lead
 
 router = APIRouter(prefix="/api", tags=["demo"])
 logger = logging.getLogger("ai_chatbot.demo_route")
+
+
+@router.post("/save-lead", summary="Save contact info from chatbot lead form")
+async def save_lead_endpoint(body: SaveLeadRequest) -> dict:
+    logger.info("POST /api/save-lead name=%r email=%r", body.name, body.email)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: save_lead(name=body.name, email=body.email, phone=body.phone or ""),
+    )
+    logger.info("POST /api/save-lead result=%r", result)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Failed to save"))
+    return result
 
 
 @router.get("/demo-slots", summary="List available demo time slots")

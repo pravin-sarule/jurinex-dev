@@ -15,9 +15,12 @@ No Serper. No Elasticsearch. No Qdrant. No validation layers. IK API only.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -27,6 +30,55 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logger = logging.getLogger(__name__)
+
+# ── Result cache (in-memory, TTL-based) ─────────────────────────────────────
+# Saves full pipeline results for repeated identical queries within the TTL
+# window (e.g. user refreshes, or two users with the same case query).
+# Disabled by setting CITATION_CACHE_TTL_SECONDS=0.
+_CACHE_TTL = int(os.environ.get("CITATION_CACHE_TTL_SECONDS", "600"))   # 10 min default
+_CACHE_MAX = int(os.environ.get("CITATION_CACHE_MAX_ENTRIES", "50"))
+_cache_lock = threading.Lock()
+_cache: Dict[str, Dict[str, Any]] = {}   # key → {result, ts}
+
+
+def _cache_key(query: str, case_id: Optional[str],
+               custom_kw: Optional[List[str]],
+               selected_kw: Optional[List[str]],
+               selected_cn: Optional[List[str]]) -> str:
+    payload = json.dumps({
+        "q": (query or "").strip().lower(),
+        "cid": case_id or "",
+        "ckw": sorted(custom_kw or []),
+        "skw": sorted(selected_kw or []),
+        "scn": sorted(selected_cn or []),
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+
+def _cache_get(key: str) -> Optional[Dict[str, Any]]:
+    if _CACHE_TTL <= 0:
+        return None
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry and (time.time() - entry["ts"]) < _CACHE_TTL:
+            logger.info("[PIPELINE] Cache HIT key=%s", key[:12])
+            print(f"\n[CITATION RUNNER] ✓ Cache HIT — returning cached result (key={key[:12]})\n", flush=True)
+            return entry["result"]
+        if entry:
+            del _cache[key]
+    return None
+
+
+def _cache_set(key: str, result: Dict[str, Any]) -> None:
+    if _CACHE_TTL <= 0:
+        return
+    with _cache_lock:
+        if len(_cache) >= _CACHE_MAX:
+            # evict the oldest entry
+            oldest = min(_cache, key=lambda k: _cache[k]["ts"])
+            del _cache[oldest]
+        _cache[key] = {"result": result, "ts": time.time()}
+    logger.info("[PIPELINE] Cache SET key=%s (entries=%d)", key[:12], len(_cache))
 
 _DOC_SERVICE_URL = (
     os.environ.get("AGENTIC_DOCUMENT_SERVICE_URL")
@@ -183,11 +235,14 @@ def run_pipeline(
     run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Run the proposition-based citation pipeline (sync — called via asyncio.to_thread).
+    Run the citation pipeline (sync -- called via asyncio.to_thread).
+
+    When CITATION_USE_AUTONOMOUS_AGENT=true (default), delegates to the
+    autonomous citation agent. Falls back to the proposition-based pipeline when
+    the env var is set to false/0/no/off.
 
     Returns: { report_id, report_format, run_id, status, error }
     """
-    from agents.proposition_pipeline import run_proposition_pipeline
     from db.client import pipeline_run_insert, pipeline_run_update, report_insert
 
     user_id = (user_id or "anonymous").strip()
@@ -196,11 +251,25 @@ def run_pipeline(
         return {"error": "query is required", "report_id": None,
                 "report_format": None, "run_id": None, "status": None}
 
-    run_id = run_id or str(uuid.uuid4())
+    _runner_t0 = time.time()
+    print(f"\n[CITATION RUNNER] ▶ Starting pipeline for user={user_id[:16]}", flush=True)
+    print(f"[CITATION RUNNER]   query: {query[:80]}", flush=True)
+    if case_id:
+        print(f"[CITATION RUNNER]   case_id: {case_id}", flush=True)
+
+    # Fast path: return cached result for identical repeat queries
+    _ck = _cache_key(query, case_id, custom_keywords, selected_keywords, selected_case_names)
+    _cached = _cache_get(_ck)
+    if _cached is not None:
+        return _cached
+
+    run_id = (run_id or "").strip() or str(uuid.uuid4())
+    print(f"[CITATION RUNNER]   run_id: {run_id}", flush=True)
     try:
         pipeline_run_insert(run_id, user_id, query, case_id=case_id)
     except Exception as exc:
-        logger.warning("[PIPELINE] pipeline_run_insert failed: %s", exc)
+        # Start endpoint may have already inserted this run_id
+        logger.debug("[PIPELINE] pipeline_run_insert skipped or failed: %s", exc)
 
     # Build case_file_context from fetched chunks if not provided
     case_context = ""
@@ -216,19 +285,25 @@ def run_pipeline(
         case_context = case_text
 
     try:
-        report_format = run_proposition_pipeline(
+        from agents.autonomous_citation_agent import run_citation_research
+        print("[CITATION RUNNER]   mode: autonomous citation agent", flush=True)
+        # NOTE: run_citation_research takes no `perspective` (and no **kwargs) — passing it raises
+        # TypeError, which the `except Exception` below turns into a hard run failure rather than a
+        # fallback. `perspective` stays on run_pipeline's signature because pipeline/__init__.py
+        # passes it, but only the v2 orchestrator path actually honours it; the legacy agent ignores
+        # it. Re-add here only once run_citation_research accepts the argument.
+        report_format = run_citation_research(
             query=query,
             case_context=case_context,
             run_id=run_id,
-            perspective=(perspective or "all"),
             user_id=user_id,
             case_id=case_id,
-            custom_keywords=custom_keywords,
             selected_keywords=selected_keywords,
             selected_case_names=selected_case_names,
+            custom_keywords=custom_keywords,
         )
     except Exception as exc:
-        logger.exception("[PIPELINE] Proposition pipeline crashed: %s", exc)
+        logger.exception("[PIPELINE] Citation pipeline crashed: %s", exc)
         try:
             pipeline_run_update(run_id, "failed", error_message=str(exc)[:2000])
         except Exception:
@@ -289,11 +364,17 @@ def run_pipeline(
     except Exception as exc:
         logger.warning("[PIPELINE] pipeline_run_update failed: %s", exc)
 
-    logger.info("[PIPELINE] Done — report_id=%s citations=%d", report_id, citation_count)
-    return {
+    _runner_elapsed = time.time() - _runner_t0
+    logger.info("[PIPELINE] Done — report_id=%s citations=%d total=%.1fs",
+                report_id, citation_count, _runner_elapsed)
+    print(f"[CITATION RUNNER] ✓ Done — report_id={report_id} | citations={citation_count} | "
+          f"total={_runner_elapsed:.1f}s\n", flush=True)
+    result = {
         "report_id":     report_id,
         "report_format": report_format,
         "run_id":        run_id,
         "status":        "completed",
         "error":         None,
     }
+    _cache_set(_ck, result)
+    return result

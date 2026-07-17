@@ -30,10 +30,22 @@ _LLM_CONSUMING_POST_PATHS: frozenset[str] = frozenset({
 })
 
 
+# Drafting-mode routes carry a session id in the path, so they are matched by
+# prefix+suffix instead of exact path. Both consume LLM tokens:
+#   /api/chat/draft/{sid}/template         → structured-output template analysis
+#   /api/chat/draft/{sid}/generate/stream  → section-by-section draft generation
+_LLM_CONSUMING_DRAFT_SUFFIXES: tuple[str, ...] = ("/template", "/generate/stream")
+
+
 def is_llm_consuming_request(method: str, path: str) -> bool:
     if method.upper() != "POST":
         return False
-    return path.rstrip("/") in _LLM_CONSUMING_POST_PATHS
+    normalized = path.rstrip("/")
+    if normalized in _LLM_CONSUMING_POST_PATHS:
+        return True
+    if normalized.startswith("/api/chat/draft/") and normalized.endswith(_LLM_CONSUMING_DRAFT_SUFFIXES):
+        return True
+    return False
 
 
 def extract_user_id_from_request(request) -> Optional[str]:

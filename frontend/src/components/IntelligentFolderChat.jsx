@@ -6,16 +6,18 @@ import BrandingDownloadModal from './BrandingDownload/BrandingDownloadModal';
 import './IntelligentFolderChat.css';
 import CitationsPanel from '../AnalysisPage/CitationsPanel';
 import apiService from '../services/api';
+import documentApi from '../services/documentApi';
 import LearningBubble from './LearningBubble';
 import LearningQuestionModal from './LearningQuestionModal';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
-import rehypeSanitize from 'rehype-sanitize';
+import remarkMath from 'remark-math';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import {
   ensureTableSeparators,
   markdownTableComponents,
+  markdownRehypePlugins,
+  normalizeMarkdownFormatting,
   splitMarkdownIntoRenderChunks,
 } from '../utils/markdownUtils';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
@@ -648,12 +650,30 @@ export default function IntelligentFolderChat({
     }
   };
 
+  // Export the answer's markdown through the backend PDF builder — real
+  // selectable text, proper tables and page breaks (html2pdf rasterizes the
+  // DOM to images, which renders poorly). Falls back to the canvas approach
+  // only if the backend export fails.
   const handleDownloadMsgPdf = async (msgId) => {
+    const index = messages.findIndex((m) => m.id === msgId);
+    const msg = messages[index];
+    if (!msg?.text) return;
+    const prevUser = messages.slice(0, index).reverse().find((m) => m.role === 'user');
+    const question = String(prevUser?.text || '').trim();
+    const title = question.length > 100 ? `${question.slice(0, 100)}…` : (question || 'AI Response');
     try {
-      const el = messageRefs.current[msgId];
-      await downloadAsPdf(el, `AI_Response_${new Date().toISOString().slice(0, 10)}.pdf`);
+      await documentApi.exportMergedPdf(
+        title,
+        [{ question: question || 'AI Response', answer: getProcessedMsgText(msg.text), source: null }],
+        false
+      );
     } catch (err) {
-      console.error('Failed to generate PDF:', err);
+      console.error('Backend PDF export failed, falling back to canvas PDF:', err);
+      try {
+        await downloadAsPdf(messageRefs.current[msgId], `AI_Response_${new Date().toISOString().slice(0, 10)}.pdf`);
+      } catch (fallbackErr) {
+        console.error('Failed to generate PDF:', fallbackErr);
+      }
     }
   };
 
@@ -887,25 +907,25 @@ export default function IntelligentFolderChat({
                         onOptionSelect={handleQuickReply}
                       />
                     ) : msg.text ? (
-                      {(() => {
+                      (() => {
                         const rawResponse = msg.text || '';
                         if (!rawResponse) return null;
                         const isStructured = isStructuredJsonResponse(rawResponse);
                         const formatted = isStructured
                           ? renderSecretPromptResponse(rawResponse)
                           : convertJsonToPlainText(rawResponse);
-                        const prepared = ensureTableSeparators(formatted);
+                        const prepared = ensureTableSeparators(normalizeMarkdownFormatting(formatted));
                         return splitMarkdownIntoRenderChunks(prepared).map((chunk, index) => (
                           <ReactMarkdown
                             key={`${index}-${chunk.length}`}
-                            remarkPlugins={[remarkGfm]}
-                            rehypePlugins={[rehypeRaw, rehypeSanitize]}
+                            remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
+                            rehypePlugins={markdownRehypePlugins}
                             components={markdownTableComponents}
                           >
                             {chunk}
                           </ReactMarkdown>
                         ));
-                      })()}
+                      })()
                     ) : (
                       msg.isStreaming && !msg.thinking ? 'Generating response...' : ''
                     )}

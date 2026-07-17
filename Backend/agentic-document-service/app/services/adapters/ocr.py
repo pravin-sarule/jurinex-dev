@@ -1,9 +1,12 @@
 """
-Real Google Cloud Document AI text extraction with parallel page-batch processing.
+Google Cloud Document AI text extraction with parallel page-batch processing.
 
 Document AI has a per-request page limit (default 15 pages for online processing).
 For larger documents the PDF is split into batches, each batch is sent to Document AI
 in parallel via a ThreadPoolExecutor, and the results are merged in page order.
+
+Progress is reported to the caller via an optional progress_callback(pct: float)
+callable where pct is the document-level processing percentage (0-100).
 
 Falls back to pypdf for PDFs and raw UTF-8 decode when Document AI is unavailable.
 """
@@ -15,7 +18,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger("agentic_document_service.document_ai_ocr")
 
@@ -80,6 +83,26 @@ def _word_ocr_result(
         quality_score=quality_score,
         structured_json=structured_json,
     )
+
+
+def _clean_extracted_text(text: str) -> str:
+    """
+    Repair deterministic PDF/OCR word-splits (e.g. "St amps" -> "Stamps",
+    "De ed" -> "Deed") at extraction time so the stored text, the embeddings,
+    and every downstream LLM call (DeepSeek/Claude/Gemini) receive clean input.
+
+    Reuses the shared, SAFE repair from document_ai (number-merge + curated
+    dictionary + dictionary-backed rejoiner) — it only joins KNOWN split forms,
+    never a blanket short-token merge, so normal prose ("in court", "to do") is
+    never corrupted. Best-effort: returns the input unchanged on any error.
+    """
+    if not text:
+        return text
+    try:
+        from app.services.adapters.document_ai import normalize_ocr_artifacts
+        return normalize_ocr_artifacts(text)
+    except Exception:
+        return text
 
 
 # ── PDF page-batch helpers ─────────────────────────────────────────────────────
@@ -171,6 +194,15 @@ def _text_from_anchor(document_text: str, text_anchor: Any) -> str:
 
 
 def _layout_text(element: Any, document_text: str) -> str:
+    """Text for one layout element, de-fragmented.
+
+    The cleaner runs AFTER anchor slicing, never before: text_anchor offsets index the RAW
+    document_text, so cleaning it first (it removes characters) would shift every offset and slice
+    the wrong span. This is the single funnel every structured_json text field flows through, so
+    cleaning here keeps the structured payload consistent with OcrResult.text — which
+    _call_document_ai cleans separately. Without it the OCR viewer renders the very word-splits
+    ("St amps De ed") that the cleaner exists to remove, right next to a clean extractedText.
+    """
     layout = getattr(element, "layout", None)
     if not layout:
         return ""
@@ -178,8 +210,8 @@ def _layout_text(element: Any, document_text: str) -> str:
     if anchor:
         text = _text_from_anchor(document_text, anchor)
         if text:
-            return text
-    return str(getattr(layout, "content", "") or "")
+            return _clean_extracted_text(text)
+    return _clean_extracted_text(str(getattr(layout, "content", "") or ""))
 
 
 def _page_dimension(page: Any) -> dict[str, Any]:
@@ -374,7 +406,9 @@ def _document_to_structured_json(doc: Any, *, page_offset: int = 0, processor_na
         "source": "document_ai_ocr",
         "provider": "google_document_ai",
         "processorName": processor_name,
-        "text": document_text,
+        # Cleaned on the way OUT only — `document_text` itself must stay raw above, because every
+        # text_anchor offset indexes it.
+        "text": _clean_extracted_text(document_text),
         "pageCount": len(pages),
         "pages": pages,
     }
@@ -412,21 +446,78 @@ def _structured_from_page_texts(page_texts: list[str], *, source: str) -> dict[s
 
 # ── Document AI single-batch call ─────────────────────────────────────────────
 
+def _build_ocr_process_options():
+    """
+    Build Document AI ``ProcessOptions`` that suppress space-fragmentation.
+
+    The decisive lever is ``enable_native_pdf_parsing``: for born-digital PDFs
+    Document AI reads the embedded Unicode text layer directly instead of
+    rasterizing the page and running glyph-level OCR. That bypasses the OCR
+    word-segmenter entirely, so spurious intra-word spaces ("Sug riv",
+    "18 % p .a .") are never produced in the first place — no dictionary needed.
+
+    ``enable_math_ocr`` / ``enable_symbol`` are premium and only enabled when the
+    operator opts in (a basic OCR processor version would reject them otherwise).
+
+    Returns ``None`` on any error so the caller falls back to a plain request.
+    """
+    try:
+        from google.cloud import documentai  # type: ignore
+        from app.core.config import get_settings
+
+        s = get_settings()
+        native_pdf = bool(getattr(s, "document_ai_enable_native_pdf_parsing", True))
+        enable_math = bool(getattr(s, "document_ai_enable_math_ocr", False))
+        enable_symbol = bool(getattr(s, "document_ai_enable_symbol", False))
+
+        ocr_config_kwargs: dict = {"enable_native_pdf_parsing": native_pdf}
+        if enable_symbol:
+            ocr_config_kwargs["enable_symbol"] = True
+        if enable_math:
+            ocr_config_kwargs["premium_features"] = documentai.OcrConfig.PremiumFeatures(
+                enable_math_ocr=True,
+            )
+
+        return documentai.ProcessOptions(ocr_config=documentai.OcrConfig(**ocr_config_kwargs))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("[DocumentAI OCR] could not build ProcessOptions: %s", exc)
+        return None
+
+
 def _call_document_ai(
     batch_bytes: bytes,
     mime_type: str,
     client,
     processor_name: str,
     page_offset: int = 0,
+    process_options=None,
 ) -> OcrResult:
     """Send a single batch to Document AI and return OcrResult."""
     from google.cloud import documentai  # type: ignore
 
     raw_doc = documentai.RawDocument(content=batch_bytes, mime_type=mime_type)
-    request = documentai.ProcessRequest(name=processor_name, raw_document=raw_doc)
-    result = client.process_document(request=request)
+    request = documentai.ProcessRequest(
+        name=processor_name,
+        raw_document=raw_doc,
+        process_options=process_options,
+    )
+    try:
+        result = client.process_document(request=request)
+    except Exception as exc:
+        # A processor version that doesn't support a chosen OCR option (e.g.
+        # premium math OCR) raises InvalidArgument. Never drop the batch over a
+        # config mismatch — retry once with a plain request.
+        if process_options is not None:
+            logger.warning(
+                "[DocumentAI OCR] process_options rejected (%s) — retrying without options",
+                exc,
+            )
+            plain = documentai.ProcessRequest(name=processor_name, raw_document=raw_doc)
+            result = client.process_document(request=plain)
+        else:
+            raise
     doc = result.document
-    text = doc.text or ""
+    text = _clean_extracted_text(doc.text or "")
     page_count = len(doc.pages)
     avg_chars = len(text) / max(page_count, 1)
     quality_score = min(1.0, avg_chars / 500.0)
@@ -487,8 +578,24 @@ def _load_google_credentials() -> object | None:
         return None
 
 
+def _get_ocr_processor_version_id() -> str:
+    """Return the pinned OCR processor *version* id, if configured."""
+    try:
+        from app.core.config import get_settings
+        return (getattr(get_settings(), "document_ai_ocr_processor_version_id", "") or "").strip()
+    except Exception:
+        return ""
+
+
 def _build_document_ai_client(location: str, project_id: str, processor_id: str):
-    """Build a Document AI client and return (client, processor_name)."""
+    """
+    Build a Document AI client and return (client, processor_name).
+
+    When ``document_ai_ocr_processor_version_id`` is set we target that specific
+    processor *version* (``processor_version_path``) so a stronger/newer OCR model
+    can be pinned. Otherwise we fall back to the processor's default version
+    (``processor_path``).
+    """
     from google.cloud import documentai  # type: ignore
 
     client_options = {"api_endpoint": f"{location}-documentai.googleapis.com"}
@@ -498,7 +605,17 @@ def _build_document_ai_client(location: str, project_id: str, processor_id: str)
         if creds is not None
         else documentai.DocumentProcessorServiceClient(client_options=client_options)
     )
-    processor_name = client.processor_path(project_id, location, processor_id)
+
+    version_id = _get_ocr_processor_version_id()
+    if version_id:
+        processor_name = client.processor_version_path(
+            project_id, location, processor_id, version_id
+        )
+        logger.info(
+            "[DocumentAI OCR] using pinned processor version: %s", processor_name
+        )
+    else:
+        processor_name = client.processor_path(project_id, location, processor_id)
     return client, processor_name
 
 
@@ -507,65 +624,125 @@ def _parallel_ocr_bytes(
     mime_type: str,
     client,
     processor_name: str,
+    *,
+    process_options=None,
+    progress_callback: Callable[[float], None] | None = None,
+    progress_start: float = 22.0,
+    progress_end: float = 63.0,
 ) -> OcrResult:
     """
-    Run Document AI OCR with parallel page batching.
+    Run Document AI OCR with parallel page batching and real-time progress reporting.
 
-    1. Count pages in the PDF.
-    2. If total_pages <= page_limit: send as one request (fast path).
-    3. Otherwise: split into batches, submit each batch to a thread pool,
-       collect results in page order, merge.
+    Flow:
+      1. Count pages in the PDF.
+      2. If total_pages <= page_limit: send as one request (fast path).
+      3. Otherwise: split into page batches of at most `page_limit` pages,
+         submit every batch concurrently to a ThreadPoolExecutor,
+         report progress after each batch completes, merge in page order.
+
+    progress_callback is called with values in [progress_start, progress_end] as
+    batches complete so the UI can show real-time OCR progress.
     """
     page_limit = _get_page_limit()
     num_workers = _get_ocr_workers()
 
-    # Fast path: small document fits in a single request
-    if mime_type == "application/pdf" or mime_type.endswith("/pdf"):
+    def _report(pct: float) -> None:
+        if progress_callback:
+            try:
+                progress_callback(round(pct, 1))
+            except Exception:
+                pass
+
+    # ── Single-batch fast path (non-PDF or small PDF) ─────────────────────────
+    is_pdf = mime_type == "application/pdf" or mime_type.endswith("/pdf")
+
+    if is_pdf:
         page_count = _pdf_page_count(data)
-        if page_count == 0 or page_count <= page_limit:
-            # Single call — no batching needed
-            t0 = time.monotonic()
-            result = _call_document_ai(data, mime_type, client, processor_name)
-            logger.info(
-                "[DocumentAI OCR] single-batch pages=%d chars=%d elapsed=%.2fs quality=%.2f",
-                result.page_count, len(result.text), time.monotonic() - t0, result.quality_score,
-            )
-            return result
+    else:
+        page_count = 0
 
-        # Large document: split and process in parallel
-        logger.info(
-            "[DocumentAI OCR] large PDF pages=%d > limit=%d — splitting into parallel batches workers=%d",
-            page_count, page_limit, num_workers,
-        )
-        batches = _split_pdf_into_page_batches(data, page_limit)
-        batch_results: list[OcrResult | None] = [None] * len(batches)
-
+    if not is_pdf or page_count == 0 or page_count <= page_limit:
+        _report(progress_start)
         t0 = time.monotonic()
-        with ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix="ocr-batch") as pool:
-            future_to_index = {
-                pool.submit(_call_document_ai, batch, mime_type, client, processor_name, idx * page_limit): idx
-                for idx, batch in enumerate(batches)
-            }
-            for future in as_completed(future_to_index):
-                idx = future_to_index[future]
-                try:
-                    batch_results[idx] = future.result()
-                except Exception as exc:
-                    logger.warning(
-                        "[DocumentAI OCR] batch %d/%d failed: %s — using empty result",
-                        idx + 1, len(batches), exc,
-                    )
-                    batch_results[idx] = OcrResult(text="", page_count=0, quality_score=0.0)
-
-        merged = _merge_ocr_results([r for r in batch_results if r is not None])
-        logger.info(
-            "[DocumentAI OCR] parallel-batch done batches=%d pages=%d chars=%d elapsed=%.2fs quality=%.2f",
-            len(batches), merged.page_count, len(merged.text), time.monotonic() - t0, merged.quality_score,
+        # Whole document in one request, so pages already start at 1 -> page_offset stays 0.
+        # Keyword args are load-bearing: _call_document_ai now takes BOTH page_offset (ours) and
+        # process_options (theirs), and page_offset comes first — passing process_options
+        # positionally here would bind it to page_offset.
+        result = _call_document_ai(
+            data,
+            mime_type,
+            client,
+            processor_name,
+            page_offset=0,
+            process_options=process_options,
         )
-        return merged
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "[DocumentAI OCR] single-batch pages=%d chars=%d elapsed=%.2fs quality=%.2f",
+            result.page_count, len(result.text), elapsed, result.quality_score,
+        )
+        _report(progress_end)
+        return result
 
-    # Non-PDF: single call
-    return _call_document_ai(data, mime_type, client, processor_name)
+    # ── Large PDF: split → parallel batches → merge in page order ─────────────
+    batches = _split_pdf_into_page_batches(data, page_limit)
+    n_batches = len(batches)
+    logger.info(
+        "[DocumentAI OCR] large PDF pages=%d batches=%d (limit=%d/batch) workers=%d",
+        page_count, n_batches, page_limit, num_workers,
+    )
+    _report(progress_start)
+
+    batch_results: list[OcrResult | None] = [None] * n_batches
+    completed_count = 0
+    t0 = time.monotonic()
+
+    with ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix="ocr-batch") as pool:
+        # page_offset MUST be idx * page_limit: each batch is a separate Document AI request whose
+        # pages restart at 1, so without the offset every batch's structured JSON reports pages
+        # 1..n and the OCR viewer shows the same page numbers repeatedly. Keyword args are
+        # deliberate — page_offset and process_options are adjacent and both optional, so a
+        # positional call silently binds process_options to page_offset.
+        future_to_index = {
+            pool.submit(
+                _call_document_ai,
+                batch,
+                mime_type,
+                client,
+                processor_name,
+                page_offset=idx * page_limit,
+                process_options=process_options,
+            ): idx
+            for idx, batch in enumerate(batches)
+        }
+
+        for future in as_completed(future_to_index):
+            idx = future_to_index[future]
+            try:
+                batch_results[idx] = future.result()
+            except Exception as exc:
+                logger.warning(
+                    "[DocumentAI OCR] batch %d/%d failed: %s — using empty result",
+                    idx + 1, n_batches, exc,
+                )
+                batch_results[idx] = OcrResult(text="", page_count=0, quality_score=0.0)
+            finally:
+                completed_count += 1
+                # Report proportional progress as each batch finishes
+                progress_pct = progress_start + (completed_count / n_batches) * (progress_end - progress_start)
+                _report(progress_pct)
+                logger.debug(
+                    "[DocumentAI OCR] batch %d/%d done (%.0f%%)",
+                    completed_count, n_batches, progress_pct,
+                )
+
+    merged = _merge_ocr_results([r for r in batch_results if r is not None])
+    elapsed = time.monotonic() - t0
+    logger.info(
+        "[DocumentAI OCR] parallel-batch done batches=%d pages=%d chars=%d elapsed=%.2fs quality=%.2f",
+        n_batches, merged.page_count, len(merged.text), elapsed, merged.quality_score,
+    )
+    return merged
 
 
 # ── Audio / Speech-to-Text extraction ─────────────────────────────────────────
@@ -575,7 +752,7 @@ def extract_text_from_audio_gcs(
     mime_type: str,
     *,
     filename: str | None = None,
-    progress_callback=None,
+    progress_callback: Callable[[float], None] | None = None,
 ) -> OcrResult:
     """
     Transcribe an audio file stored in GCS.
@@ -654,7 +831,9 @@ def extract_text_from_gcs(
     mime_type: str = "application/pdf",
     *,
     filename: str | None = None,
-    progress_callback=None,
+    progress_callback: Callable[[float], None] | None = None,
+    progress_start: float = 22.0,
+    progress_end: float = 63.0,
 ) -> OcrResult:
     """
     Run Document AI OCR on a file already in GCS.
@@ -665,6 +844,8 @@ def extract_text_from_gcs(
         gs_uri: gs://bucket/path/to/file URI.
         mime_type: MIME type of the document.
         progress_callback: Optional callable(pct: float) for real-time progress.
+        progress_start: Lower bound of the progress range reported (default 22).
+        progress_end: Upper bound of the progress range reported (default 63).
     """
     # Route audio files to Speech-to-Text instead of Document AI OCR
     from app.services.adapters.speech_to_text import is_audio_filename, is_audio_mime, resolve_media_mime_type
@@ -704,10 +885,10 @@ def extract_text_from_gcs(
             "[DocumentAI OCR] Missing project_id=%s or processor_id=%s — falling back to pypdf",
             project_id, processor_id,
         )
-        return _fallback_extract_from_gcs(gs_uri, mime_type)
+        return _fallback_extract_from_gcs(gs_uri, mime_type, progress_callback=progress_callback,
+                                          progress_start=progress_start, progress_end=progress_end)
 
     try:
-        # Explicitly log that PDFs/docs use Document AI (not Gemini).
         logger.info(
             "[Extractor] route=document method=document_ai_ocr uri=%s mime=%s project=%s location=%s processor_id=%s",
             gs_uri,
@@ -719,7 +900,17 @@ def extract_text_from_gcs(
         from app.services.adapters.gcs import download_bytes
         raw_bytes = download_bytes(gs_uri)
         client, processor_name = _build_document_ai_client(location, project_id, processor_id)
-        result = _parallel_ocr_bytes(raw_bytes, resolved_mime_type, client, processor_name)
+        process_options = _build_ocr_process_options()
+        result = _parallel_ocr_bytes(
+            raw_bytes,
+            resolved_mime_type,
+            client,
+            processor_name,
+            process_options=process_options,
+            progress_callback=progress_callback,
+            progress_start=progress_start,
+            progress_end=progress_end,
+        )
         logger.info(
             "[DocumentAI OCR] Processed %s pages=%d chars=%d quality=%.2f",
             gs_uri, result.page_count, len(result.text), result.quality_score,
@@ -727,13 +918,18 @@ def extract_text_from_gcs(
         return result
     except Exception as exc:
         logger.warning("[DocumentAI OCR] Failed for %s: %s — falling back", gs_uri, exc)
-        return _fallback_extract_from_gcs(gs_uri, resolved_mime_type)
+        return _fallback_extract_from_gcs(gs_uri, resolved_mime_type, progress_callback=progress_callback,
+                                          progress_start=progress_start, progress_end=progress_end)
 
 
 def extract_text_from_bytes(
     data: bytes,
     mime_type: str = "application/pdf",
     filename: str = "document",
+    *,
+    progress_callback: Callable[[float], None] | None = None,
+    progress_start: float = 22.0,
+    progress_end: float = 63.0,
 ) -> OcrResult:
     """
     Run Document AI OCR on raw bytes (without requiring a GCS URI).
@@ -755,7 +951,17 @@ def extract_text_from_bytes(
     if project_id and processor_id:
         try:
             client, processor_name = _build_document_ai_client(location, project_id, processor_id)
-            result = _parallel_ocr_bytes(data, mime_type, client, processor_name)
+            process_options = _build_ocr_process_options()
+            result = _parallel_ocr_bytes(
+                data,
+                mime_type,
+                client,
+                processor_name,
+                process_options=process_options,
+                progress_callback=progress_callback,
+                progress_start=progress_start,
+                progress_end=progress_end,
+            )
             logger.info(
                 "[DocumentAI OCR] bytes extracted pages=%d chars=%d quality=%.2f",
                 result.page_count, len(result.text), result.quality_score,
@@ -764,47 +970,88 @@ def extract_text_from_bytes(
         except Exception as exc:
             logger.warning("[DocumentAI OCR] bytes extraction failed: %s — falling back", exc)
 
-    return _fallback_extract_from_bytes(data, mime_type)
+    return _fallback_extract_from_bytes(data, mime_type,
+                                        progress_callback=progress_callback,
+                                        progress_start=progress_start,
+                                        progress_end=progress_end)
 
 
 # ── Fallback extractors ────────────────────────────────────────────────────────
 
-def _fallback_extract_from_gcs(gs_uri: str, mime_type: str) -> OcrResult:
+def _fallback_extract_from_gcs(
+    gs_uri: str,
+    mime_type: str,
+    *,
+    progress_callback: Callable[[float], None] | None = None,
+    progress_start: float = 22.0,
+    progress_end: float = 63.0,
+) -> OcrResult:
     try:
         from app.services.adapters.gcs import download_bytes
         data = download_bytes(gs_uri)
-        return _fallback_extract_from_bytes(data, mime_type)
+        return _fallback_extract_from_bytes(data, mime_type, progress_callback=progress_callback,
+                                            progress_start=progress_start, progress_end=progress_end)
     except Exception as exc:
         logger.warning("[DocumentAI OCR] GCS download for fallback failed: %s", exc)
         return OcrResult(text="", page_count=0, quality_score=0.0)
 
 
-def _fallback_extract_from_bytes(data: bytes, mime_type: str) -> OcrResult:
-    """Try pypdf first, then raw decode."""
+def _fallback_extract_from_bytes(
+    data: bytes,
+    mime_type: str,
+    *,
+    progress_callback: Callable[[float], None] | None = None,
+    progress_start: float = 22.0,
+    progress_end: float = 63.0,
+) -> OcrResult:
+    """Try pypdf first (page-by-page with per-page progress), then raw decode."""
+
+    def _report(pct: float) -> None:
+        if progress_callback:
+            try:
+                progress_callback(round(pct, 1))
+            except Exception:
+                pass
+
     if mime_type == "application/pdf" or mime_type.endswith("/pdf"):
         try:
             from pypdf import PdfReader  # type: ignore
             reader = PdfReader(io.BytesIO(data))
-            pages_text = []
-            for page in reader.pages:
+            total_pages = len(reader.pages)
+            pages_text: list[str] = []
+            for page_idx, page in enumerate(reader.pages):
                 t = page.extract_text() or ""
+                # Append EVERY page, including blank ones: _structured_from_page_texts below maps
+                # list index -> page number, so skipping a blank page would shift every later page's
+                # number in the OCR viewer. Blanks are filtered when joining `text` instead.
                 pages_text.append(t)
-            text = "\n\n".join(t for t in pages_text if t.strip()).strip()
-            page_count = len(reader.pages)
+                # Report per-page progress for fallback extraction
+                if total_pages > 0:
+                    pct = progress_start + ((page_idx + 1) / total_pages) * (progress_end - progress_start)
+                    _report(pct)
+            text = _clean_extracted_text("\n\n".join(t for t in pages_text if t.strip()).strip())
+            page_count = total_pages
             quality_score = min(1.0, len(text) / max(page_count * 500, 1))
             logger.info("[DocumentAI OCR] pypdf fallback pages=%d chars=%d", page_count, len(text))
             return OcrResult(
                 text=text,
                 page_count=page_count,
                 quality_score=quality_score,
-                structured_json=_structured_from_page_texts(pages_text, source="pypdf"),
+                # Clean each page (same reason as _layout_text: the structured payload must match
+                # the cleaned `text` above). Clean in place — never filter blanks — because index
+                # maps to page number here.
+                structured_json=_structured_from_page_texts(
+                    [_clean_extracted_text(t) for t in pages_text], source="pypdf"
+                ),
             )
         except Exception as exc:
             logger.warning("[DocumentAI OCR] pypdf failed: %s", exc)
 
     # Last resort: decode bytes as UTF-8
+    _report(progress_start + (progress_end - progress_start) * 0.5)
     try:
         text = data.decode("utf-8", errors="ignore").strip()
+        _report(progress_end)
         return OcrResult(
             text=text,
             page_count=1 if text else 0,

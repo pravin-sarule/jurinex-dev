@@ -1,19 +1,14 @@
-import React, { useRef, useEffect, useState } from 'react';
-import { Bot, MessageSquare, Copy, Download, FileText, ArrowRight, Printer, Code } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
-import rehypeSanitize from 'rehype-sanitize';
+import React, { useRef, useEffect, useState, useMemo } from 'react';
+import { Bot, MessageSquare, Copy, Download, FileText, Printer, Code } from 'lucide-react';
+import DOMPurify from 'dompurify';
 import {
   formatChatResponseForDisplay,
   chatResponseLooksLikeHtml,
+  looksLikeRawJsonString,
 } from '../../utils/formatChatResponse';
 import { getCleanText, downloadAsHtml, printResponse } from '../../utils/responseExportUtils';
-import {
-  ensureTableSeparators,
-  markdownTableComponents,
-  splitMarkdownIntoRenderChunks,
-} from '../../utils/markdownUtils';
+import { markdownTableComponents } from '../../utils/markdownUtils';
+import StreamingMarkdown from './StreamingMarkdown';
 import BrandingDownloadModal from '../BrandingDownload/BrandingDownloadModal';
 import '../../styles/ChatInterface.css';
 
@@ -147,7 +142,9 @@ const ChatResponsePanel = ({
    setShowWordModal(true);
  };
 
- const markdownComponents = {
+ // Stable reference — required so StreamingMarkdown's memoized blocks never
+ // re-render because of a new components object identity.
+ const markdownComponents = useMemo(() => ({
  ...markdownTableComponents,
  h1: ({node, ...props}) => (
  <h1 className="text-4xl font-bold mb-8 mt-8 text-gray-900 border-b-2 border-blue-500 pb-4 analysis-page-ai-response tracking-tight" {...props} />
@@ -167,36 +164,39 @@ const ChatResponsePanel = ({
  h6: ({node, ...props}) => (
  <h6 className="text-sm font-semibold mb-2 mt-3 text-gray-700 analysis-page-ai-response" {...props} />
  ),
- p: ({node, ...props}) => (
- <p className="mb-5 leading-relaxed text-gray-800 text-[15px] analysis-page-ai-response" {...props} />
- ),
+ p: ({node, children, ...props}) => {
+   const text = String(children);
+   // Skip lines that are raw table rows (starts with |)
+   if (text.trim().startsWith('|')) return null;
+   return <p className="mb-5 leading-relaxed text-gray-800 text-[15px] analysis-page-ai-response" {...props}>{children}</p>;
+ },
  strong: ({node, ...props}) => (
- <strong className="font-bold text-gray-900" {...props} />
+   <strong className="font-bold text-gray-900" {...props} />
  ),
  em: ({node, ...props}) => (
- <em className="italic text-gray-800" {...props} />
+   <em className="italic text-gray-800" {...props} />
  ),
  ul: ({node, ...props}) => (
- <ul className="list-disc pl-6 mb-4 space-y-2 text-gray-800" {...props} />
+   <ul className="list-disc pl-6 mb-4 space-y-2 text-gray-800" {...props} />
  ),
  ol: ({node, ...props}) => (
- <ol className="list-decimal pl-6 mb-4 space-y-2 text-gray-800" {...props} />
+   <ol className="list-decimal pl-6 mb-4 space-y-2 text-gray-800" {...props} />
  ),
  li: ({node, ...props}) => (
- <li className="leading-relaxed text-gray-800 analysis-page-ai-response" {...props} />
+   <li className="leading-relaxed text-gray-800 analysis-page-ai-response" {...props} />
  ),
  a: ({node, children, ...props}) => (
- <a
- {...props}
- className="text-blue-600 hover:text-blue-800 underline font-medium transition-colors"
- target="_blank"
- rel="noopener noreferrer"
- >
-   {children}
- </a>
+   <a
+   {...props}
+   className="text-blue-600 hover:text-blue-800 underline font-medium transition-colors"
+   target="_blank"
+   rel="noopener noreferrer"
+   >
+     {children}
+   </a>
  ),
  blockquote: ({node, ...props}) => (
- <blockquote className="border-l-4 border-blue-500 pl-6 py-3 my-6 bg-blue-50 text-gray-800 italic rounded-r-lg analysis-page-ai-response shadow-sm" {...props} />
+   <blockquote className="border-l-4 border-blue-500 pl-6 py-3 my-6 bg-blue-50 text-gray-800 italic rounded-r-lg analysis-page-ai-response shadow-sm" {...props} />
  ),
  code: ({node, inline, className, children, ...props}) => {
  const match = /language-(\w+)/.exec(className || '');
@@ -232,34 +232,59 @@ const ChatResponsePanel = ({
  <pre className="bg-gray-900 text-gray-100 p-4 rounded my-4 overflow-x-auto" {...props} />
  ),
  table: ({node, ...props}) => (
- <div className="md-table-scroll">
-   <table {...props} />
+ <div className="md-table-scroll" style={{ width: '100%', overflowX: 'auto', borderRadius: '8px', border: '1px solid #e2e8f0', margin: '1.5em 0' }}>
+   <table style={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', tableLayout: 'auto' }} {...props} />
  </div>
  ),
  thead: ({node, ...props}) => (
- <thead {...props} />
+ <thead className="bg-gray-50" {...props} />
  ),
  th: ({node, ...props}) => (
- <th {...props} />
+ <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider border-b-2 border-gray-200 border-r border-gray-100" style={{ whiteSpace: 'nowrap', minWidth: '140px' }} {...props} />
  ),
  tbody: ({node, ...props}) => (
- <tbody {...props} />
+ <tbody className="bg-white divide-y divide-gray-100" {...props} />
  ),
  tr: ({node, ...props}) => (
- <tr {...props} />
+ <tr className="hover:bg-gray-50/50 transition-colors" {...props} />
  ),
  td: ({node, ...props}) => (
- <td {...props} />
+ <td className="px-4 py-3 text-sm text-gray-700 border-r border-gray-50" style={{ verticalAlign: 'top', minWidth: '180px', lineHeight: '1.6' }} {...props} />
  ),
  hr: ({node, ...props}) => (
- <hr className="my-6 border-t-2 border-gray-300" {...props} />
+ <hr className="content-divider" {...props} />
  ),
  img: ({node, ...props}) => (
  <img className="max-w-full h-auto rounded-lg shadow-md my-4" alt="" {...props} />
  ),
- };
+ }), []);
 
  const isGenerating = isAnimatingResponse || isLoading || isGeneratingInsights;
+
+ // ── Response resolution (memoized — no regex work during unrelated re-renders) ──
+ const selectedMessage = useMemo(
+   () => messages.find((msg) => msg.id === selectedMessageId),
+   [messages, selectedMessageId]
+ );
+ const storedResponse = selectedMessage?.answer || selectedMessage?.response || '';
+ // Stored answer always wins; during live generation fall back to the stream buffer.
+ const rawResponse =
+   storedResponse || (isAnimatingResponse && animatedResponseContent) || currentResponse || '';
+ const isLiveStreaming = isAnimatingResponse && !storedResponse;
+ const responseContent = useMemo(() => {
+   if (!rawResponse) return '';
+   if (isLiveStreaming) {
+     // Live GFM stream: render raw; hold JSON-shaped payloads (learning mode /
+     // structured prompts) until the final formatted answer arrives on done.
+     return looksLikeRawJsonString(rawResponse) ? '' : rawResponse;
+   }
+   return formatChatResponseForDisplay(rawResponse);
+ }, [rawResponse, isLiveStreaming]);
+ const isHTML = useMemo(() => chatResponseLooksLikeHtml(responseContent), [responseContent]);
+ const sanitizedHtml = useMemo(
+   () => (isHTML ? DOMPurify.sanitize(responseContent) : ''),
+   [isHTML, responseContent]
+ );
 
  return (
 <div className="w-3/5 flex flex-col h-full bg-gray-50 relative">
@@ -355,17 +380,6 @@ const ChatResponsePanel = ({
  </p>
  </div>
 
- {isAnimatingResponse && (
- <div className="mt-3 flex justify-end">
- <button
- onClick={() => showResponseImmediately(currentResponse)}
- className="text-xs text-blue-600 hover:text-blue-800 flex items-center space-x-1 transition-colors"
- >
- <span>Skip animation</span>
- <ArrowRight className="h-3 w-3" />
- </button>
- </div>
- )}
  </div>
 
 <div className="bg-white rounded-lg shadow-sm p-6">
@@ -373,43 +387,15 @@ const ChatResponsePanel = ({
 className="horizontal-scroll-container"
 ref={horizontalScrollRef}
 >
-{(() => {
-  // First, get the selected message and its response
-  const selectedMessage = messages.find(msg => msg.id === selectedMessageId);
-  const messageResponse = selectedMessage?.answer || selectedMessage?.response || '';
-  
-  // Always prioritize the message's stored response
-  // Only use animatedResponseContent during active generation for the current message
-  // Only use currentResponse as a last resort if message has no stored response
-  let rawResponse = '';
-  if (messageResponse) {
-    // Message has a stored response - always use it
-    rawResponse = messageResponse;
-  } else if (isAnimatingResponse && animatedResponseContent) {
-    // During active generation, use animated content
-    rawResponse = animatedResponseContent;
-  } else if (currentResponse) {
-    // Last resort: use currentResponse only if message has no stored response
-    rawResponse = currentResponse;
-  }
-  
-  if (!rawResponse) return null;
-  
-  const responseContent = formatChatResponseForDisplay(rawResponse);
-  
-  if (!responseContent) return null;
-
-  const isHTML = chatResponseLooksLikeHtml(responseContent);
-  
-  return (
-    <div 
-      className={isHTML ? 'word-document-style' : 'formatted-assistant-markdown analysis-page-response'} 
-      ref={markdownOutputRef} 
+{(responseContent || isLiveStreaming) && (
+    <div
+      className={isHTML ? 'word-document-style' : 'formatted-assistant-markdown analysis-page-response'}
+      ref={markdownOutputRef}
       style={{ minWidth: 'fit-content' }}
     >
       {isHTML ? (
-        <div 
-          dangerouslySetInnerHTML={{ __html: responseContent }}
+        <div
+          dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
           style={{
             fontFamily: "'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
             lineHeight: '1.75',
@@ -418,26 +404,20 @@ ref={horizontalScrollRef}
           }}
         />
       ) : (
-        splitMarkdownIntoRenderChunks(ensureTableSeparators(responseContent)).map((chunk, index) => (
-          <ReactMarkdown
-            key={`${index}-${chunk.length}`}
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeRaw, rehypeSanitize]}
-            components={markdownComponents}
-          >
-            {chunk}
-          </ReactMarkdown>
-        ))
+        <StreamingMarkdown
+          content={responseContent}
+          isStreaming={isLiveStreaming}
+          components={markdownComponents}
+        />
       )}
-      
+
       {isAnimatingResponse && (
         <span className="inline-flex items-center ml-1">
           <span className="inline-block w-2 h-5 bg-blue-600 animate-pulse"></span>
         </span>
       )}
     </div>
-  );
-})()}
+)}
 </div>
  </div>
  </div>
@@ -492,4 +472,4 @@ ref={horizontalScrollRef}
  );
 };
 
-export default ChatResponsePanel;
+export default React.memo(ChatResponsePanel);

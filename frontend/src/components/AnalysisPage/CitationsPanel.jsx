@@ -133,6 +133,7 @@ const SOURCE_CFG = {
   local:          { icon: '🏛', label: 'Local DB',          bg: '#EFF4FF', border: '#C7D7FA', color: '#1A3A6B' },
   indian_kanoon:  { icon: '📚', label: 'Indian Kanoon API', bg: '#F0FDF4', border: '#BBF7D0', color: '#15532D' },
   google:         { icon: '🌐', label: 'Google Search',     bg: '#FFFBEB', border: '#FDE68A', color: '#92400E' },
+  web:            { icon: '🌍', label: 'Web (Verified)',    bg: '#F0F9FF', border: '#BFDBFE', color: '#0C4A6E' },
 };
 
 const AUDIT_CFG = {
@@ -192,6 +193,13 @@ function normalizeSourceKey(citation) {
   }
   if (citation?.isLocalAdmin === true || citation?.is_local_admin === true) {
     return 'local';
+  }
+  if (
+    citation?.sourceTier === 'web' ||
+    citation?._source === 'web_tier3' ||
+    st === 'web'
+  ) {
+    return 'web';
   }
   return citation?.source || citation?.sourceType || '';
 }
@@ -326,6 +334,17 @@ function JudgmentCitationCard({ citation, index }) {
               </span>
             )}
             <SourceBadge source={sourceKey} />
+            {sourceKey === 'web' && citation.authorityTier && (
+              <span style={{
+                fontFamily: 'monospace', fontSize: 8, fontWeight: 700, letterSpacing: '0.05em',
+                padding: '1px 5px', borderRadius: 2,
+                background: citation.authorityTier === 'T1' ? '#F0FDF4' : '#F0F9FF',
+                border: `1px solid ${citation.authorityTier === 'T1' ? '#BBF7D0' : '#BFDBFE'}`,
+                color: citation.authorityTier === 'T1' ? '#065F46' : '#0C4A6E',
+              }}>
+                {citation.authorityTier}
+              </span>
+            )}
             <AuditBadge status={citation.auditStatus} />
           </div>
         </div>

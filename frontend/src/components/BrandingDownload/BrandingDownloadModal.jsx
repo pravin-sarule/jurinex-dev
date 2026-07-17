@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { X, Download, FileText, Plus, CheckCircle } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { getProfiles } from '../../utils/brandingStorage';
+import { getProfiles, refreshProfiles } from '../../utils/brandingStorage';
 import { normalizeBrandingProfile } from '../../utils/brandingProfileDefaults';
 import { getUserIdForDrafting } from '../../config/apiConfig';
 import { downloadWithBranding } from '../../utils/brandingExport';
@@ -19,6 +19,8 @@ import { downloadAsPdf, downloadAsWord, downloadAsHtml } from '../../utils/respo
  *   format       — 'pdf' | 'word' | 'html'  (default 'pdf')
  *   xUserId      — string | number (required for branded PDF — Chromium print on server)
  *   module       — string (analytics tag, e.g. "chat", "analysis")
+ *   onDirect     — optional async () => void; replaces the built-in "Quick Download"
+ *                  behaviour (used by callers with their own plain export, e.g. merge)
  */
 export default function BrandingDownloadModal({
   isOpen,
@@ -29,6 +31,7 @@ export default function BrandingDownloadModal({
   format = 'pdf',
   xUserId,
   module: mod = 'download-modal',
+  onDirect,
 }) {
   const isPdf = format === 'pdf';
   const isWord = format === 'word';
@@ -51,11 +54,17 @@ export default function BrandingDownloadModal({
 
   useEffect(() => {
     if (!isOpen) { setDone(false); setStatus(''); return; }
-    const all = getProfiles();
-    setProfiles(all);
-    const def = all.find((p) => p.isDefault) || all[0] || null;
-    setSelectedId(def?.id ?? null);
-    setMode(def ? 'branded' : 'direct');
+    const applyList = (all, { keepSelection } = {}) => {
+      setProfiles(all);
+      setSelectedId((prev) => {
+        if (keepSelection && prev && all.some((p) => p.id === prev)) return prev;
+        const def = all.find((p) => p.isDefault) || all[0] || null;
+        return def?.id ?? null;
+      });
+      if (!keepSelection) setMode(all.length ? 'branded' : 'direct');
+    };
+    applyList(getProfiles()); // instant render from cache
+    refreshProfiles().then((all) => applyList(all, { keepSelection: true })); // server truth
     setDone(false);
     setStatus('');
   }, [isOpen]);
@@ -77,16 +86,21 @@ export default function BrandingDownloadModal({
         el = tmp;
       }
       if (mode === 'direct') {
-        if (!el) throw new Error('Content not found. Scroll to the response and try again.');
-        if (isPdf) {
-          setStatus('Generating PDF…');
-          await downloadAsPdf(el, resolvedFilename);
-        } else if (isWord) {
-          setStatus('Generating Word document…');
-          downloadAsWord(el, resolvedFilename);
+        if (onDirect) {
+          setStatus(isPdf ? 'Generating PDF…' : isWord ? 'Generating Word document…' : 'Generating file…');
+          await onDirect();
         } else {
-          setStatus('Generating HTML file…');
-          downloadAsHtml(el, resolvedFilename);
+          if (!el) throw new Error('Content not found. Scroll to the response and try again.');
+          if (isPdf) {
+            setStatus('Generating PDF…');
+            await downloadAsPdf(el, resolvedFilename);
+          } else if (isWord) {
+            setStatus('Generating Word document…');
+            downloadAsWord(el, resolvedFilename);
+          } else {
+            setStatus('Generating HTML file…');
+            downloadAsHtml(el, resolvedFilename);
+          }
         }
       } else {
         if (!el && !String(contentHtml ?? '').trim()) {

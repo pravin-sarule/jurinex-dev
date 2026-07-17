@@ -190,8 +190,9 @@ async def get_draft(
                 )
         
         # Merged field values (autopopulated + draft) so form and Drafter get complete data
+        # (pass the already-fetched draft to avoid re-running get_user_draft's queries)
         field_data = draft_db.get_draft_field_data_for_retrieve(draft_id, user_id)
-        draft_field_values = draft_db.get_merged_field_values_for_draft(draft_id, user_id)
+        draft_field_values = draft_db.get_merged_field_values_for_draft(draft_id, user_id, draft=draft)
         
         return {
             "success": True,

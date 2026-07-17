@@ -1,31 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, memo, useDeferredValue, startTransition } from 'react';
 import { useNavigate } from 'react-router-dom';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-
-// ── Markdown renderer (no @tailwindcss/typography needed) ─────────────────────
-const MD_COMPONENTS = {
-  h1: ({ children }) => <h1 className="text-base font-bold text-[#1E293B] mt-3 mb-1.5">{children}</h1>,
-  h2: ({ children }) => <h2 className="text-sm font-bold text-[#1E293B] mt-3 mb-1.5">{children}</h2>,
-  h3: ({ children }) => <h3 className="text-sm font-semibold text-[#1E293B] mt-2.5 mb-1">{children}</h3>,
-  p:  ({ children }) => <p  className="text-[15px] text-[#334155] leading-7 my-1.5">{children}</p>,
-  strong: ({ children }) => <strong className="font-semibold text-[#1E293B]">{children}</strong>,
-  em:     ({ children }) => <em className="italic text-[#475569]">{children}</em>,
-  ul: ({ children }) => <ul className="my-1.5 pl-5 space-y-0.5 list-disc text-sm text-[#334155]">{children}</ul>,
-  ol: ({ children }) => <ol className="my-1.5 pl-5 space-y-0.5 list-decimal text-sm text-[#334155]">{children}</ol>,
-  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
-  code: ({ inline, children }) => inline
-    ? <code className="bg-[#F1F5F9] text-[#0F172A] px-1.5 py-0.5 rounded text-xs font-mono">{children}</code>
-    : <code className="block bg-[#F8FAFC] border border-[#E2E8F0] rounded-xl p-3 text-xs font-mono text-[#1E293B] overflow-x-auto whitespace-pre my-2">{children}</code>,
-  pre: ({ children }) => <div>{children}</div>,
-  blockquote: ({ children }) => <blockquote className="border-l-2 border-[#21C1B6] pl-3 my-2 text-[#64748B] italic text-sm">{children}</blockquote>,
-  hr: () => <hr className="border-[#E2E8F0] my-3" />,
-  a:  ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="text-[#21C1B6] underline hover:text-[#0d9488]">{children}</a>,
-  table: ({ children }) => <div className="overflow-x-auto my-3 rounded-lg border border-[#E2E8F0]"><table className="w-full min-w-[480px] text-sm border-collapse">{children}</table></div>,
-  thead: ({ children }) => <thead className="bg-[#F1F5F9]">{children}</thead>,
-  th: ({ children }) => <th className="border border-[#E2E8F0] px-3 py-2 text-left font-semibold text-[#334155] whitespace-nowrap">{children}</th>,
-  td: ({ children }) => <td className="border border-[#E2E8F0] px-3 py-2 text-[#334155] align-top">{children}</td>,
-};
+import FormattedAssistantContent from '../components/ChatInterface/FormattedAssistantContent';
 import {
   uploadBatchFile,
   getFileStatus,
@@ -300,7 +275,7 @@ const PerformantText = memo(function PerformantText({
       <div className="flex-1 min-h-0 overflow-y-auto pr-1" style={{ maxHeight: contentMaxHeight }}>
         {useMd ? (
           <div className="batch-md-content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{slice}</ReactMarkdown>
+            <FormattedAssistantContent raw={slice} />
           </div>
         ) : (
           <p className="text-[15px] text-[#334155] leading-7 whitespace-pre-wrap break-words">

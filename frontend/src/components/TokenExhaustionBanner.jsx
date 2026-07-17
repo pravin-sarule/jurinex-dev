@@ -19,6 +19,33 @@ export default function TokenExhaustionBanner({ quotaStatus, onTopupSuccess }) {
 
   if (!quotaStatus) return null;
 
+  const handleTopupSuccess = (balance) => {
+    setShowTopup(false);
+    setExhaustionDismissed(false);
+    setTopupDismissed(false);
+    onTopupSuccess?.(balance);
+  };
+
+  const topupModal = showTopup && (
+    <TokenTopupModal onClose={() => setShowTopup(false)} onSuccess={handleTopupSuccess} />
+  );
+
+  const btnBase = {
+    border: 'none', borderRadius: 6, padding: '4px 11px',
+    fontSize: 12, fontWeight: 600, cursor: 'pointer',
+    display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap',
+  };
+
+  const dismissBtn = (onClick) => (
+    <button
+      onClick={onClick}
+      style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,.75)', cursor: 'pointer', padding: '0 2px', display: 'flex', marginLeft: 4 }}
+      aria-label="Dismiss"
+    >
+      <X size={14} />
+    </button>
+  );
+
   // ── Free tier exhaustion (highest priority) ────────────────────────────────
   const freeTier   = quotaStatus.free_tier;
   const isFreeTier = !!freeTier?.is_free_tier;
@@ -78,33 +105,6 @@ export default function TokenExhaustionBanner({ quotaStatus, onTopupSuccess }) {
   const isUsingTopup = !isBlocked && (
     quotaStatus.source === 'topup' ||
     (!!quotaStatus.plan_exhausted && topupBalance > 0)
-  );
-
-  const handleTopupSuccess = (balance) => {
-    setShowTopup(false);
-    setExhaustionDismissed(false);
-    setTopupDismissed(false);
-    onTopupSuccess?.(balance);
-  };
-
-  const topupModal = showTopup && (
-    <TokenTopupModal onClose={() => setShowTopup(false)} onSuccess={handleTopupSuccess} />
-  );
-
-  const btnBase = {
-    border: 'none', borderRadius: 6, padding: '4px 11px',
-    fontSize: 12, fontWeight: 600, cursor: 'pointer',
-    display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap',
-  };
-
-  const dismissBtn = (onClick) => (
-    <button
-      onClick={onClick}
-      style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,.75)', cursor: 'pointer', padding: '0 2px', display: 'flex', marginLeft: 4 }}
-      aria-label="Dismiss"
-    >
-      <X size={14} />
-    </button>
   );
 
   // ── Red — truly blocked (no tokens at all) ──────────────────────────────

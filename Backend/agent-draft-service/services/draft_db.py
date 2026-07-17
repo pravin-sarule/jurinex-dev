@@ -7,11 +7,51 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 import psycopg2
+import psycopg2.pool
 from psycopg2.extras import RealDictCursor, execute_values
+
+
+def extract_prompt_from_section_prompts(prompts: Any) -> str:
+    """
+    Extract the drafting prompt from a section_prompts JSONB payload.
+
+    The Template Analyzer stores the master drafting instruction (which embeds
+    the verbatim template segment) under 'ai_drafting_instruction'; older data
+    used 'prompt' / 'drafting_prompt', and field_prompts entries. Checking only
+    'prompt' made user-template prompts resolve to "" — the drafter then fell
+    back to a generic instruction and free-drafted (hallucination source).
+    """
+    import json as _json
+
+    if isinstance(prompts, str):
+        try:
+            prompts = _json.loads(prompts)
+        except Exception:
+            return ""
+
+    entries: List[Dict[str, Any]] = []
+    if isinstance(prompts, dict):
+        entries = [prompts]
+    elif isinstance(prompts, list):
+        entries = [p for p in prompts if isinstance(p, dict)]
+
+    for entry in entries:
+        for key in ("ai_drafting_instruction", "prompt", "drafting_prompt"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        # Analyzer prompt payloads may nest under field_prompts[{field_id, prompt}]
+        field_prompts = entry.get("field_prompts")
+        if isinstance(field_prompts, list):
+            for fp in field_prompts:
+                if isinstance(fp, dict) and isinstance(fp.get("prompt"), str) and fp["prompt"].strip():
+                    return fp["prompt"]
+    return ""
 
 
 def _clean_section_title(text: str) -> str:
@@ -50,17 +90,44 @@ def get_draft_connection_string() -> str:
     return url
 
 
+_draft_pool = None
+_draft_pool_lock = threading.Lock()
+
+
+def _get_draft_pool():
+    """Lazily created shared connection pool — a fresh psycopg2.connect per call
+    was costing a TCP+auth handshake on every DB helper (10-15 per draft open)."""
+    global _draft_pool
+    if _draft_pool is None:
+        with _draft_pool_lock:
+            if _draft_pool is None:
+                _draft_pool = psycopg2.pool.ThreadedConnectionPool(
+                    minconn=1,
+                    maxconn=int(os.environ.get("DRAFT_DB_POOL_MAX", "12")),
+                    dsn=get_draft_connection_string(),
+                )
+    return _draft_pool
+
+
 @contextmanager
 def get_draft_conn():
-    conn = psycopg2.connect(get_draft_connection_string())
+    pool_ref = _get_draft_pool()
+    conn = pool_ref.getconn()
+    if conn.closed:
+        pool_ref.putconn(conn, close=True)
+        conn = pool_ref.getconn()
+    discard = False
     try:
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            discard = True
         raise
     finally:
-        conn.close()
+        pool_ref.putconn(conn, close=discard or bool(conn.closed))
 
 
 def list_templates(
@@ -120,6 +187,45 @@ def list_templates(
             cur.execute(query, params)
             rows = cur.fetchall()
     return [dict(r) for r in rows]
+
+
+def get_template_summary(template_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Single-template lookup in the same shape as list_templates() rows.
+    Replaces the previous pattern of loading the whole gallery and scanning
+    it in Python to find one template.
+    """
+    query = """
+        SELECT t.template_id,
+               t.template_name AS name,
+               t.description,
+               t.category,
+               t.sub_category,
+               t.language,
+               t.status,
+               (t.status = 'active') AS is_active,
+               t.created_by,
+               t.created_at,
+               t.updated_at,
+               t.image_url AS template_image_url,
+               ti.image_id, ti.gcs_bucket AS preview_gcs_bucket, ti.gcs_path AS preview_gcs_path,
+               ti.page_number AS preview_page_number
+        FROM templates t
+        LEFT JOIN LATERAL (
+            SELECT image_id, gcs_bucket, gcs_path, page_number
+            FROM template_images
+            WHERE template_images.template_id = t.template_id
+            ORDER BY page_number ASC NULLS LAST
+            LIMIT 1
+        ) ti ON true
+        WHERE t.template_id::text = %s
+        LIMIT 1
+    """
+    with get_draft_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, (str(template_id),))
+            row = cur.fetchone()
+    return dict(row) if row else None
 
 
 def get_template_by_id(template_id: str) -> Optional[Dict[str, Any]]:
@@ -466,20 +572,7 @@ def get_template_fields_custom(template_id: str) -> List[Dict[str, Any]]:
     fields = []
     for idx, row in enumerate(rows):
         # Use master_instruction as default value if desired, or just placeholder
-        prompts = row.get("section_prompts", [])
-        default_prompt = ""
-        # Parse prompts JSONB (could be string or list/dict)
-        import json as _json
-        if isinstance(prompts, str):
-            try:
-                prompts = _json.loads(prompts)
-            except:
-                prompts = []
-                
-        if isinstance(prompts, list) and len(prompts) > 0:
-            default_prompt = prompts[0].get("prompt", "")
-        elif isinstance(prompts, dict):
-            default_prompt = prompts.get("prompt", "")
+        default_prompt = extract_prompt_from_section_prompts(row.get("section_prompts", []))
 
         section_name = row["section_name"]
         field_key = section_name.lower().replace(" ", "_")
@@ -779,16 +872,24 @@ def get_draft_field_data_for_retrieve(draft_id: str, user_id: int) -> Optional[D
     }
 
 
-def get_merged_field_values_for_draft(draft_id: str, user_id: int) -> Dict[str, Any]:
+def get_merged_field_values_for_draft(
+    draft_id: str,
+    user_id: int,
+    draft: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Return field_values for a draft merged from:
     1. Autopopulated values (template_user_field_values from InjectionAgent)
     2. Draft-saved values (draft_field_data) overlay so user edits take precedence.
     Use this whenever the Drafter or Librarian needs complete field data so all
     sections get petitioner name, court name, etc. and no [] or blank placeholders.
+
+    Pass `draft` when the caller already fetched it — get_user_draft is a
+    multi-query call and re-running it doubled the draft-open DB work.
     """
     uid = int(user_id)
-    draft = get_user_draft(draft_id, uid)
+    if draft is None:
+        draft = get_user_draft(draft_id, uid)
     if not draft:
         return {}
     template_id = draft.get("template_id")
@@ -1251,16 +1352,9 @@ def get_template_sections(template_id: str) -> List[Dict[str, Any]]:
             len(results),
         )
         row["section_key"] = row["section_name"].lower().replace(" ", "_")
-        # Extract default_prompt from section_prompts JSONB array
-        # Each element has {"prompt": "...", "field_id": "master_instruction"}
-        prompts = row.get("section_prompts", [])
-        default_prompt = ""
-        if isinstance(prompts, list) and len(prompts) > 0:
-            # Use the first prompt (master_instruction) as the default
-            default_prompt = prompts[0].get("prompt", "")
-        elif isinstance(prompts, dict):
-            default_prompt = prompts.get("prompt", "")
-        row["default_prompt"] = default_prompt
+        # Extract the drafting prompt from section_prompts JSONB
+        # (handles ai_drafting_instruction / prompt / drafting_prompt keys).
+        row["default_prompt"] = extract_prompt_from_section_prompts(row.get("section_prompts", []))
         row["is_required"] = True  # All template_analysis_sections are required
         results.append(row)
     return results

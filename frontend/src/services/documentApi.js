@@ -407,6 +407,24 @@ const getAuthHeader = () => {
   };
 };
 
+/** POST merged Q&A sections to an export endpoint and trigger a browser download. */
+async function exportMergedFile(endpoint, extension, title, sections, includeQuestions = true, filename = null) {
+  const response = await axios.post(
+    `${API_BASE_URL}/export/${endpoint}`,
+    { title, sections, include_questions: includeQuestions },
+    { headers: getAuthHeader(), responseType: 'blob' }
+  );
+  const url = URL.createObjectURL(response.data);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename
+    || `${String(title || 'Merged_Legal_Analysis').replace(/[^\w\- ]+/g, '').trim().replace(/ /g, '_') || 'Merged_Legal_Analysis'}.${extension}`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 const documentApi = {
   createFolder: async (folderName, parentPath = '') => {
     const response = await axios.post(
@@ -928,6 +946,16 @@ const documentApi = {
       { headers: getAuthHeader() }
     );
     return response.data;
+  },
+
+  /** Merge selected Q&A sections into a .docx and trigger a browser download. */
+  exportMergedDocx: async (title, sections, includeQuestions = true) => {
+    await exportMergedFile('merged-docx', 'docx', title, sections, includeQuestions);
+  },
+
+  /** Merge selected Q&A sections into a .pdf and trigger a browser download. */
+  exportMergedPdf: async (title, sections, includeQuestions = true, filename = null) => {
+    await exportMergedFile('merged-pdf', 'pdf', title, sections, includeQuestions, filename);
   },
 
   getSecrets: async () => {

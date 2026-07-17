@@ -131,7 +131,16 @@ class DocumentProcessingQueue:
             try:
                 fn(*args, **kwargs)
             except Exception as exc:
-                logger.exception("[DocumentProcessingQueue] worker error: %s", exc)
+                logger.exception("[DocumentProcessingQueue] worker crashed: %s", exc)
+                # Best-effort: if _run_job crashed before updating documents,
+                # mark any documents still at 20% (processing) as failed via the
+                # FolderWorkflowService callback stored in kwargs.
+                _on_crash = kwargs.get("_on_crash")
+                if callable(_on_crash):
+                    try:
+                        _on_crash(exc)
+                    except Exception:
+                        pass
             finally:
                 self._task_queue.task_done()
                 with self._count_lock:
@@ -776,6 +785,34 @@ class FolderWorkflowService:
             raise ValueError(f"Case '{case_id}' not found.")
         return self._get_case_from_db(case_id, user_id) or self._serialize_case_row(updated_case)
 
+    def _case_storage_summary(self, user_id: str | None, folders: list[dict[str, Any]]) -> dict[str, Any]:
+        """Aggregate storage across ALL of the user's cases: uploaded files + case chat text."""
+        files_bytes = sum(int(f.get("storage_bytes") or 0) for f in folders)
+        file_count = sum(int(f.get("document_count") or 0) for f in folders)
+        chat_bytes = 0
+        if user_id:
+            try:
+                with get_db_connection() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT COALESCE(SUM(
+                               OCTET_LENGTH(COALESCE(question, '')) +
+                               OCTET_LENGTH(COALESCE(answer, ''))
+                           ), 0)::bigint AS chat_bytes
+                           FROM folder_chats WHERE user_id::text = %s""",
+                        [str(user_id)],
+                    )
+                    row = cur.fetchone() or {}
+                    chat_bytes = int(row.get("chat_bytes") or 0)
+            except Exception as exc:
+                logger.warning("[FolderService] case chat storage lookup failed: %s", exc)
+        return {
+            "files_bytes": files_bytes,
+            "chat_bytes": chat_bytes,
+            "total_bytes": files_bytes + chat_bytes,
+            "case_count": len(folders),
+            "file_count": file_count,
+        }
+
     def list_folders(self, user_id: str | None = None) -> dict[str, Any]:
         if is_db_available():
             db_folders = self._list_folders_from_db(user_id)
@@ -785,7 +822,10 @@ class FolderWorkflowService:
                 len(db_folders),
             )
             if db_folders:
-                return {"folders": db_folders}
+                return {
+                    "folders": db_folders,
+                    "storage_summary": self._case_storage_summary(user_id, db_folders),
+                }
             # Fallback: if user_files folders are missing, derive folder cards from cases table.
             case_folders = self._list_folders_from_cases_db(user_id)
             logger.info(
@@ -1413,6 +1453,86 @@ class FolderWorkflowService:
             generated_at=query_response.generated_at,
         )
 
+    def clean_existing_chunk_text(self, user_id: str, folder_name: str, *, use_llm: bool = True) -> dict[str, Any]:
+        """
+        Re-clean the text of ALREADY-stored chunks for a case, IN PLACE.
+
+        No PDF re-OCR, no re-embedding — it rewrites only `file_chunks.content`, so
+        the existing embeddings and chat history are preserved. Two passes per chunk:
+          1. deterministic OCR-artefact repair (free) — dictionary + numbers + dates.
+          2. when `use_llm` and the chunk still LOOKS fragmented, an LLM reconstruction
+             pass repairs arbitrary fragments (names/places, "p .a .", "18 %") that no
+             dictionary can cover. The LLM never loses content (returns original on error).
+        Fixes documents indexed before the OCR work so garbled chunks render clean.
+        """
+        from app.services.adapters.document_ai import (
+            normalize_ocr_artifacts,
+            _looks_fragmented,
+            reconstruct_chunk_text,
+        )
+
+        if not is_db_available():
+            return {"success": False, "message": "Database unavailable.", "updated": 0}
+
+        # Resolve the case's file_ids the same way the chat path does.
+        file_ids: list[str] = []
+        try:
+            db_docs = self.get_documents_in_folder(folder_name, user_id)
+            records = db_docs.get("documents") or db_docs.get("files") or []
+            file_ids = [str(item.get("id")) for item in records if item.get("id")]
+        except Exception:
+            file_ids = []
+        if not file_ids:
+            file_ids = self._resolve_file_ids_for_folder_case(folder_name, user_id)
+        if not file_ids:
+            return {"success": False, "message": "No documents found for this case.", "updated": 0}
+
+        scanned = 0
+        updated = 0
+        llm_reconstructed = 0
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, content FROM file_chunks WHERE file_id::text = ANY(%s)",
+                [file_ids],
+            )
+            rows = cur.fetchall() or []
+            for row in rows:
+                scanned += 1
+                chunk_id = row.get("id")
+                content = row.get("content") or ""
+                # Pass 1: deterministic (free).
+                cleaned = normalize_ocr_artifacts(content)
+                # Pass 2: LLM reconstruction only for chunks still fragmented.
+                if use_llm and _looks_fragmented(cleaned):
+                    reconstructed = reconstruct_chunk_text(cleaned)
+                    if reconstructed and reconstructed != cleaned:
+                        cleaned = reconstructed
+                        llm_reconstructed += 1
+                if cleaned and cleaned != content:
+                    cur.execute(
+                        "UPDATE file_chunks SET content = %s, updated_at = NOW() WHERE id = %s",
+                        [cleaned, chunk_id],
+                    )
+                    updated += 1
+            conn.commit()
+
+        logger.info(
+            "[FolderService] task=clean_existing_chunk_text folder=%s files=%d scanned=%d updated=%d llm=%d use_llm=%s",
+            folder_name, len(file_ids), scanned, updated, llm_reconstructed, use_llm,
+        )
+        return {
+            "success": True,
+            "folderName": folder_name,
+            "file_count": len(file_ids),
+            "chunks_scanned": scanned,
+            "chunks_updated": updated,
+            "llm_reconstructed": llm_reconstructed,
+            "message": (
+                f"Cleaned {updated} of {scanned} chunk(s) in place "
+                f"({llm_reconstructed} via LLM reconstruction; embeddings kept)."
+            ),
+        }
+
     def _build_query_with_recent_history(
         self,
         *,
@@ -1587,17 +1707,59 @@ class FolderWorkflowService:
         return {"success": True, "deleted": file_id, "name": file_name}
 
     def delete_session(self, folder_name: str, session_id: str) -> dict[str, Any]:
+        """
+        Delete a chat session from memory AND from folder_chats in the DB.
+
+        Sessions are listed from the DB, so an in-memory-only delete made every
+        session from a previous server process undeletable (404 → "Failed to
+        delete session." in the UI).
+        """
         with self._lock:
             session = self._sessions.get(folder_name, {}).pop(session_id, None)
-        if not session:
+
+        db_deleted = 0
+        raw = (session_id or "").strip()
+        is_uuid_like = bool(_UUID_DASHED.match(raw) or _UUID_HEX32.match(raw))
+        if is_db_available() and is_uuid_like:
+            try:
+                with get_db_connection() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM folder_chats WHERE folder_name = %s AND session_id = %s::uuid",
+                        [folder_name, normalize_folder_chat_session_uuid(raw)],
+                    )
+                    db_deleted = cur.rowcount or 0
+                    conn.commit()
+            except Exception as exc:
+                logger.warning(
+                    "[FolderService] delete_session DB delete failed folder=%s session=%s error=%s",
+                    folder_name,
+                    session_id,
+                    exc,
+                )
+
+        if not session and db_deleted == 0:
             raise ValueError(f"Session '{session_id}' was not found for folder '{folder_name}'.")
-        return {"success": True, "deleted": session_id}
+        return {"success": True, "deleted": session_id, "db_rows_deleted": db_deleted}
 
     def delete_all_sessions(self, folder_name: str) -> dict[str, Any]:
         with self._lock:
             deleted_count = len(self._sessions.get(folder_name, {}))
             self._sessions[folder_name] = {}
-        return {"success": True, "deleted_count": deleted_count}
+
+        db_deleted = 0
+        if is_db_available():
+            try:
+                with get_db_connection() as conn, conn.cursor() as cur:
+                    cur.execute("DELETE FROM folder_chats WHERE folder_name = %s", [folder_name])
+                    db_deleted = cur.rowcount or 0
+                    conn.commit()
+            except Exception as exc:
+                logger.warning(
+                    "[FolderService] delete_all_sessions DB delete failed folder=%s error=%s",
+                    folder_name,
+                    exc,
+                )
+        return {"success": True, "deleted_count": deleted_count, "db_rows_deleted": db_deleted}
 
     def list_prompt_audit(self, case_id: str) -> list[PromptAuditRecord]:
         return [record for record in self._prompt_audit if record.case_id == case_id]
@@ -1619,7 +1781,51 @@ class FolderWorkflowService:
             job.updated_at = datetime.now(tz=UTC)
             document_ids = list(job.documents.keys())
 
-        stored_case = self._pipeline._cases[case_id]
+        # Re-create the case in memory if service restarted and case was lost
+        stored_case = self._pipeline._cases.get(case_id)
+        if stored_case is None:
+            with self._lock:
+                job_ref = self._jobs.get(job_id)
+                user_id = job_ref.user_id if job_ref else "unknown"
+            stored_case = self._ensure_case(user_id, case_id)
+            logger.warning(
+                "[FolderService] _run_job: case_id=%s not in memory — re-created (service may have restarted)",
+                case_id,
+            )
+
+        try:
+            self._run_job_inner(job_id, case_id, documents, stored_case, document_ids)
+        except Exception as exc:
+            # Catch-all: if _run_job_inner crashes before processing futures, mark every
+            # document that is still at 20% (processing) as failed so they never get stuck.
+            logger.exception(
+                "[FolderService] _run_job crashed before completing case_id=%s job_id=%s: %s",
+                case_id, job_id, exc,
+            )
+            with self._lock:
+                job_ref = self._jobs.get(job_id)
+                if job_ref:
+                    for doc_id, doc_status in job_ref.documents.items():
+                        if doc_status.status == ProcessingState.processing and doc_status.processing_progress <= 20.0:
+                            db_file_id = str(doc_status.metadata.get("db_file_id") or doc_status.file_id or "")
+                            self._update_db_file_processing_state(
+                                file_id=db_file_id or None,
+                                status=ProcessingState.error.value,
+                                processing_progress=100.0,
+                                current_operation="failed",
+                            )
+                            self._update_document(job_id, doc_id, ProcessingState.error, 100.0, "failed", error=str(exc))
+                    job_ref.status = ProcessingState.error
+                    job_ref.updated_at = datetime.now(tz=UTC)
+
+    def _run_job_inner(
+        self,
+        job_id: str,
+        case_id: str,
+        documents: list[DocumentReference],
+        stored_case: Any,
+        document_ids: list[str],
+    ) -> None:
         max_workers = max(1, min(self._pipeline._settings.max_parallel_document_workers, len(documents) or 1))
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="doc-worker") as executor:
             future_map = {}
@@ -1670,13 +1876,17 @@ class FolderWorkflowService:
                     "source_document": document,
                 }
 
-            for future in as_completed(future_map):
+            # Per-document timeout (env-overridable via DOCUMENT_PROCESSING_TIMEOUT_SECONDS).
+            # Covers large PDFs with many Document AI OCR batches + embedding.
+            _doc_timeout = int(settings.document_processing_timeout_seconds)
+
+            for future in as_completed(future_map, timeout=None):
                 future_context = future_map[future]
                 document_id = future_context["document_id"]
                 source_document = future_context["source_document"]
                 db_file_id = source_document.metadata.get("db_file_id") if isinstance(source_document.metadata, dict) else None
                 try:
-                    bundle = future.result()
+                    bundle = future.result(timeout=_doc_timeout)
                     self._update_db_file_processing_state(
                         file_id=db_file_id,
                         status=ProcessingState.embedding_pending.value,
@@ -1721,6 +1931,27 @@ class FolderWorkflowService:
                         chunk_count=bundle.process_result.chunk_count,
                         quality_score=bundle.process_result.quality_score,
                         metadata=bundle.process_result.metadata,
+                    )
+                except TimeoutError as exc:
+                    # future.result(timeout=...) raises concurrent.futures.TimeoutError
+                    # (subclass of TimeoutError in Python 3.11+).
+                    # The worker thread continues running but we stop waiting for it.
+                    logger.error(
+                        "[Agent:DocumentClassificationAgent] status=timeout task=parallel_document_processing "
+                        "case_id=%s document_id=%s timeout=%ss — marking as failed",
+                        case_id,
+                        document_id,
+                        _doc_timeout,
+                    )
+                    self._update_db_file_processing_state(
+                        file_id=db_file_id,
+                        status=ProcessingState.error.value,
+                        processing_progress=100.0,
+                        current_operation="timeout",
+                    )
+                    self._update_document(
+                        job_id, document_id, ProcessingState.error, 100.0, "timeout",
+                        error=f"Processing timed out after {_doc_timeout}s",
                     )
                 except Exception as exc:
                     logger.exception(
@@ -1911,6 +2142,8 @@ class FolderWorkflowService:
                     "created_at": row["created_at"].isoformat() if row.get("created_at") else "",
                     "children": folder_children,
                     "document_count": len(folder_children),
+                    # Per-case storage: sum of this folder's file sizes (bytes).
+                    "storage_bytes": sum(int(c.get("size") or 0) for c in folder_children),
                 }
             )
         logger.info(

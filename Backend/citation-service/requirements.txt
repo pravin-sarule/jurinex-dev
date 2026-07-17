@@ -15,3 +15,4 @@ rich
 httpx
 requests
 certifi
+pydantic>=2.0.0

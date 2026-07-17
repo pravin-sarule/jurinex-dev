@@ -200,11 +200,33 @@ const LoginPage = () => {
  setTimeout(() => {
  navigate(getPostLoginDestination(), { replace: true, state: getPostLoginState() });
  }, 1500);
- } else {
- setServerMessage(result.message || "Login failed. Please try again.");
- }
+    } else {
+      if (result.code === 'FIRM_DISABLED') {
+        setServerMessage('Your firm is blocked by Jurinex. Please contact your firm admin.');
+      } else if (result.code === 'USER_DISABLED' || result.code === 'FIRM_NOT_APPROVED') {
+        setServerMessage(
+          result.code === 'FIRM_NOT_APPROVED'
+            ? (result.message || 'Your firm is not approved yet.')
+            : (result.message || 'Your account is disabled. Contact your firm admin or support.')
+        );
+      } else {
+        setServerMessage(result.message || "Login failed. Please try again.");
+      }
+    }
  } catch (error) {
- setServerMessage(error.message || "Login failed. Please try again.");
+ const code = error.code || error.response?.data?.code;
+ const status = error.response?.status;
+ if (code === 'FIRM_DISABLED') {
+   setServerMessage('Your firm is blocked by Jurinex. Please contact your firm admin.');
+ } else if (code === 'USER_DISABLED' || code === 'FIRM_NOT_APPROVED' || status === 403) {
+   setServerMessage(
+     code === 'FIRM_NOT_APPROVED'
+       ? (error.message || 'Your firm is not approved yet.')
+       : (error.message || 'Your account is disabled. Contact your firm admin or support.')
+   );
+ } else {
+   setServerMessage(error.message || "Login failed. Please try again.");
+ }
  console.error('Login error:', error);
  } finally {
  setIsLoading(false);

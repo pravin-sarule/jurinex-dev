@@ -236,6 +236,14 @@ def _count_total_chunks(file_ids: List[str]) -> int:
         return 9999
 
 
+def _safe_search(search_fn, embedding):
+    try:
+        return search_fn(embedding)
+    except Exception as e:
+        logger.warning("[AutopopulationAgent][RAG] Vector search failed: %s", e)
+        return []
+
+
 def _fetch_context_via_rag(
     fields_schema: List[Dict[str, Any]],
     file_ids: Optional[List[str]],
@@ -259,18 +267,31 @@ def _fetch_context_via_rag(
             "property address description plot survey number district taluka state jurisdiction court",
         ]
 
+        # Embed ALL queries in one batched call (was: one embedding round-trip
+        # per query), then run the vector searches concurrently.
+        try:
+            embeddings = generate_embeddings(queries)
+        except Exception as e:
+            logger.warning("[AutopopulationAgent][RAG] Batch embedding failed: %s", e)
+            embeddings = []
+
+        def _search(embedding: Any) -> List[Dict[str, Any]]:
+            return find_nearest_chunks(
+                embedding=embedding,
+                limit=top_k_per_query,
+                file_ids=file_ids if file_ids else None,
+                user_id=int(user_id),
+            )
+
         chunk_map: Dict[str, Any] = {}
-        for q in queries:
-            try:
-                embeddings = generate_embeddings([q])
-                if not embeddings or not embeddings[0]:
-                    continue
-                rows = find_nearest_chunks(
-                    embedding=embeddings[0],
-                    limit=top_k_per_query,
-                    file_ids=file_ids if file_ids else None,
-                    user_id=int(user_id),
-                )
+        valid_embeddings = [e for e in (embeddings or []) if e]
+        if valid_embeddings:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=len(valid_embeddings)) as pool:
+                search_results = list(pool.map(
+                    lambda emb: _safe_search(_search, emb), valid_embeddings
+                ))
+            for rows in search_results:
                 for row in rows:
                     cid = str(row.get("chunk_id") or "")
                     content = row.get("content") or ""
@@ -285,8 +306,6 @@ def _fetch_context_via_rag(
                             "content": content, "score": similarity, "hits": 1,
                             "page": row.get("page_start"), "heading": row.get("heading") or "",
                         }
-            except Exception as e:
-                logger.warning("[AutopopulationAgent][RAG] Query failed: %s", e)
 
         if not chunk_map:
             return _fetch_ordered_text(file_ids, user_id)

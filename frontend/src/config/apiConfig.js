@@ -7,11 +7,26 @@
 
 const DEFAULT_GATEWAY_URL = 'https://gateway-service-120280829617.asia-south1.run.app';
 
+// Upgrade any accidentally-set http:// Cloud Run URL to https:// (Mixed Content guard).
+// localhost / 127.0.0.1 URLs are left untouched so local dev still works.
+function ensureHttps(url) {
+  if (!url) return url;
+  const s = String(url).trim();
+  if (
+    s.startsWith('http://') &&
+    !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?/.test(s)
+  ) {
+    return 'https://' + s.slice(7);
+  }
+  return s;
+}
+
 // Get base gateway URL from environment or use deployed default
-const GATEWAY_URL =
+const GATEWAY_URL = ensureHttps(
   import.meta.env.VITE_APP_GATEWAY_URL ||
   import.meta.env.VITE_APP_API_URL ||
-  DEFAULT_GATEWAY_URL;
+  DEFAULT_GATEWAY_URL
+);
 
 function ensureLocalhostPort(url, fallbackPort) {
   try {
@@ -35,7 +50,7 @@ export const GATEWAY_BASE_URL = GATEWAY_URL;
 // Service-specific endpoints (gateway proxies; can override with direct URLs via env)
 export const AUTH_SERVICE_URL =
   import.meta.env.VITE_APP_AUTH_SERVICE_URL ||
-  'https://authservice-120280829617.asia-south1.run.app';
+  'http://localhost:5001';
 
 const IS_LOCAL_DEV_HOST =
   typeof window !== 'undefined' &&
@@ -51,17 +66,18 @@ const rawAgenticChat =
   '';
 
 function agenticChatHost() {
-  const s = String(rawAgenticChat || '').trim().replace(/\/$/, '');
+  const s = ensureHttps(String(rawAgenticChat || '').trim().replace(/\/$/, ''));
   if (s) return s;
-  if (IS_LOCAL_DEV_HOST) return '';
+  if (IS_LOCAL_DEV_HOST) return 'http://localhost:8096';
   return DEFAULT_AGENTIC_CHAT_HOST;
 }
 
 export const AGENTIC_CHAT_SERVICE_URL = agenticChatHost();
 
-export const CHAT_MODEL_BASE_URL =
+export const CHAT_MODEL_BASE_URL = ensureHttps(
   import.meta.env.VITE_APP_CHAT_MODEL_URL ||
-  AGENTIC_CHAT_SERVICE_URL;
+  AGENTIC_CHAT_SERVICE_URL
+);
 
 /** Secret prompts list/detail via gateway file proxy (`/files/secrets`). */
 export const SECRET_PROMPTS_API_BASE =
@@ -82,7 +98,7 @@ export const VISUAL_SERVICE_URL =
  * Set VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL for a custom host.
  */
 const DEFAULT_AGENTIC_DOCUMENT_HOST =
-  'https://agentic-document-service-120280829617.asia-south1.run.app';
+  'http://localhost:8092';
 
 const rawAgenticDocs =
   import.meta.env.VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL ||
@@ -116,17 +132,24 @@ export const CITATION_SERVICE_URL =
 export const CITATION_V1_SERVICE_URL =
   import.meta.env.VITE_APP_CITATION_V1_SERVICE_URL ||
   (IS_LOCAL_DEV_HOST
-    ? 'http://localhost:8003'
+    ? 'http://localhost:8004'
     : 'https://citation-service-v1-120280829617.asia-south1.run.app');
+
+// Citation Testing Service — compare Gemini (Google Grounding) vs Claude (Serper) in 1 iteration
+export const CITATION_TESTING_SERVICE_URL =
+  import.meta.env.VITE_APP_CITATION_TESTING_SERVICE_URL ||
+  (IS_LOCAL_DEV_HOST
+    ? 'http://localhost:8003'
+    : 'https://citation-testing-120280829617.asia-south1.run.app');
 
 // Drafting service for Google Docs / Word integration (direct to Cloud Run)
 export const DRAFTING_SERVICE_URL =
   import.meta.env.VITE_DRAFTING_SERVICE_URL ||
-  'https://drafting-service-120280829617.asia-south1.run.app';
+  'http://localhost:8003';
 
 // AI Chatbot support agent (port 8095)
 export const AI_CHATBOT_URL =
-  import.meta.env.VITE_APP_AI_CHATBOT_URL || 'https://ai-chatbot-120280829617.asia-south1.run.app';
+  import.meta.env.VITE_APP_AI_CHATBOT_URL || 'https://agentic-chatbot-service-120280829617.asia-south1.run.app';
 
 // Agent-draft service: templates, drafts, fields, sections, autopopulation (JuriNex Agent Draft Service)
 export const AGENT_DRAFT_TEMPLATE_API =
@@ -140,7 +163,7 @@ export const CHAT_DRAFT_BACKEND_URL =
 // Template Analyzer (user upload templates): User Template Analyzer Agent
 export const TEMPLATE_ANALYZER_API_BASE = ensureLocalhostPort(
   import.meta.env.VITE_APP_TEMPLATE_ANALYZER_URL ||
-    'https://drafting-agents-120280829617.asia-south1.run.app',
+    'http://localhost:8002',
   5017
 );
 
@@ -210,6 +233,7 @@ const apiConfig = {
   CHAT_SERVICE_URL,
   CITATION_SERVICE_URL,
   CITATION_V1_SERVICE_URL,
+  CITATION_TESTING_SERVICE_URL,
   DRAFTING_SERVICE_URL,
   DOCS_BASE_URL,
   FILES_BASE_URL,

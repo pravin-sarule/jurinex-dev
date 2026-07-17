@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes.chat import router as chat_router
+from app.api.routes.drafting import router as drafting_router
 from app.core.config import get_settings
 from app.middleware.payment_token_guard import PaymentTokenGuardMiddleware
 from app.services.db import close_pools
@@ -32,6 +33,13 @@ async def lifespan(app: FastAPI):
         settings.port,
         settings.adk_model,
     )
+    try:
+        from app.services.drafting_service import resume_interrupted_analyses
+        n = await resume_interrupted_analyses()
+        if n:
+            logger.info("Resumed %d interrupted template analyses", n)
+    except Exception as exc:
+        logger.warning("Drafting analysis resume skipped: %s", exc)
     yield
     close_pools()
 
@@ -92,6 +100,7 @@ def create_app() -> FastAPI:
         }
 
     app.include_router(chat_router)
+    app.include_router(drafting_router)
     return app
 
 

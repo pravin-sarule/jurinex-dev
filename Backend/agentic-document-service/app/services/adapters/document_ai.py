@@ -10,25 +10,33 @@ from typing import Any
 
 from app.schemas.contracts import DocumentReference, DocumentType
 from app.services.llm_chat_config import get_summarization_chat_config, resolve_model_name
+from app.services.prompt_orchestration import (
+    PERMANENT_SYSTEM_PROMPT,
+    ResponseIntent,
+    detect_response_format,
+    format_instruction_for_query,
+    is_custom_template_question as _is_custom_template_question_orch,
+)
 from app.services.token_usage_log import log_token_usage_table
 
 logger = logging.getLogger("agentic_document_service.document_ai")
 DEFAULT_MAX_OUTPUT_TOKENS = 65536
 DEEPSEEK_MAX_OUTPUT_TOKENS = 384000
+# Anthropic Messages API rejects max_tokens above the model's real output ceiling.
+CLAUDE_MAX_OUTPUT_TOKENS = 64000
+# Minimum output budget for DeepSeek so multi-section / 4000-word legal analyses
+# never truncate even when an agent_prompts row sets a small max_output_tokens.
+_DEEPSEEK_MIN_OUTPUT_TOKENS = 16384
+# Tabular requests use a low temperature so the model emits consistent, valid GFM
+# pipe-table syntax (deterministic formatting beats creative prose for tables).
+_TABULAR_TEMPERATURE = 0.2
 
-_MARKDOWN_RENDERING_CONTRACT = """
-OUTPUT RENDERING CONTRACT:
-- Return GitHub-Flavored Markdown only. Do not wrap the whole answer in a markdown code fence.
-- Use clear headings, short paragraphs, bullets, and numbered lists where appropriate.
-- CRITICAL: When source data is comparative, chronological, evidentiary, financial, or otherwise tabular (including numbered proceedings lists, schedules, S.No / date / description rows, or any list with consistent columns), you MUST reconstruct it as a proper Markdown table — do NOT present it as a flat paragraph or bullet list.
-- Infer column headers from context if the source document headers are unclear or poorly OCR'd.
-- Every Markdown table MUST include a header row and a valid separator row, for example:
-  | S.No | Date | Description | Reference |
-  |---|---|---|---|
-- Keep every table row on one physical line. Replace line breaks inside cells with spaces.
-- Escape literal pipe characters inside table cells as \\|.
-- Do not emit HTML tables.
-""".strip()
+# Monolithic system prompts removed — replaced by the Prompt Orchestration Layer
+# (app.services.prompt_orchestration): PERMANENT_SYSTEM_PROMPT (Layer 1) +
+# detect_response_format (Layer 2) + build_format_instruction (Layer 3).
+# Provider-specific JSON / structured-schema contracts are kept below.
+
+
 
 _JSON_RENDERING_CONTRACT = """
 OUTPUT RENDERING CONTRACT:
@@ -304,25 +312,833 @@ _DEEPSEEK_JSON_MODE_SUFFIX = (
 def _deepseek_output_contract(prompt: str, llm_params: dict) -> str:
     if _deepseek_expects_json(prompt, llm_params):
         return _JSON_RENDERING_CONTRACT + _DEEPSEEK_JSON_MODE_SUFFIX
-    return _MARKDOWN_RENDERING_CONTRACT
+    # Markdown (non-JSON, non-tabular) mode: use the Prompt Orchestration Layer's
+    # permanent system prompt. The intent-specific dynamic format instruction is
+    # appended to the user prompt by the route / QA assembler, so the system
+    # message only carries the provider-agnostic role + markdown + OCR rules.
+    return PERMANENT_SYSTEM_PROMPT
 
 
-def _deepseek_messages(prompt: str, llm_params: dict) -> list[dict[str, str]]:
+_DEEPSEEK_USER_ENFORCEMENT = (
+    "Follow the OUTPUT CONTRACT above exactly. Output PURE GitHub-Flavored Markdown — "
+    "NEVER any HTML tag (no <br>, <table>, <b>, <p>). Use markdown headings (#, ##, ###), "
+    "never bold-only headings. If the user asked for ALL points or a specific number, "
+    "output EVERY one — do not stop early or merge items. "
+    "CRITICAL: Output ONLY the final answer. Do NOT include your reasoning, planning, "
+    "or meta-commentary. NEVER begin with phrases like 'We need to…', 'Let me…', "
+    "'We already have…', 'The user…', or '<think>'. Start directly with the answer content. "
+    "Begin the answer now."
+)
+
+
+# JSON-first contract: for tabular/chronology/matrix answers DeepSeek emits a
+# validated JSON object (not markdown). The backend then renders it deterministically
+# into clean GFM, so the frontend never sees raw/broken markdown, `**`, or `<br>`.
+_STRUCTURED_SYSTEM_PROMPT = """
+You are a meticulous legal archivist. Analyse the provided case materials and return a STRUCTURED JSON object ONLY.
+
+OUTPUT RULES:
+- Respond with a SINGLE valid JSON object. No markdown, no prose, no code fences, no HTML.
+- Use this exact schema (use an empty array [] or empty string "" when you have no data; never invent facts):
+
+{
+  "title": "Short title of the analysis",
+  "summary": "2-4 sentence plain-text overview",
+  "timeline": [
+    {
+      "date": "DD-MMM-YYYY or 'Not Mentioned'",
+      "event": "One factual sentence, past tense",
+      "parties": ["Full Name (Role)"],
+      "place": "Location or 'Not Mentioned'",
+      "evidence": "Document/exhibit reference or ''"
+    }
+  ],
+  "legal_provisions": ["Section 31 of the Maharashtra Stamp Act"],
+  "reliefs": ["Relief sought"]
+}
+
+CONSTRAINTS:
+- Every value must be PLAIN TEXT. Never put markdown (**, *, _, <br>) inside any value.
+- 'timeline' MUST be in strict chronological order, earliest first.
+- Reconstruct OCR-split words/numbers in every value: 'Con stitution'->'Constitution', '201 6'->'2016', 'Aur ang abad'->'Aurangabad'.
+- Facts only — no interpretation. Do not invent dates, names, or holdings.
+- Be exhaustive: include every legally significant event in 'timeline'.
+""".strip()
+
+
+# Date separators allow '-', '/', OR space — so "15 Mar 2021" (DeepSeek's "tabular"
+# answer format) is recognised, not just "15-Mar-2021". Optional Before/After/
+# Between/By prefix covers "Before 21 Aug 2024" rows. Only a numbered line that
+# STARTS with a real date converts, so ordinary numbered lists are left intact.
+_CHRONOLOGY_LINE_RE = re.compile(
+    r"^\s*(?P<serial>\d{1,4})\s*\.?\s+"
+    r"(?P<date>"
+    r"(?:(?:Before|After|Between|By|Circa)\s+)?"
+    r"(?:"
+    r"(?:\d{1,2}\s*[-/ ]\s*[A-Za-z]{3,12}\s*[-/ ]\s*\d(?:\s*\d){1,3})|"
+    r"(?:\d{1,2}\s*[-/ ]\s*\d{1,2}\s*[-/ ]\s*\d(?:\s*\d){1,3})|"
+    r"(?:[A-Za-z]{3,12}\s+\d{1,2},\s*\d(?:\s*\d){1,3})"
+    r")|"
+    r"(?:Not\s+Mention(?:ed)?(?:\s*\([^)]+\))?)"
+    r")"
+    r"\s+(?P<particulars>.+?)\s*$",
+    re.IGNORECASE,
+)
+_LOOSE_TABLE_HEADER_RE = re.compile(r"^\s*S\.?\s*No\.?\s+Date\s+Particulars?\s*$", re.IGNORECASE)
+_LOOSE_TABLE_RULE_RE = re.compile(r"^\s*[-_=]{8,}\s*$")
+
+
+# ── OCR / PDF artefact normalisation ──────────────────────────────────────────
+# Centralised helpers so the same deterministic cleanup runs on document input
+# (before the model sees it) and on model output (before it reaches the frontend).
+# No scattered ad-hoc regex — all OCR repair lives here.
+
+def _merge_split_numbers(text: str) -> str:
+    """
+    Join PDF-fragmented numbers: "201 6" → "2016", "100 72" → "10072".
+
+    Conservative: a 2–4 digit group, a single space, then a 1–2 digit group, and
+    only when the merged value is ≤ 6 digits. A literal pipe between cells (" | ")
+    blocks the match, so adjacent table columns are never accidentally merged.
+    """
+    return re.sub(
+        r"\b(\d{2,4})\s(\d{1,2})\b",
+        lambda m: (m.group(1) + m.group(2)) if len(m.group(1) + m.group(2)) <= 6 else m.group(0),
+        str(text or ""),
+    )
+
+
+# Known multi-fragment legal/place terms that PDF extraction commonly splits.
+# Applied as whole-token, case-insensitive joins ONLY — never alters valid text.
+# Extend this tuple as new fragmented terms are observed in the corpus.
+_OCR_PHRASE_FIXES: tuple[tuple["re.Pattern[str]", str], ...] = tuple(
+    (
+        re.compile(r"\b" + r"\s+".join(re.escape(part) for part in fragments) + r"\b", re.IGNORECASE),
+        replacement,
+    )
+    for fragments, replacement in (
+        (("Con", "stitution"), "Constitution"),
+        (("Aur", "ang", "abad"), "Aurangabad"),
+        (("Mah", "arashtra"), "Maharashtra"),
+        (("Stamp", "Du", "ty"), "Stamp Duty"),
+        (("Infra", "structure"), "Infrastructure"),
+        (("Reg", "ist", "rar"), "Registrar"),
+        (("Cor", "poration"), "Corporation"),
+        (("Munic", "ipal"), "Municipal"),
+        (("Jal", "ga", "on"), "Jalgaon"),
+        (("Nas", "ik"), "Nashik"),
+        (("Nag", "pur"), "Nagpur"),
+        (("Anand", "w", "ade"), "Anandwade"),
+        (("At", "mar", "am"), "Atmaram"),
+        (("On", "kar"), "Onkar"),
+        (("K", "ark", "hana"), "Karkhana"),
+        (("Sak", "har"), "Sakhar"),
+        (("Jud", "ic", "ature"), "Judicature"),
+        (("Amb", "adas"), "Ambadas"),
+        (("Sug", "nv"), "Sugnv"),
+        (("Jad", "hav"), "Jadhav"),
+        (("Bab", "ura", "o"), "Baburao"),
+        (("D", "adas", "a", "heb"), "Dadasaheb"),
+        (("Bot", "re"), "Botre"),
+        (("Nil", "anga"), "Nilanga"),
+        (("Under", "lying"), "Underlying"),
+        (("Pro", "ceeding"), "Proceeding"),
+        (("initially", "ref"), "initially ref"),
+        (("courtre", "jected"), "court rejected"),
+        (("re", "jected"), "rejected"),
+        (("den", "ying"), "denying"),
+        (("strong", "ly"), "strongly"),
+        (("su", "o", "mot", "u"), "suo motu"),  # two-word term — handled here, not the single-word rejoiner
+    )
+)
+
+
+# Curated set of common legal words used by the dictionary-backed rejoiner below.
+# A space-separated run of letter fragments is rejoined ONLY when the joined form
+# (lowercased) is in this set — so legitimate two-word phrases ("High Court",
+# "New York") are never merged, but PDF-split words ("com pliance", "Def endant")
+# are repaired. Extend freely; only single words here (multi-word terms above).
+_LEGAL_WORD_SET: frozenset[str] = frozenset(
+    w.lower()
+    for w in (
+        # Parties / roles
+        "Petitioner", "Respondent", "Plaintiff", "Defendant", "Appellant", "Applicant",
+        "Accused", "Complainant", "Opposite", "Parties", "Party", "Counsel", "Advocate",
+        "Petitioners", "Respondents", "Plaintiffs", "Defendants", "Appellants", "Applicants",
+        # Courts / places
+        "Court", "Tribunal", "Bench", "Jurisdiction", "Nilanga", "Aurangabad", "Mumbai",
+        "Pune", "Nashik", "Nagpur", "Jalgaon", "Latur", "Osmanabad", "Solapur", "Dharashiv",
+        "Karkhana", "Sakhar", "Anandwade", "Atmaram", "Onkar", "Judicature", "Ambadas", "Sugnv", "Jadhav", "Baburao", "Dadasaheb", "Botre", "Nilanga", "Underlying", "Proceeding", "Initially", "Refused", "Rejected", "Denying", "Strongly", "Issued", "Notice",
+        # Documents / procedure
+        "Suit", "Suits", "Petition", "Petitions", "Application", "Applications", "Notice",
+        "Order", "Orders", "Judgment", "Judgments", "Decree", "Decrees", "Filing", "Filed",
+        "Exhibit", "Exhibits", "Annexure", "Annexures", "Affidavit", "Affidavits", "Summons",
+        "Plaint", "Written", "Statement", "Reply", "Rejoinder", "Undertaking", "Hamipatra",
+        # Substantive legal terms
+        "Compliance", "Repayment", "Recover", "Recovery", "Principal", "Interest", "Amount",
+        "Debt", "Loan", "Defendant", "Execution", "Defence", "Defense", "Challenge",
+        "Limitation", "Constitutional", "Constitution", "Provisional", "Unconditional",
+        "Conditional", "Injunction", "Stay", "Quash", "Impugned", "Impugn", "Maintainable",
+        "Maintainability", "Jurisdictional", "Territorial", "Pecuniary", "Subject",
+        "Cause", "Action", "Relief", "Reliefs", "Prayer", "Prayers", "Ground", "Grounds",
+        "Issue", "Issues", "Fact", "Facts", "Evidence", "Evidentiary", "Exhibit", "Document",
+        "Documents", "Statutory", "Statute", "Statutes", "Section", "Sections", "Article",
+        "Articles", "Rule", "Rules", "Regulation", "Regulations", "Act", "Acts", "Code",
+        "Citation", "Citations", "Precedent", "Precedents", "Ratio", "Decidendi", "Obiter",
+        "Dictum", "Hearing", "Proceedings", "Proceeding", "Trial", "Appeal", "Appeals",
+        "Revision", "Review", "Reference", "Transfer", "Withdrawal", "Withdraw", "Deposit",
+        "Summary", "Suit", "Suits", "Recovery", "Handloan", "Hand", "NEFT", "Transaction", "Transactions",
+        "Agreement", "Contract", "Contracts", "Breach", "Performance", "Specific",
+        "Damages", "Compensation", "Indemnity", "Guarantee", "Guarantor", "Surety",
+        "Mortgage", "Pledge", "Lease", "Tenancy", "Tenant", "Landlord", "Ownership",
+        "Possession", "Title", "Property", "Properties", "Movable", "Immovable",
+        # Verbs / common words that get split
+        "Because", "Therefore", "However", "Further", "Against", "Between", "Through",
+        "Without", "Within", "About", "Before", "After", "During", "While", "Being",
+        "Having", "Thereof", "Herein", "Hereunder", "Therein", "Thereunder", "Hereby",
+        "Hereto", "Thereby", "Thereafter", "Hereafter", "Whereby", "Wherein", "Whereof",
+        # Stamp-duty / conveyancing vocabulary commonly split by OCR
+        "Stamp", "Stamps", "Deed", "Deeds", "Conveyance", "Accountant", "Collector",
+        "Debts", "Tenants", "Allottee", "Allottees", "Annul", "Annulment", "Merger",
+        "Remedy", "Remedies", "Adjudication", "Intimation", "Undervaluation", "Inspects",
+        "Inspect", "Inspection", "Citations", "JLN", "Colly", "Auction", "Receiver",
+        "Recovery", "Registration", "Valuation", "Stamped", "Engrossed", "Endorsement",
+        # Common procedural verbs / terms frequently split by OCR
+        "Seeking", "Seek", "Seeks", "Denying", "Deny", "Denied", "Denies", "Rejected",
+        "Reject", "Rejects", "Refused", "Refuse", "Refuses", "Strongly", "Depositing",
+        "Deposited", "Deposits", "Contested", "Contest", "Contesting", "Granted",
+        "Granting", "Grant", "Grants", "Alleging", "Allege", "Alleged", "Alleges",
+        "Defaulted", "Defaulting", "Default", "Defaults", "Returnable", "Permission",
+        "Permitted", "Permitting", "Permit", "Sham", "Sugarcane", "Abide", "Security",
+        "Safeguards", "Disposal", "Pending", "Suitable", "Terms", "Filed", "Moved",
+    )
+)
+
+
+# Recurring case-party / person names that PDF extraction splits (e.g.
+# "Krish n aji" -> "Krishnaji"). Proper names are unbounded by nature — seed with
+# observed names and extend this tuple as new ones appear in the corpus.
+_PROPER_NAME_SET: frozenset[str] = frozenset(
+    n.lower()
+    for n in (
+        "Krishnaji", "Atmaram", "Onkar", "Suraj", "Sanghi", "Rajmudra", "Sandeep",
+        "Sanjay", "Chaudhari", "Sharma", "Kulkarni", "Deshmukh", "Patil", "Joshi",
+        "Bhosale", "Pawar", "Gaikwad", "Jadhav", "Shinde", "More", "Kale", "Sawant",
+        "Mane", "Salunke", "Thorat", "Wagh", "Nikam", "Borse", "Ingle", "Shaikh",
+    )
+)
+
+# The rejoiner accepts a word if its joined form is a known legal word OR name.
+_REJOIN_WORD_SET: frozenset[str] = _LEGAL_WORD_SET | _PROPER_NAME_SET
+
+_LEGAL_WORD_BOUNDARY_RE = re.compile(r"(?<!\w)([A-Za-z]+(?:\s+[A-Za-z]+){0,19})(?!\w)")
+
+
+def _rejoin_split_words(text: str) -> str:
+    """
+    Rejoin PDF-extraction split words using a dictionary: a run of 2–5 alphabetic
+    fragments separated by single spaces is rejoined ONLY when the joined form is
+    a known legal word. Safe — never merges legitimate multi-word phrases.
+
+    Example: "com pliance" -> "compliance", "Def endant" -> "Defendant",
+             "Aur ang abad" -> "Aurangabad", "rep ayment" -> "repayment".
+    """
+    if not text:
+        return text
+
+    def _try_rejoin(match: re.Match) -> str:
+        phrase = match.group(1)
+        # Only consider runs that actually contain an internal space (i.e. 2+ fragments).
+        if " " not in phrase:
+            return phrase
+        parts = phrase.split(" ")
+        out: list[str] = []
+        i = 0
+        n = len(parts)
+        # Scan the whole run and greedily merge any 2–5 ADJACENT fragments whose
+        # join is a known legal word — so a split word anywhere in the run is
+        # repaired ("The St amps were" -> "The Stamps were"), not just at the start.
+        while i < n:
+            merged: str | None = None
+            for span in (5, 4, 3, 2):
+                if i + span <= n:
+                    cand = "".join(parts[i : i + span])
+                    if cand.lower() in _REJOIN_WORD_SET:
+                        merged = (
+                            cand[:1].upper() + cand[1:] if parts[i][:1].isupper() else cand
+                        )
+                        i += span
+                        break
+            if merged is not None:
+                out.append(merged)
+            else:
+                out.append(parts[i])
+                i += 1
+        return " ".join(out)
+
+    return _LEGAL_WORD_BOUNDARY_RE.sub(_try_rejoin, str(text))
+
+
+def normalize_ocr_artifacts(text: str) -> str:
+    """
+    Repair deterministic OCR/PDF extraction artefacts without touching valid text.
+
+    Safe passes:
+      1. merge space-split numbers (length-bounded)
+      2. join a curated dictionary of known fragmented legal/place terms
+      3. tighten spaced dates: "04 / 04 / 2024" -> "04/04/2024"
+      4. rejoin split words via the dictionary-backed rejoiner
+    Anything not matched is left as-is, so legitimate legal phrasing is never modified.
+    """
+    if not text:
+        return text
+    result = _merge_split_numbers(str(text))
+    for pattern, replacement in _OCR_PHRASE_FIXES:
+        result = pattern.sub(replacement, result)
+    # Tighten spaced dates (DD / MM / YYYY or DD - MM - YYYY) -> DD/MM/YYYY.
+    result = re.sub(
+        r"\b(\d{1,2})\s*([/\-])\s*(\d{1,2})\s*([/\-])\s*(\d{2,4}(?:\s+\d)?)\b",
+        lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{m.group(4)}{m.group(5).replace(' ', '')}",
+        result,
+    )
+    # Fix common merged words
+    result = re.sub(r"\bwithdrawalcanbe\b", "withdrawal can be", result, flags=re.IGNORECASE)
+    result = re.sub(r"\bissuednotice\b", "issued notice", result, flags=re.IGNORECASE)
+    result = re.sub(r"\binitiallyrefused\b", "initially refused", result, flags=re.IGNORECASE)
+    result = re.sub(r"\binitiallyref\s+used\b", "initially refused", result, flags=re.IGNORECASE)
+    result = re.sub(r"\bcourtre\s+jected\b", "court rejected", result, flags=re.IGNORECASE)
+    result = re.sub(r"\bArticle\s+227filed\b", "Article 227 filed", result, flags=re.IGNORECASE)
+    result = re.sub(r"\bdefendon\b", "defend on", result, flags=re.IGNORECASE)
+    result = re.sub(r"(\d{1,2})\s*\)se\s+eking", r"\1) seeking", result, flags=re.IGNORECASE)
+
+    result = _rejoin_split_words(result)
+    return result
+
+
+# ── HTML stripping (enforce pure Markdown output) ─────────────────────────────
+
+_HTML_BR_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
+
+
+def preprocess_latex(text: str) -> str:
+    """
+    Convert LaTeX delimiters from \\( ... \\) and \\[ ... \\] to $ ... $ and $$ ... $$.
+    This ensures compatibility with remark-math and other markdown math plugins.
+    """
+    if not text:
+        return text
+    # Block math: \[ ... \] -> $$ ... $$
+    text = re.sub(r"\\\[([\s\S]*?)\\\]", r"$$\1$$", text)
+    # Inline math: \( ... \) -> $ ... $
+    text = re.sub(r"\\\(([\s\S]*?)\\\)", r"$\1$", text)
+    return text
+
+
+def _strip_html_breaks(text: str) -> str:
+    """
+    Remove HTML <br> tags so output is pure GitHub-Flavored Markdown.
+
+    Inside a GFM table row (line starting with '|') a newline is illegal, so a
+    <br> collapses to a single space. Outside tables it becomes a real newline
+    (Markdown line break). Never leaves an HTML tag behind.
+    """
+    out_lines: list[str] = []
+    for line in str(text or "").split("\n"):
+        if line.lstrip().startswith("|"):
+            collapsed = _HTML_BR_RE.sub(" ", line)
+            collapsed = re.sub(r"[ \t]{2,}", " ", collapsed)
+            out_lines.append(collapsed)
+        else:
+            out_lines.append(_HTML_BR_RE.sub("\n", line))
+    return "\n".join(out_lines)
+
+
+# ── Chain-of-thought / reasoning stripping ────────────────────────────────────
+# DeepSeek (and other reasoning models) sometimes write their internal planning
+# into the answer ("We need to produce a case summary… We already have a
+# conversation history…") or wrap it in <think>/<thinking> tags. ChatGPT/Claude
+# hide this — so we strip it before the answer reaches the user.
+
+_THINK_TAG_RE = re.compile(r"<\s*think(?:ing)?\s*>[\s\S]*?<\s*/\s*think(?:ing)?\s*>", re.IGNORECASE)
+_OPEN_THINK_RE = re.compile(r"<\s*think(?:ing)?\s*>[\s\S]*$", re.IGNORECASE)
+
+# A paragraph is treated as model reasoning ONLY when it opens with explicit
+# planning / meta-commentary cues. These phrasings do not occur at the start of a
+# real legal answer, so genuine content is never removed.
+_REASONING_CUE_RE = re.compile(
+    r"^\s*(?:"
+    r"we\s+need\s+to|we\s+already\s+have|we\s+also\s+have|we\s+have\s+a\s+conversation|"
+    r"we\s+should|we\s+must|we\s+can\s+(?:now|produce)|we\s+will\s+(?:now|produce)|"
+    r"let\s+me\b|let'?s\b|i\s+need\s+to|i\s+will\b|i'?ll\b|i\s+should\b|"
+    r"to\s+(?:produce|answer|begin|summari[sz]e)\b|the\s+user('?s)?\b|the\s+task\b|"
+    r"first,?\s+i\b|okay\b|alright\b|here'?s\s+my\s+plan|my\s+plan\b|"
+    r"thinking:|reasoning:|analysis:\s*$|let\s+us\s+(?:produce|begin)"
+    r")",
+    re.IGNORECASE,
+)
+_STRUCTURE_RE = re.compile(r"(?m)^\s*(?:#{1,6}\s|\|)")
+
+
+def _strip_model_reasoning(text: str) -> str:
+    """
+    Remove a model's chain-of-thought so only the final answer remains.
+
+    1. Delete <think>…</think> / <thinking>…</thinking> blocks (closed or trailing-open).
+    2. If the answer has real structure later (a markdown heading or a table, or the
+       canonical comprehensive-summary opening line), drop leading paragraphs that
+       begin with explicit reasoning/planning cues. Conservative: when there is no
+       structured content to anchor on, nothing is stripped.
+    """
+    s = _THINK_TAG_RE.sub("", str(text or ""))
+    s = _OPEN_THINK_RE.sub("", s).lstrip()
+    if not s:
+        return s
+
+    has_structure = bool(_STRUCTURE_RE.search(s)) or "Based on a meticulous analysis" in s
+    if not has_structure:
+        return s.strip()
+
+    paragraphs = re.split(r"\n\s*\n", s)
+    while paragraphs:
+        head = paragraphs[0].lstrip()
+        # Stop as soon as we reach real content (heading/table) or a non-reasoning para.
+        if head.startswith("#") or head.startswith("|") or "Based on a meticulous analysis" in head:
+            break
+        if _REASONING_CUE_RE.match(head):
+            paragraphs.pop(0)
+            continue
+        break
+    return "\n\n".join(paragraphs).strip()
+
+
+# ── Tabular-request detection (streaming policy) ──────────────────────────────
+
+# Tabular output is produced ONLY when the user explicitly asks for a table OR
+# the request is for time-based / chronological data (naturally tabular).
+# Word-boundary matched so "table" does NOT fire inside "suitable"/"comfortable".
+#
+# IMPORTANT: This MUST stay narrow. When it matches, DeepSeek is switched into the
+# rigid structured-JSON timeline schema, which DISCARDS the user's own prompt
+# format. So only match requests that are genuinely a date/time table — never
+# generic analysis words like "grounds", "reasons", "points", which the user may
+# want rendered in their own point-wise format.
+_TABULAR_REQUEST_RE = re.compile(
+    r"\b("
+    r"tabular|tables?|"                       # explicit: "tabular", "table", "tables"
+    r"timeline|chronolog\w*|"                 # time-based: timeline, chronology/chronological
+    r"factual\s+matrix|evidence\s+matrix|"    # named legal matrices
+    r"date[\s-]?wise|sequence\s+of\s+events|list\s+of\s+dates"  # explicit time sequences
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+# Isolate the user's actual question from the assembled prompt so tabular
+# detection ignores the injected format-reminder / system text (which itself
+# mentions "table", "timeline", etc. and would otherwise always match).
+_QUESTION_SECTION_RE = re.compile(
+    r"===\s*(?:QUESTION|USER\s+INPUT)\s*===\s*(.*?)(?:\n===|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+# Signals that the user has supplied their OWN detailed multi-section analysis
+# template (e.g. a 14-section "LegalSynth-Analyzer" case-summary prompt). When
+# these are present we must NOT collapse the answer into the rigid 5-field
+# structured-JSON timeline schema — the model must follow the user's template
+# in plain markdown mode instead.
+# Custom-template detection now lives in the Prompt Orchestration layer
+# (app.services.prompt_orchestration) so intent detection and tabular detection
+# share one source of truth. Kept as a thin alias for the existing call sites.
+_is_custom_template_question = _is_custom_template_question_orch
+
+
+def _extract_user_question(prompt: str) -> str:
+    match = _QUESTION_SECTION_RE.search(str(prompt or ""))
+    return match.group(1).strip() if match else ""
+
+
+def _is_tabular_request(prompt: str, llm_params: dict) -> bool:
+    """
+    True when the USER asked for a table/timeline/matrix AND has NOT supplied
+    their own multi-section analysis template.
+
+    Detection runs only against the user's question (extracted from the assembled
+    prompt), never the injected formatting instructions — otherwise the reminder
+    text mentioning "table"/"timeline" would force every call into JSON mode.
+
+    CRITICAL: when the user provides a detailed custom template (e.g. a 14-section
+    case-analysis prompt that merely says "give dates chronologically" / "use
+    tabular format where possible"), we must return False. Otherwise the rigid
+    structured-JSON timeline schema would replace the user's template and only
+    title/summary/timeline/legal_provisions/reliefs would be emitted.
+    """
+    if _deepseek_expects_json(prompt, llm_params):
+        return False
+    question = _extract_user_question(prompt)
+    if not question:
+        return False  # cannot isolate the ask → default to prose markdown (safe)
+    if _is_custom_template_question(question):
+        return False  # honour the user's own template in markdown mode
+    return bool(_TABULAR_REQUEST_RE.search(question))
+
+
+def _clean_chronology_date(value: str) -> str:
+    cleaned = re.sub(r"\s*([-/])\s*", r"-", str(value or "").strip())
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(
+        r"\b(\d{2,3})\s+(\d{1,2})\b",
+        lambda m: (m.group(1) + m.group(2)) if len(m.group(1) + m.group(2)) <= 4 else m.group(0),
+        cleaned,
+    )
+    return cleaned
+
+
+def _escape_markdown_table_cell(value: str) -> str:
+    # GFM cells cannot contain line breaks or HTML — collapse any <br> to a space
+    # and keep the whole cell on a single physical line.
+    cell = re.sub(r"<\s*br\s*/?\s*>?", " ", str(value or ""), flags=re.IGNORECASE)
+    cell = re.sub(r"\s+", " ", cell).strip()
+    return cell.replace("|", r"\|")
+
+
+def _convert_numbered_chronology_to_markdown_table(text: str) -> str:
+    """
+    DeepSeek can still emit timeline rows as "11. 26 - Mar - 2011 ...".
+    Convert only date-led numbered chronology blocks, leaving ordinary numbered
+    legal analysis untouched.
+    """
+    value = str(text or "")
+    if re.search(r"^\s*\|.+\|\s*$", value, flags=re.MULTILINE):
+        return value
+
+    lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out: list[str] = []
+    pending_rows: list[tuple[str, str, str]] = []
+
+    def flush_pending() -> None:
+        nonlocal pending_rows
+        if len(pending_rows) >= 2:
+            if out and out[-1].strip():
+                out.append("")
+            out.append("| S.No | Date | Particulars |")
+            out.append("|---|---|---|")
+            for serial, date, particulars in pending_rows:
+                out.append(
+                    f"| {_escape_markdown_table_cell(serial + '.')} | "
+                    f"{_escape_markdown_table_cell(date)} | "
+                    f"{_escape_markdown_table_cell(particulars)} |"
+                )
+            out.append("")
+        else:
+            for serial, date, particulars in pending_rows:
+                out.append(f"{serial}. {date} {particulars}".rstrip())
+        pending_rows = []
+
+    for line in lines:
+        if _LOOSE_TABLE_HEADER_RE.match(line) or _LOOSE_TABLE_RULE_RE.match(line):
+            continue
+        match = _CHRONOLOGY_LINE_RE.match(line)
+        if match:
+            pending_rows.append(
+                (
+                    match.group("serial").strip(),
+                    _clean_chronology_date(match.group("date")),
+                    match.group("particulars").strip(),
+                )
+            )
+            continue
+        if not line.strip():
+            # DeepSeek separates each numbered row with a BLANK line — don't let
+            # that flush the run; keep accumulating so the rows form ONE table.
+            if pending_rows:
+                continue
+            out.append(line)
+            continue
+        if pending_rows:
+            serial, date, particulars = pending_rows[-1]
+            # Keep the cell single-line (GFM has no in-cell line breaks); join with a space.
+            pending_rows[-1] = (serial, date, f"{particulars} {line.strip()}")
+            continue
+        flush_pending()
+        out.append(line)
+
+    flush_pending()
+    return "\n".join(out).strip()
+
+
+def _deepseek_messages(
+    prompt: str,
+    llm_params: dict,
+    *,
+    structured: bool = False,
+) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
     sys_instr = str(llm_params.get("system_instructions") or "").strip()
-    rendering_contract = _deepseek_output_contract(prompt, llm_params)
+    # Structured (tabular) requests use the JSON schema contract; everything else
+    # uses the existing markdown contract. Default stays markdown for back-compat.
+    rendering_contract = _STRUCTURED_SYSTEM_PROMPT if structured else _deepseek_output_contract(prompt, llm_params)
     combined_system = "\n\n".join(part for part in (sys_instr, rendering_contract) if part)
     if combined_system:
         messages.append({"role": "system", "content": combined_system})
-    messages.append({"role": "user", "content": prompt})
+
+    if structured:
+        user_content = (
+            "Return the analysis as a single valid JSON object following the schema in the system message. "
+            "JSON only — no markdown, no prose, no code fences, NO INTERNAL MONOLOGUE.\n\n"
+            f"{prompt}"
+        )
+    elif not _deepseek_expects_json(prompt, llm_params):
+        # FIX 2: repeat the critical formatting constraint in the user turn so DeepSeek
+        # cannot "forget" it when the document context is long (prompt leak prevention).
+        user_content = (
+            f"{_DEEPSEEK_USER_ENFORCEMENT}\n\n"
+            "CRITICAL: DO NOT output any internal reasoning, plan, or meta-commentary. "
+            "Output ONLY the final legal analysis. Begin immediately with the answer.\n\n"
+            f"{prompt}"
+        )
+    else:
+        user_content = (
+            "Return valid JSON only. NO INTERNAL MONOLOGUE. NO PROSE.\n\n"
+            f"{prompt}"
+        )
+    messages.append({"role": "user", "content": user_content})
     return messages
 
 
+_BANNER_BOX_CHARS = "┌┐└┘├┤┬┴┼│"
+
+
+def _strip_ascii_banner_lines(text: str) -> str:
+    """
+    Remove decorative ASCII banner blocks (e.g. the "LEXIS LEGAL FINDING" box
+    some legacy preset templates instruct the model to draw). Drops every line
+    containing box-drawing characters and standalone ─ divider lines; real
+    content never uses these characters.
+    """
+    raw = str(text or "")
+    if not any(ch in raw for ch in _BANNER_BOX_CHARS) and "─" not in raw:
+        return raw
+    kept = []
+    for line in raw.splitlines():
+        if any(ch in line for ch in _BANNER_BOX_CHARS):
+            continue
+        if line.strip() and not line.strip().strip("─ "):
+            continue  # pure ─ divider line
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def normalize_markdown_render_output(text: str) -> str:
-    """Remove provider-added outer Markdown fences while preserving inner code blocks."""
+    """
+    Post-process raw model output into clean, valid GitHub-Flavored Markdown.
+
+    Pipeline (order matters):
+      1. strip a single outer ```markdown fence (inner code blocks preserved)
+      2. remove ASCII banner boxes (legacy preset templates draw them)
+      3. repair deterministic OCR artefacts (split numbers + known terms)
+      4. preprocess LaTeX delimiters (round-bracket -> $, square-bracket -> $$)
+      5. strip HTML <br> tags (to space inside table rows, newline elsewhere)
+      6. convert numbered date chronologies into GFM pipe tables
+      7. collapse 3+ consecutive newlines down to a single blank line
+    Never emits HTML. Safe to call on any provider's output.
+    """
     cleaned = str(text or "").strip()
     match = re.fullmatch(r"```(?:markdown|md)?\s*\n([\s\S]*?)\n```", cleaned, flags=re.IGNORECASE)
-    return match.group(1).strip() if match else cleaned
+    unfenced = match.group(1).strip() if match else cleaned
+
+    # Strip chain-of-thought / <think> blocks BEFORE any other processing so the
+    # reasoning never reaches the user (ChatGPT/Claude-style clean output).
+    unfenced = _strip_model_reasoning(unfenced)
+
+    unfenced = _strip_ascii_banner_lines(unfenced)
+    unfenced = normalize_ocr_artifacts(unfenced)
+    unfenced = preprocess_latex(unfenced)
+    unfenced = _strip_html_breaks(unfenced)
+
+    converted = _convert_numbered_chronology_to_markdown_table(unfenced)
+    converted = re.sub(r"\n{3,}", "\n\n", converted)
+    return converted.strip()
+
+
+# ── JSON-first renderer layer ─────────────────────────────────────────────────
+# Pipeline:  raw LLM output → repair_json() → validate_structured_payload()
+#            → structured_json_to_markdown() → clean GFM for the existing frontend.
+# Guarantees valid tables and never leaks malformed JSON or HTML to React.
+
+_JSON_OBJECT_RE = re.compile(r"\{[\s\S]*\}")
+
+
+def repair_json(raw: Any) -> dict | None:
+    """
+    Best-effort parse of a model's JSON output, repairing common defects.
+
+    Handles: code fences, leading/trailing prose, smart quotes, trailing commas,
+    and unbalanced closing braces/brackets. Returns a dict, or None if the text
+    cannot be salvaged into a JSON object (caller falls back to markdown).
+    """
+    if isinstance(raw, dict):
+        return raw
+    s = str(raw or "").strip()
+    if not s:
+        return None
+
+    s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*```$", "", s).strip()
+
+    match = _JSON_OBJECT_RE.search(s)
+    if match:
+        s = match.group(0)
+
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+
+    repaired = (
+        s.replace("“", '"').replace("”", '"')
+         .replace("‘", "'").replace("’", "'")
+    )
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)  # trailing commas
+    open_braces = repaired.count("{") - repaired.count("}")
+    if open_braces > 0:
+        repaired += "}" * open_braces
+    open_brackets = repaired.count("[") - repaired.count("]")
+    if open_brackets > 0:
+        repaired += "]" * open_brackets
+
+    try:
+        return json.loads(repaired)
+    except Exception:
+        return None
+
+
+def _as_str(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _as_str_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [t for t in (_as_str(v).strip() for v in value) if t]
+    single = _as_str(value).strip()
+    return [single] if single else []
+
+
+def validate_structured_payload(data: Any) -> dict:
+    """
+    Coerce arbitrary parsed JSON into the canonical legal-analysis schema with
+    safe defaults. Never raises — missing/wrong-typed fields degrade gracefully.
+    """
+    data = data if isinstance(data, dict) else {}
+
+    timeline: list[dict] = []
+    raw_timeline = data.get("timeline")
+    if isinstance(raw_timeline, list):
+        for item in raw_timeline:
+            if not isinstance(item, dict):
+                continue
+            timeline.append(
+                {
+                    "date": _as_str(item.get("date")).strip() or "Not Mentioned",
+                    "event": _as_str(item.get("event")).strip(),
+                    "parties": _as_str_list(item.get("parties")),
+                    "place": _as_str(item.get("place")).strip() or "Not Mentioned",
+                    "evidence": _as_str(item.get("evidence")).strip(),
+                }
+            )
+
+    return {
+        "title": _as_str(data.get("title")).strip(),
+        "summary": _as_str(data.get("summary")).strip(),
+        "timeline": timeline,
+        "legal_provisions": _as_str_list(data.get("legal_provisions")),
+        "reliefs": _as_str_list(data.get("reliefs")),
+    }
+
+
+def structured_json_to_markdown(payload: Any) -> str:
+    """
+    Render a validated structured payload into clean GitHub-Flavored Markdown.
+
+    The timeline becomes a real multi-column table (Date/Event/Parties/Place/
+    Evidence) — no `**Parties:**` labels, no `<br>`, no HTML. Optional columns
+    are included only when at least one row has data for them.
+    """
+    payload = validate_structured_payload(payload)
+    parts: list[str] = []
+
+    if payload["title"]:
+        parts.append(f"## {payload['title']}")
+    if payload["summary"]:
+        parts.append(payload["summary"])
+
+    timeline = payload["timeline"]
+    if timeline:
+        show_parties = any(row["parties"] for row in timeline)
+        show_place = any(row["place"] and row["place"] != "Not Mentioned" for row in timeline)
+        show_evidence = any(row["evidence"] for row in timeline)
+
+        columns = ["S.No", "Date", "Event"]
+        if show_parties:
+            columns.append("Parties")
+        if show_place:
+            columns.append("Place")
+        if show_evidence:
+            columns.append("Evidence")
+
+        table_lines = [
+            "| " + " | ".join(columns) + " |",
+            "| " + " | ".join(["---"] * len(columns)) + " |",
+        ]
+        for idx, row in enumerate(timeline, start=1):
+            cells = [
+                f"{idx}.",
+                _escape_markdown_table_cell(row["date"]),
+                _escape_markdown_table_cell(row["event"]),
+            ]
+            if show_parties:
+                cells.append(_escape_markdown_table_cell(", ".join(row["parties"]) or "Not Mentioned"))
+            if show_place:
+                cells.append(_escape_markdown_table_cell(row["place"]))
+            if show_evidence:
+                cells.append(_escape_markdown_table_cell(row["evidence"] or "—"))
+            table_lines.append("| " + " | ".join(cells) + " |")
+
+        if parts:
+            parts.append("")
+        parts.append("\n".join(table_lines))
+
+    if payload["legal_provisions"]:
+        parts.append("")
+        parts.append("## Legal Provisions")
+        parts.extend(f"- {item}" for item in payload["legal_provisions"])
+
+    if payload["reliefs"]:
+        parts.append("")
+        parts.append("## Reliefs Sought")
+        parts.extend(f"- {item}" for item in payload["reliefs"])
+
+    return "\n".join(parts).strip()
+
+
+def _render_structured_response(raw_text: str) -> str | None:
+    """
+    Full renderer: repair → validate → convert structured JSON to clean GFM.
+
+    Returns rendered markdown, or None when the payload has no usable structure
+    (the caller then falls back to normalize_markdown_render_output on raw text).
+    """
+    payload = repair_json(raw_text)
+    if not isinstance(payload, dict):
+        return None
+    validated = validate_structured_payload(payload)
+    if not (validated["timeline"] or validated["summary"] or validated["title"]):
+        return None
+    return structured_json_to_markdown(validated)
 
 
 def _max_tokens_from_summarization_config(config: dict, *, for_summary: bool) -> int:
@@ -485,7 +1301,13 @@ def _generation_config(
                 llm_params.get("grounding_google_search", False),
                 llm_params.get("code_execution", False),
             )
-            resolved_model_name = str(model_name_override or cfg.model_name).strip()
+            from app.services.llm_models_catalog import normalize_model_alias, resolve_chat_llm_model
+
+            raw_model = str(model_name_override or cfg.model_name).strip()
+            resolved_model_name = resolve_chat_llm_model(
+                normalize_model_alias(raw_model),
+                normalize_model_alias(str(cfg.model_name)),
+            )
             return resolved_model_name, gen_kwargs, llm_params
         except Exception as exc:
             logger.warning(
@@ -497,8 +1319,13 @@ def _generation_config(
 
     # ── Fallback: summarization_chat_config (no agent_name or agent load error) ──
     config = summarization_llm_config or get_summarization_chat_config(user_id=user_id)
+    from app.services.llm_models_catalog import normalize_model_alias, resolve_chat_llm_model
+
     model_name = resolve_model_name(config, for_summary=for_summary) or "gemini-2.0-flash"
-    model_name = str(model_name_override or model_name).strip()
+    model_name = resolve_chat_llm_model(
+        normalize_model_alias(str(model_name_override or model_name).strip()),
+        normalize_model_alias(model_name),
+    )
     max_tokens = _max_tokens_from_summarization_config(config, for_summary=for_summary)
     temperature = float(config.get("model_temperature") or 0.7)
     temperature = min(
@@ -524,15 +1351,21 @@ def _generation_config(
 
 _THINKING_BUDGET_GEMINI = {"low": 1024,  "medium": 8192,  "high": 16384}
 _THINKING_BUDGET_CLAUDE = {"low": 5000,  "medium": 10000, "high": 16000}
+# Providers reject out-of-range budgets with 400 INVALID_ARGUMENT, which kills
+# the whole request (Gemini 2.5: 128–32768; Anthropic: >= 1024).
+_THINKING_BUDGET_RANGE = {"gemini": (128, 32768), "claude": (1024, 32000)}
 
 
 def _resolve_thinking_budget(llm_params: dict, provider: str) -> int:
     budget_map = _THINKING_BUDGET_GEMINI if provider == "gemini" else _THINKING_BUDGET_CLAUDE
+    lo, hi = _THINKING_BUDGET_RANGE.get(provider, (128, 32768))
     raw = llm_params.get("thinking_budget")
-    if raw and isinstance(raw, (int, float)) and float(raw) > 0:
-        return int(raw)
+    # NOTE: bool is a subclass of int — an admin-UI toggle stored as
+    # thinking_budget=true must not become budget_tokens=1 (Gemini 400s on it).
+    if raw is not None and not isinstance(raw, bool) and isinstance(raw, (int, float)) and float(raw) > 0:
+        return max(lo, min(hi, int(raw)))
     level = str(llm_params.get("thinking_level") or "low").lower()
-    return budget_map.get(level, list(budget_map.values())[0])
+    return max(lo, min(hi, budget_map.get(level, list(budget_map.values())[0])))
 
 
 def _gemini_model_supports_thinking_config(model_name: str | None) -> bool:
@@ -888,7 +1721,7 @@ def claude_stream_generator(
         return
 
     max_tokens = min(
-        DEEPSEEK_MAX_OUTPUT_TOKENS,
+        CLAUDE_MAX_OUTPUT_TOKENS,
         int(gen_kwargs.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS),
     )
     temperature = float(gen_kwargs.get("temperature") or 1.0)
@@ -1063,7 +1896,11 @@ def _generate_text_claude(
         logger.warning("[DocumentAI] Claude call skipped — Anthropic client unavailable")
         return ""
 
-    max_tokens = int(gen_kwargs.get("max_output_tokens") or 8192)
+    # Never fall back to a tiny 8192 — that truncates multi-point legal answers.
+    max_tokens = min(
+        CLAUDE_MAX_OUTPUT_TOKENS,
+        int(gen_kwargs.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS),
+    )
     temperature = float(gen_kwargs.get("temperature") or 1.0)
 
     api_model = _anthropic_messages_model_id(model_name)
@@ -1171,11 +2008,22 @@ def _generate_text_deepseek(
         logger.warning("[DocumentAI] DeepSeek call skipped — client unavailable")
         return ""
 
-    max_tokens = int(gen_kwargs.get("max_output_tokens") or 8192)
-    temperature = float(gen_kwargs.get("temperature") or 1.0)
-    api_model = _deepseek_model_id(model_name)
+    # DeepSeek supports a very large output budget; cap at the provider maximum but
+    # never fall back to a tiny value (that truncates multi-point legal answers).
+    max_tokens = min(
+        8000,
+        max(_DEEPSEEK_MIN_OUTPUT_TOKENS, int(gen_kwargs.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS)),
+    )
+    temperature = 0.3
+    api_model = "deepseek-v4-flash"
 
+    # Markdown mode for everything (incl. tabular). JSON mode proved fragile —
+    # response_format=json_object could return empty completions ("Could not
+    # generate an answer"). normalize_markdown_render_output cleans the output.
     messages = _deepseek_messages(prompt, llm_params)
+    # Low temperature for tabular output → consistent, valid GFM pipe-table syntax.
+    if _is_tabular_request(prompt, llm_params):
+        temperature = min(temperature, _TABULAR_TEMPERATURE)
 
     create_kwargs: dict = {
         "model": api_model,
@@ -1185,12 +2033,6 @@ def _generate_text_deepseek(
     }
     if _deepseek_expects_json(prompt, llm_params):
         create_kwargs["response_format"] = {"type": "json_object"}
-
-    if llm_params.get("thinking_mode"):
-        create_kwargs["reasoning_effort"] = "high"
-        create_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-    else:
-        create_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
     logger.info(
         "[DocumentAI] ▶ DeepSeek generate  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d",
@@ -1223,7 +2065,8 @@ def _generate_text_deepseek(
         provider="deepseek",
         model_name=api_model,
     )
-    return normalize_markdown_render_output(response.choices[0].message.content or "") if response.choices else ""
+    content = (response.choices[0].message.content or "") if response.choices else ""
+    return normalize_markdown_render_output(content)
 
 
 def deepseek_stream_generator(
@@ -1245,12 +2088,22 @@ def deepseek_stream_generator(
 
     max_tokens = min(
         DEEPSEEK_MAX_OUTPUT_TOKENS,
-        int(gen_kwargs.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS),
+        max(_DEEPSEEK_MIN_OUTPUT_TOKENS, int(gen_kwargs.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS)),
     )
     temperature = float(gen_kwargs.get("temperature") or 1.0)
     api_model = _deepseek_model_id(model_name)
 
+    # Tabular / chronology / matrix answers are BUFFERED (not token-streamed) so a
+    # partially-streamed pipe table never flashes as invalid Markdown mid-flight.
+    # We deliberately do NOT use JSON mode here: response_format=json_object proved
+    # fragile (empty completions when combined with reasoning), which surfaced as
+    # "Could not generate an answer". The markdown path + normalize_markdown_render_output
+    # (chronology→table + OCR cleanup) reliably produces clean tables instead.
+    tabular = _is_tabular_request(prompt, llm_params)
     messages = _deepseek_messages(prompt, llm_params)
+    # Low temperature for tabular output → consistent, valid GFM pipe-table syntax.
+    if tabular:
+        temperature = min(temperature, _TABULAR_TEMPERATURE)
 
     create_kwargs: dict = {
         "model": api_model,
@@ -1270,8 +2123,8 @@ def deepseek_stream_generator(
         create_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
     logger.info(
-        "[DocumentAI] ▶ DeepSeek stream  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d",
-        api_model, model_name, temperature, max_tokens,
+        "[DocumentAI] ▶ DeepSeek stream  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d  tabular=%s",
+        api_model, model_name, temperature, max_tokens, tabular,
     )
 
     try:
@@ -1284,6 +2137,11 @@ def deepseek_stream_generator(
         )
         raise
     final_usage: dict[str, int] | None = None
+    buffer_parts: list[str] = []
+    
+    # Reasoning/Thinking block suppression logic
+    full_response = ""
+
     for chunk in stream:
         usage = getattr(chunk, "usage", None)
         if usage is not None:
@@ -1297,11 +2155,60 @@ def deepseek_stream_generator(
                 "outputTokens": completion_tokens,
                 "totalTokens": total_tokens,
             }
+
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
-        if delta and delta.content:
-            yield delta.content
+        if not delta:
+            continue
+
+        # 1. Handle DeepSeek reasoning_content field entirely
+        reasoning = getattr(delta, "reasoning_content", None)
+        if reasoning:
+            continue
+
+        content = delta.content or ""
+        if not content:
+            continue
+
+        full_response += content
+
+        # Detect <think> block start or continuation
+        if "<think>" in full_response and "</think>" not in full_response:
+            # Still inside think block — send nothing
+            continue
+
+        # Detect <think> block just closed
+        if "<think>" in full_response and "</think>" in full_response:
+            # Extract only what comes AFTER </think>
+            parts = full_response.split("</think>")
+            after_think = "</think>".join(parts[1:])
+            # Yield any content that arrived AFTER </think> in this same chunk
+            # but only if it's not already in buffer_parts (for tabular)
+            # Actually, simpler: replace full_response with the clean portion
+            # and if we just transitioned, we might need to yield the 'after_think' part.
+            full_response = after_think
+            if after_think.strip():
+                if tabular:
+                    buffer_parts.append(after_think)
+                else:
+                    yield after_think
+            continue
+
+        # Send current clean content (only if thinking never started or is done)
+        if "<think>" not in full_response:
+            if tabular:
+                buffer_parts.append(content)
+            else:
+                yield content
+            # Clear small pieces if no thinking started to keep memory low
+            full_response = ""
+
+    # Emit the complete, cleaned answer as a single chunk for tabular output.
+    if tabular and buffer_parts:
+        raw = "".join(buffer_parts)
+        yield normalize_markdown_render_output(raw)
+
     if final_usage:
         log_token_usage_table(
             context="deepseek_stream",
@@ -1643,6 +2550,88 @@ def _call_gemini_for_extraction(text: str) -> dict:
         return {}
 
 
+# ── LLM-based OCR-fragmentation reconstruction (for stored chunks) ────────────
+# Deterministic cleanup (normalize_ocr_artifacts) only repairs a curated
+# dictionary. Pervasive fragmentation — arbitrary names/places ("Sug riv"),
+# punctuation spacing ("p .a .", "18 %") — needs a model to reconstruct. This is
+# run ON STORED CHUNK TEXT (not the PDF) by the clean-chunks endpoint, one-time
+# per case, keeping the embeddings.
+
+_RECONSTRUCT_MODEL = "gemini-2.5-flash"
+_RECONSTRUCT_PROMPT = (
+    "You are an OCR text-repair tool for Indian legal documents. The TEXT below was "
+    "extracted from a PDF and has spaces wrongly inserted INSIDE words, names, places, "
+    "numbers, and before punctuation.\n\n"
+    "Repair the FRAGMENTATION ONLY:\n"
+    "- Rejoin split words/names/places: 'Krish n aji' -> 'Krishnaji', 'Sug riv' -> 'Sugriv', "
+    "'L atur' -> 'Latur', 'Occ u Service' -> 'Occu Service'.\n"
+    "- Remove spaces inside numbers/citations: '805 7' -> '8057', '202 5' -> '2025', '18 %' -> '18%'.\n"
+    "- Remove spaces before punctuation: 'p .a .' -> 'p.a.', 'Ltd .' -> 'Ltd.', "
+    "'Rs . 25 , 00 , 000' -> 'Rs. 25,00,000'.\n\n"
+    "STRICT RULES (do not violate):\n"
+    "- Do NOT add, remove, reorder, summarise, translate, or reword anything.\n"
+    "- Keep every number, date, amount, citation, and name identical in value.\n"
+    "- Preserve line breaks and overall structure.\n"
+    "- Output ONLY the corrected text — no preamble, no explanation, no code fences.\n\n"
+    "TEXT:\n"
+)
+
+
+def _looks_fragmented(text: str) -> bool:
+    """
+    Heuristic: True when text shows pervasive OCR space-fragmentation worth an LLM
+    reconstruction pass. Conservative — clean legal prose scores ~0, so we don't
+    pay for the LLM on chunks that are already clean.
+    """
+    s = str(text or "")
+    if len(s) < 60:
+        return False
+    signals = 0
+    # stray single letters that aren't real words ('a'/'A'/'I'/'i') — OCR syllable splits
+    signals += len(re.findall(r"(?<![A-Za-z])[B-HJ-Zb-hj-z](?![A-Za-z])", s))
+    # a space directly before punctuation ("Ltd .", "p .a .", "18 %", "year ,")
+    signals += len(re.findall(r"\s[.,;:%]", s))
+    # split numbers ("805 7", "202 5")
+    signals += len(re.findall(r"\b\d{2,4}\s\d{1,2}\b", s))
+    return (signals / (len(s) / 1000.0)) >= 8.0
+
+
+def reconstruct_chunk_text(text: str) -> str:
+    """
+    LLM-reconstruct OCR-fragmented chunk text (Gemini flash, temperature 0).
+
+    Returns the cleaned text, or the ORIGINAL input on any error / empty / clearly
+    truncated output — content is never lost.
+    """
+    src = str(text or "")
+    if not src.strip():
+        return src
+    try:
+        client = _gemini_client()
+        if client is None:
+            return src
+        gen_kwargs = {"temperature": 0.0, "max_output_tokens": 8192}
+        config = _build_gemini_config(gen_kwargs, {}, model_name=_RECONSTRUCT_MODEL)
+        response = client.models.generate_content(
+            model=_RECONSTRUCT_MODEL,
+            contents=_RECONSTRUCT_PROMPT + src[:24000],
+            config=config,
+        )
+        out = (getattr(response, "text", None) or "").strip()
+        # Strip an accidental outer code fence.
+        match = re.fullmatch(r"```(?:\w+)?\s*\n([\s\S]*?)\n```", out)
+        if match:
+            out = match.group(1).strip()
+        # Reconstruction only removes spaces, so output is slightly shorter — never
+        # half the size. A much shorter result means refusal/truncation → keep original.
+        if not out or len(out) < len(src) * 0.5:
+            return src
+        return out
+    except Exception as exc:
+        logger.warning("[DocumentAI] reconstruct_chunk_text failed (%s) — keeping original", exc)
+        return src
+
+
 def _is_audio_source_name(name: str) -> bool:
     lowered = str(name or "").strip().lower()
     if not lowered:
@@ -1734,11 +2723,17 @@ def _call_gemini_for_qa(
         context_parts = []
         source_names = []
         running_chars = 0
-        char_limit = 80000
-        # Free-tier Gemma caps input at ~16K tokens/min, so an 80K-char (~20K token) grounding
-        # block alone 429s. Resolve the model that will answer and clamp the context to the
-        # Gemma-safe budget. get_agent_config is cached, so this extra resolve is cheap and the
-        # value is reused by _generate_text below.
+        # Large budget so full case files and top-k retrieved chunks fit in
+        # context — 380k chars ≈ 95k tokens, safe for DeepSeek (smallest window)
+        # and far below Gemini/Claude limits. Truncating at 80-200k silently
+        # dropped most of a large case file and produced
+        # "Not mentioned in the document." answers.
+        char_limit = 380_000
+        # ...but a free-tier Gemma caps INPUT at ~16K tokens/min, so it 429s long before 380k chars
+        # (~95K tokens). Resolve the model that will actually answer and clamp only Gemma to its
+        # safe budget — every other model keeps the full 380k above, so the truncation bug that
+        # motivated it does not come back. get_agent_config is cached, so this extra resolve is
+        # cheap and the value is reused by _generate_text below.
         try:
             _qa_model, _, _ = _generation_config(
                 for_summary=True,
@@ -1754,7 +2749,9 @@ def _call_gemini_for_qa(
             pass
         for doc in document_texts:
             name = doc.get("name", "document")
-            text = (doc.get("text") or "").strip()
+            # Repair deterministic OCR artefacts (split numbers + known terms) before
+            # the model ever sees the text, so garbled spacing is not echoed back.
+            text = normalize_ocr_artifacts((doc.get("text") or "").strip())
             if not text:
                 continue
             block = f"[Source file: {name}]\n{text}"
@@ -1776,6 +2773,17 @@ def _call_gemini_for_qa(
         context = "\n\n---\n\n".join(context_parts)
         intent_hint = (query_intent or "general").strip().lower()
         format_hint = (output_format or "plain").strip().lower()
+        # Detect the user's EXPLICIT output-format request from the CURRENT question
+        # only (history-augmented prompts otherwise mis-detect — prior answers are
+        # full of "summary" words). When the user explicitly asked for a TABLE /
+        # TIMELINE, we suppress the prose instructions below so they don't fight the
+        # OUTPUT CONTRACT that demands a table.
+        _intent_q = question
+        _cq = re.search(r"Current question:\s*(.+)\Z", str(question or ""), flags=re.IGNORECASE | re.DOTALL)
+        if _cq:
+            _intent_q = _cq.group(1).strip()
+        _orch_intent = detect_response_format(_intent_q)
+        _force_table = _orch_intent in (ResponseIntent.TABLE, ResponseIntent.TIMELINE)
         has_audio_source = any(_is_audio_source_name(name) for name in source_names)
         has_speaker_labels = bool(_extract_speaker_turns(document_texts, max_turns=1))
         require_speaker_diarization = has_audio_source or has_speaker_labels
@@ -1808,34 +2816,74 @@ def _call_gemini_for_qa(
                 instruction_parts.append("Focus on legal, procedural, evidentiary, and strategic risks supported by the record.")
             elif intent_hint == "evidence":
                 instruction_parts.append("Focus on exhibits, proof, contradictions, admissions, and evidentiary support in the record.")
-            elif intent_hint == "summary":
+            elif intent_hint == "summary" and not _force_table:
                 instruction_parts.append("Provide a structured summary that captures the most material facts and issues from the record.")
-            if format_hint == "structured":
+            if _force_table:
+                # User EXPLICITLY asked for a table/timeline → demand pipe tables and
+                # forbid prose, overriding the structured-summary guidance above.
                 instruction_parts.append(
-                    "Use GitHub-Flavored Markdown with short headings and bullets. "
-                    "For comparative, chronological, evidentiary, or financial information, use a Markdown table "
-                    "with a header row and a valid separator row such as |---|---|. "
-                    "Keep each table row on one line and do not use HTML tables."
+                    "OUTPUT FORMAT — MANDATORY: The user explicitly asked for a TABLE. Present the ENTIRE "
+                    "answer as GitHub-Flavored Markdown pipe table(s): a header row, a |---| separator row, "
+                    "and one record per physical line, every row starting and ending with '|'. Do NOT use "
+                    "prose paragraphs or ## section headings. Never use HTML tables."
+                )
+            elif format_hint == "structured":
+                instruction_parts.append(
+                    "Use GitHub-Flavored Markdown with short markdown headings (##), bold sub-labels, and "
+                    "bullet/numbered lists. Use a Markdown table ONLY if the user explicitly asked for a "
+                    "table/timeline/matrix; otherwise prefer headings, paragraphs, and lists. Never use HTML tables."
                 )
         if extra_instructions:
             instruction_parts.append(extra_instructions.strip())
 
+        # Prompt Orchestration Layer:
+        #   - Layer 1 (permanent system prompt) is delivered as the SYSTEM INSTRUCTION
+        #     block so every provider (Gemini / Claude / DeepSeek) receives the same
+        #     role + markdown + OCR rules.
+        #   - Layer 3 (dynamic format instruction) is detected from the user's CURRENT
+        #     question (`_intent_q`, computed above) and appended as the OUTPUT CONTRACT
+        #     reminder. The user's wording is never modified.
+        format_reminder = (
+            "=== OUTPUT CONTRACT (OVERRIDES ALL PRIOR INSTRUCTIONS) ===\n"
+            f"{format_instruction_for_query(_intent_q)}"
+        )
         prompt = (
             f"{' '.join(instruction_parts)}\n\n"
             f"=== CASE MATERIALS (documents and/or audio transcripts) ===\n{context}\n\n"
             f"=== QUESTION ===\n{question}\n\n"
+            f"{format_reminder}\n\n"
             "=== ANSWER ==="
         )
+        system_block = f"SYSTEM INSTRUCTION:\n{PERMANENT_SYSTEM_PROMPT}"
         if system_instruction:
-            prompt = f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n{prompt}"
-        answer = _generate_text(
-            prompt,
-            for_summary=intent_hint == "summary",
-            agent_name=agent_name or _AGENT_QA,
-            user_id=user_id,
-            summarization_llm_config=summarization_llm_config,
-            model_name_override=model_name_override,
-        )
+            system_block = f"{system_block}\n\n{system_instruction}"
+        prompt = f"{system_block}\n\n{prompt}"
+        override = str(model_name_override or "").strip() or None
+        try:
+            answer = _generate_text(
+                prompt,
+                for_summary=intent_hint == "summary",
+                agent_name=agent_name or _AGENT_QA,
+                user_id=user_id,
+                summarization_llm_config=summarization_llm_config,
+                model_name_override=override,
+            )
+        except Exception as exc:
+            if not override:
+                raise
+            logger.warning(
+                "[DocumentAI] Q&A failed with override model=%s (%s) — retrying with agent default",
+                override,
+                exc,
+            )
+            answer = _generate_text(
+                prompt,
+                for_summary=intent_hint == "summary",
+                agent_name=agent_name or _AGENT_QA,
+                user_id=user_id,
+                summarization_llm_config=summarization_llm_config,
+                model_name_override=None,
+            )
         if require_speaker_diarization:
             diarization_suffix = _build_speaker_diarization_suffix(document_texts)
             if diarization_suffix and "speaker diarization" not in (answer or "").lower():

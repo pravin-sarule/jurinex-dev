@@ -78,8 +78,10 @@ function _pageAtRule(profile, forPdf = false) {
   const p = normalizeBrandingProfile(profile);
   const size = (p.pageSize || 'a4').toUpperCase();
   const land = p.orientation === 'landscape' ? ' landscape' : '';
-  /* Playwright / html2pdf apply page margins externally — @page margins here would double them and clip content. */
-  if (forPdf) return `@page{size:${size}${land};margin:0;}`;
+  /* For PDF, declare NO @page margin: a CSS @page margin (even 0) overrides the
+     margins Playwright passes to Chromium's page.pdf(), printing edge-to-edge.
+     Leaving it undeclared lets the profile's mm margins apply. */
+  if (forPdf) return `@page{size:${size}${land};}`;
   return `@page{size:${size}${land};margin:0;}`;
 }
 
@@ -264,9 +266,12 @@ ${inner}
 
 export function getBrandingCss(profile, { forPdf = false, pageWidthPx, pageHeightPx, previewShell = false } = {}) {
   const p = normalizeBrandingProfile(profile);
-  const ff = (p.fontFamily || 'Times New Roman').replace(/'/g, "\\'");
-  const fs = p.fontSize ?? 15;
-  const lh = p.lineHeight ?? 1.5;
+  // PDF content typography mirrors the plain (reportlab) response exporter so
+  // branded and non-branded PDF downloads read identically; the letterhead,
+  // watermark, and footer keep the profile's brand fonts and colors.
+  const ff = forPdf ? 'Helvetica' : (p.fontFamily || 'Times New Roman').replace(/'/g, "\\'");
+  const fs = forPdf ? 11 : (p.fontSize ?? 15);
+  const lh = forPdf ? 1.4 : (p.lineHeight ?? 1.5);
   const primary = p.primaryColor || '#20b2aa';
   const bodyC = p.bodyTextColor || '#000000';
   const mt = p.marginTop ?? 20;
@@ -282,12 +287,15 @@ export function getBrandingCss(profile, { forPdf = false, pageWidthPx, pageHeigh
   const wmRot = p.watermarkAngle ?? p.watermarkRotation ?? -30;
   const wmFs = p.watermarkFontSize ?? 72;
   const wmOpacity = Math.min(0.2, Math.max(0.04, p.watermarkOpacity ?? 0.12));
-  const h1 = brandingHeadingPt(p, 1);
-  const h2 = brandingHeadingPt(p, 2);
-  const h3 = brandingHeadingPt(p, 3);
-  const h4 = brandingHeadingPt(p, 4);
-  const h5 = brandingHeadingPt(p, 5);
-  const h6 = brandingHeadingPt(p, 6);
+  // Same heading scale as merged_pdf_service.py: max(10.5, 17 − 1.5×(level−1))
+  const ffStack = forPdf ? `'${ff}',Arial,sans-serif` : `'${ff}','Times New Roman',Times,serif`;
+  const h1 = forPdf ? 17 : brandingHeadingPt(p, 1);
+  const h2 = forPdf ? 15.5 : brandingHeadingPt(p, 2);
+  const h3 = forPdf ? 14 : brandingHeadingPt(p, 3);
+  const h4 = forPdf ? 12.5 : brandingHeadingPt(p, 4);
+  const h5 = forPdf ? 11 : brandingHeadingPt(p, 5);
+  const h6 = forPdf ? 10.5 : brandingHeadingPt(p, 6);
+  const headC = forPdf ? '#111827' : bodyC;
   const bodyTypo = `
   .brd-outer .brd-content,.brd-outer .brd-content p,.brd-outer .brd-content li,.brd-outer .brd-content td,.brd-outer .brd-content th,.brd-outer .brd-content span,.brd-outer .brd-content div:not(pre):not(code){
     font-family:inherit !important;font-size:${fs}pt !important;line-height:${lh} !important;color:${bodyC} !important;}
@@ -309,13 +317,11 @@ export function getBrandingCss(profile, { forPdf = false, pageWidthPx, pageHeigh
   // letterhead table (.brd-lh-table) which has its own layout and must not inherit
   // column-width hints, borders, or font-size overrides from content table rules.
   const tableStyles = forPdf
-    ? `.brd-outer .brd-content table{width:100%;max-width:100%;border-collapse:collapse;margin:8pt 0;font-size:8pt;table-layout:auto;}
-       .brd-outer .brd-content th{border:.75pt solid #9ca3af;padding:3pt 4pt;background:#f3f4f6;font-weight:700;text-align:left;color:#1f2937;word-break:break-word;overflow-wrap:break-word;white-space:normal;min-width:36pt;}
-       .brd-outer .brd-content td{border:.75pt solid #d1d5db;padding:3pt 4pt;vertical-align:top;color:#374151;word-break:break-word;overflow-wrap:break-word;min-width:36pt;}
+    ? `.brd-outer .brd-content table{width:100%;max-width:100%;border-collapse:collapse;margin:8pt 0;font-size:9.5pt;table-layout:auto;}
+       .brd-outer .brd-content th{border:.75pt solid #9ca3af;padding:4pt 5pt;background:#f3f4f6;font-weight:700;text-align:left;color:#1f2937 !important;font-size:9.5pt !important;line-height:1.35 !important;overflow-wrap:break-word;white-space:normal;}
+       .brd-outer .brd-content td{border:.75pt solid #d1d5db;padding:4pt 5pt;vertical-align:top;color:#374151 !important;font-size:9.5pt !important;line-height:1.35 !important;overflow-wrap:break-word;}
        .brd-outer .brd-content thead{display:table-header-group;}
-       .brd-outer .brd-content tbody tr:nth-child(even) td{background:#f9fafb;}
-       .brd-outer .brd-content td:first-child,.brd-outer .brd-content th:first-child{min-width:20pt;width:20pt;}
-       .brd-outer .brd-content td:last-child,.brd-outer .brd-content th:last-child{min-width:28pt;width:28pt;}`
+       .brd-outer .brd-content tbody tr:nth-child(even) td{background:#f9fafb;}`
     : `.brd-outer .brd-content table{width:100%;border-collapse:collapse;margin:10pt 0;font-size:10pt;table-layout:auto;}
        .brd-outer .brd-content th{border:1pt solid #9ca3af;padding:5pt 7pt;background:#f3f4f6;font-weight:700;text-align:left;color:#1f2937;white-space:normal;word-break:break-word;}
        .brd-outer .brd-content td{border:1pt solid #d1d5db;padding:5pt 7pt;vertical-align:top;color:#374151;word-break:break-word;}
@@ -327,18 +333,18 @@ export function getBrandingCss(profile, { forPdf = false, pageWidthPx, pageHeigh
   .brd-body-standalone,.brd-body-standalone .brd-root{-webkit-font-smoothing:auto;-moz-osx-font-smoothing:auto;}
   .brd-outer *,.brd-outer *::before,.brd-outer *::after{box-sizing:border-box;}
   .brd-root{position:relative;margin:0;padding:0;background:#fff;}
-  .brd-outer{position:relative;font-family:'${ff}','Times New Roman',Times,serif;font-size:${fs}pt;line-height:${lh};color:${bodyC};background:#fff;width:${W};margin:0 auto;}
+  .brd-outer{position:relative;font-family:${ffStack};font-size:${fs}pt;line-height:${lh};color:${bodyC};background:#fff;width:${W};margin:0 auto;}
   .brd-page{position:relative;width:100%;min-height:${shellMinH};padding:${forPdf ? '0' : `${mt}mm ${mr}mm ${mb}mm ${ml}mm`};background:#fff;overflow:${forPdf ? 'visible' : 'hidden'};display:flex;flex-direction:column;isolation:isolate;}
   .brd-wm-layer{z-index:0!important;}
   .brd-stack{position:relative;z-index:2;transform:translateZ(0);flex:1;display:flex;flex-direction:column;width:100%;}
-  .brd-outer .brd-content h1{font-size:${h1}pt !important;font-weight:700;color:${bodyC} !important;margin:16pt 0 8pt;border-bottom:1pt solid #e5e7eb;padding-bottom:4pt;page-break-after:avoid;font-family:inherit !important;}
-  .brd-outer .brd-content h2{font-size:${h2}pt !important;font-weight:700;color:${bodyC} !important;margin:13pt 0 7pt;page-break-after:avoid;font-family:inherit !important;}
-  .brd-outer .brd-content h3{font-size:${h3}pt !important;font-weight:600;color:${bodyC} !important;margin:11pt 0 5pt;page-break-after:avoid;font-family:inherit !important;}
-  .brd-outer .brd-content h4{font-size:${h4}pt !important;font-weight:600;color:${bodyC} !important;margin:9pt 0 4pt;page-break-after:avoid;font-family:inherit !important;}
-  .brd-outer .brd-content h5{font-size:${h5}pt !important;font-weight:600;color:${bodyC} !important;margin:9pt 0 4pt;page-break-after:avoid;font-family:inherit !important;}
-  .brd-outer .brd-content h6{font-size:${h6}pt !important;font-weight:600;color:${bodyC} !important;margin:9pt 0 4pt;page-break-after:avoid;font-family:inherit !important;}
-  .brd-outer .brd-content{position:relative;z-index:2;padding:${pdfContentPad};margin:0;page-break-inside:auto;color:${bodyC};flex:1;background:transparent;font-family:'${ff}','Times New Roman',Times,serif;font-size:${fs}pt;line-height:${lh};}
-  .brd-outer .brd-content p{margin:0 0 8pt;text-align:justify;text-justify:inter-word;orphans:3;widows:3;}
+  .brd-outer .brd-content h1{font-size:${h1}pt !important;font-weight:700;color:${headC} !important;margin:${forPdf ? '10pt 0 4pt' : '16pt 0 8pt'};${forPdf ? '' : 'border-bottom:1pt solid #e5e7eb;padding-bottom:4pt;'}page-break-after:avoid;font-family:inherit !important;}
+  .brd-outer .brd-content h2{font-size:${h2}pt !important;font-weight:700;color:${headC} !important;margin:${forPdf ? '10pt 0 4pt' : '13pt 0 7pt'};page-break-after:avoid;font-family:inherit !important;}
+  .brd-outer .brd-content h3{font-size:${h3}pt !important;font-weight:${forPdf ? 700 : 600};color:${headC} !important;margin:${forPdf ? '8pt 0 4pt' : '11pt 0 5pt'};page-break-after:avoid;font-family:inherit !important;}
+  .brd-outer .brd-content h4{font-size:${h4}pt !important;font-weight:${forPdf ? 700 : 600};color:${headC} !important;margin:${forPdf ? '8pt 0 4pt' : '9pt 0 4pt'};page-break-after:avoid;font-family:inherit !important;}
+  .brd-outer .brd-content h5{font-size:${h5}pt !important;font-weight:${forPdf ? 700 : 600};color:${headC} !important;margin:${forPdf ? '8pt 0 4pt' : '9pt 0 4pt'};page-break-after:avoid;font-family:inherit !important;}
+  .brd-outer .brd-content h6{font-size:${h6}pt !important;font-weight:${forPdf ? 700 : 600};color:${headC} !important;margin:${forPdf ? '8pt 0 4pt' : '9pt 0 4pt'};page-break-after:avoid;font-family:inherit !important;}
+  .brd-outer .brd-content{position:relative;z-index:2;padding:${pdfContentPad};margin:0;page-break-inside:auto;color:${bodyC};flex:1;background:transparent;font-family:${ffStack};font-size:${fs}pt;line-height:${lh};}
+  .brd-outer .brd-content p{margin:0 0 ${forPdf ? 7 : 8}pt;text-align:justify;text-justify:inter-word;orphans:3;widows:3;}
   .brd-outer .brd-content table{width:100%;border-collapse:collapse;page-break-inside:auto;}
   .brd-outer .brd-content tr{page-break-inside:avoid;page-break-after:auto;}
   .brd-outer .brd-content ul,.brd-outer .brd-content ol{margin:5pt 0 9pt;padding-left:18pt;}

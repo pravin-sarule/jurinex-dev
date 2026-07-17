@@ -549,16 +549,27 @@ class LegalCasePipelineService:
 
         non_empty = len(non_empty_sections)
         logger.info(
-            "[Pipeline] Step 3/4: Embedding — %d non-empty chunks (batch mode, size=%s)",
+            "[Pipeline] Step 3/4: Embedding — %d non-empty chunks (parallel batches, size=%s)",
             non_empty,
             self._settings.embedding_batch_size,
         )
 
+        if progress_callback:
+            try:
+                progress_callback(64.0)
+            except Exception:
+                pass
+
         if non_empty_sections:
             chunk_texts = [(s.text or "").strip() for _, s in non_empty_sections]
-            # Single embed_batch call; internally splits into sub-batches with
-            # rate-limit protection and exponential-backoff retry.
-            chunk_embeddings = embeddings.embed_batch(chunk_texts)
+            # Parallel embed_batch: sub-batches sent concurrently via ThreadPoolExecutor.
+            # Rate limiter + exponential-backoff retry per sub-batch.
+            chunk_embeddings = embeddings.embed_batch(
+                chunk_texts,
+                progress_callback=progress_callback,
+                progress_start=65.0,
+                progress_end=78.0,
+            )
 
             for (section_idx, section), chunk_text, chunk_embedding in zip(
                 non_empty_sections, chunk_texts, chunk_embeddings
@@ -923,7 +934,7 @@ class LegalCasePipelineService:
                     )
 
         if not params["use_hybrid_search"]:
-            return semantic_rows[:top_k]
+            return self._autoheal_fragmented_rows(semantic_rows[:top_k])
 
         merged: dict[str, dict[str, Any]] = {}
         if params["use_rrf"]:
@@ -937,7 +948,7 @@ class LegalCasePipelineService:
                 entry["keyword_score"] = float(row.get("keyword_score") or 0.0)
             rows = list(merged.values())
             rows.sort(key=lambda item: float(item.get("combined_score") or 0.0), reverse=True)
-            return rows[:top_k]
+            return self._autoheal_fragmented_rows(rows[:top_k])
 
         semantic_weight = float(params["semantic_weight"])
         keyword_weight = float(params["keyword_weight"])
@@ -953,7 +964,7 @@ class LegalCasePipelineService:
             )
         rows = list(merged.values())
         rows.sort(key=lambda item: float(item.get("combined_score") or 0.0), reverse=True)
-        return rows[:top_k]
+        return self._autoheal_fragmented_rows(rows[:top_k])
 
     def _build_keyword_query(self, raw_query: str) -> str:
         text = str(raw_query or "").strip()
@@ -1082,6 +1093,61 @@ class LegalCasePipelineService:
                 parts.append(f"{header}\n{content}")
         return "\n\n".join(parts) if parts else "No relevant content found."
 
+    def _autoheal_fragmented_rows(self, rows: list[dict]) -> list[dict]:
+        """
+        Lazily reconstruct OCR-fragmented RETRIEVED chunks in place, then persist
+        the cleaned text back to `file_chunks`.
+
+        This is the auto-heal: a case indexed before the OCR work still returns
+        clean text on the FIRST query (the retrieved rows are repaired before the
+        answer is built), and — because the cleaned text is written back — every
+        later query is clean and pays nothing. Only fragmented rows hit the LLM
+        (most are skipped by `_looks_fragmented`), and only the retrieved set
+        (≤ top_k) is touched, so latency is bounded and one-time per case.
+        Mutates `rows[i]["content"]` for repaired rows. Best-effort: never raises.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        from app.services.adapters.document_ai import _looks_fragmented, reconstruct_chunk_text
+
+        targets = [r for r in rows if _looks_fragmented(str(r.get("content") or ""))]
+        if not targets:
+            return rows
+        logger.info("[Pipeline] auto-heal: reconstructing %d fragmented retrieved chunk(s)", len(targets))
+
+        def _heal(row: dict) -> tuple[dict, str, str]:
+            original = str(row.get("content") or "")
+            try:
+                return row, original, reconstruct_chunk_text(original)
+            except Exception:
+                return row, original, original
+
+        persist: list[tuple[str, str]] = []
+        try:
+            with ThreadPoolExecutor(max_workers=min(6, len(targets))) as pool:
+                for row, original, fixed in pool.map(_heal, targets):
+                    if fixed and fixed != original:
+                        row["content"] = fixed
+                        chunk_id = str(row.get("chunk_id") or "")
+                        if chunk_id:
+                            persist.append((chunk_id, fixed))
+        except Exception as exc:
+            logger.warning("[Pipeline] auto-heal reconstruction failed: %s", exc)
+            return rows
+
+        if persist and is_db_available():
+            try:
+                with get_db_connection() as conn, conn.cursor() as cur:
+                    for chunk_id, fixed in persist:
+                        cur.execute(
+                            "UPDATE file_chunks SET content = %s, updated_at = NOW() WHERE id = %s",
+                            [fixed, chunk_id],
+                        )
+                    conn.commit()
+                logger.info("[Pipeline] auto-heal: persisted %d cleaned chunk(s)", len(persist))
+            except Exception as exc:
+                logger.warning("[Pipeline] auto-heal persist failed: %s", exc)
+        return rows
+
     def answer_query_for_files(
         self,
         request: QueryRequest,
@@ -1119,6 +1185,7 @@ class LegalCasePipelineService:
 
         if not rows:
             raise ValueError(f"No indexed chunks found for case '{request.case_id}'.")
+        # (rows are already auto-healed inside _search_db_chunks — universal for every path)
 
         citations: list[QueryCitation] = []
         answer_lines: list[str] = []

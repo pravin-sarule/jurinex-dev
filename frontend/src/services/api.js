@@ -739,6 +739,9 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
     if (typeof extraFetchParams.context_selection === 'string') {
       body.context_selection = extraFetchParams.context_selection;
     }
+    if (extraFetchParams.web_search === true || extraFetchParams.web_search === 'true') {
+      body.web_search = true;
+    }
  }
 
  const headers = {
@@ -829,6 +832,8 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
            if (onMetadata && parsed.sessionMetrics) {
              onMetadata({ cache_session_metrics: parsed.sessionMetrics });
            }
+         } else if (parsed.type === 'sources' && onMetadata) {
+           onMetadata({ sources: parsed.sources || [], web_search_queries: parsed.queries || [] });
          } else if (parsed.type === 'thought' && onThought) {
            const thoughtPiece = typeof parsed.text === 'string' ? parsed.text : '';
            if (thoughtPiece) onThought(thoughtPiece);
@@ -926,6 +931,9 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
        const t = Number(rawTemp);
        if (Number.isFinite(t)) body.model_temperature = t;
      }
+     if (extraFetchParams.web_search === true || extraFetchParams.web_search === 'true') {
+       body.web_search = true;
+     }
    }
 
    const headers = {
@@ -1000,7 +1008,9 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
            const parsed = JSON.parse(data);
            if (parsed.type === 'status' && onStatus) onStatus(parsed.status, parsed.message);
            else if (parsed.type === 'metadata' && onMetadata) onMetadata(parsed);
-           else if (parsed.type === 'thought' && onThought) {
+           else if (parsed.type === 'sources' && onMetadata) {
+             onMetadata({ sources: parsed.sources || [], web_search_queries: parsed.queries || [] });
+           } else if (parsed.type === 'thought' && onThought) {
              const thoughtPiece = typeof parsed.text === 'string' ? parsed.text : '';
              if (thoughtPiece) onThought(thoughtPiece);
            } else if (parsed.type === 'chunk' && onChunk) {

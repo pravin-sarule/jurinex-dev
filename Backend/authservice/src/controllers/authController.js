@@ -67,6 +67,7 @@
 
 const http = require('http');
 const bcrypt = require('bcryptjs');
+const pool = require('../config/db');
 const User = require('../models/User');
 const Session = require('../models/Session');
 const UserProfessionalProfile = require('../models/UserProfessionalProfile');
@@ -74,6 +75,7 @@ const Firm = require('../models/Firm');
 const FirmUser = require('../models/FirmUser');
 const { generateToken } = require('../utils/jwt');
 const { createAndSendOTP, verifyOTP, sendPasswordSetEmail } = require('../services/otpService');
+const { getAuthDenial } = require('../utils/authAccess');
 const admin = require('../config/firebase'); // Import Firebase Admin SDK
 const { OAuth2Client } = require('google-auth-library');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -280,74 +282,87 @@ const registerFirm = async (req, res) => {
       ? domain_role.toUpperCase()
       : 'LEGAL_PROFESSIONAL';
 
-    const adminUser = await User.create({
-      username: registering_advocate_name,
-      email,
-      password: hashedPassword,
-      auth_type: 'manual',
-      account_type: 'FIRM_ADMIN',
-      approval_status: 'PENDING',
-      first_login: true,
-      is_active: false,
-      phone: mobile,
-      location: city && state ? `${city}, ${state}` : null,
-      domain_role: firmDomainRole,
-      role_id: role_id || null,
-    });
+    let adminUser = null;
+    try {
+      adminUser = await User.create({
+        username: registering_advocate_name,
+        email,
+        password: hashedPassword,
+        auth_type: 'manual',
+        account_type: 'FIRM_ADMIN',
+        approval_status: 'PENDING',
+        first_login: true,
+        is_active: true,
+        phone: mobile,
+        location: city && state ? `${city}, ${state}` : null,
+        domain_role: firmDomainRole,
+        role_id: role_id || null,
+      });
 
-    // Create firm record
-    const firm = await Firm.create({
-      firm_name,
-      firm_type,
-      establishment_date: establishment_date || null,
-      registering_advocate_name,
-      bar_enrollment_number: bar_enrollment_number || null,
-      enrollment_date: enrollment_date || null,
-      state_bar_council: state_bar_council || null,
-      email,
-      mobile,
-      landline: landline || null,
-      office_address,
-      city,
-      district: district || null,
-      state,
-      pin_code,
-      pan_number,
-      gst_number: gst_number || null,
-      approval_status: 'PENDING',
-      admin_user_id: adminUser.id
-    });
+      // Create firm record (address/PAN optional — simplified registration form)
+      const firm = await Firm.create({
+        firm_name,
+        firm_type,
+        establishment_date: establishment_date || null,
+        registering_advocate_name,
+        bar_enrollment_number: bar_enrollment_number || null,
+        enrollment_date: enrollment_date || null,
+        state_bar_council: state_bar_council || null,
+        email,
+        mobile,
+        landline: landline || null,
+        office_address: office_address || null,
+        city: city || null,
+        district: district || null,
+        state: state || null,
+        pin_code: pin_code || null,
+        pan_number: pan_number || null,
+        gst_number: gst_number || null,
+        approval_status: 'PENDING',
+        admin_user_id: adminUser.id
+      });
 
-    // Create firm_user relationship
-    await FirmUser.create({
-      firm_id: firm.id,
-      user_id: adminUser.id,
-      role: 'ADMIN'
-    });
+      // Create firm_user relationship
+      await FirmUser.create({
+        firm_id: firm.id,
+        user_id: adminUser.id,
+        role: 'ADMIN'
+      });
 
-    // Assign free plan to firm admin (non-blocking)
-    assignFreePlanToUser(adminUser.id).catch(() => {});
+      // Assign free plan to firm admin (non-blocking)
+      assignFreePlanToUser(adminUser.id).catch(() => {});
 
-    // TODO: Send email to admin with credentials (tempPassword)
-    // For now, we'll return it in response (remove in production)
-    console.log(`[Firm Registration] Admin credentials for ${email}: Password: ${tempPassword}`);
+      // TODO: Send email to admin with credentials (tempPassword)
+      // For now, we'll return it in response (remove in production)
+      console.log(`[Firm Registration] Admin credentials for ${email}: Password: ${tempPassword}`);
 
-    res.status(201).json({
-      success: true,
-      message: 'Firm registration submitted successfully. Your application is under review. You will receive access within 24 hours after verification.',
-      firm: {
-        id: firm.id,
-        firm_name: firm.firm_name,
-        email: firm.email,
-        approval_status: firm.approval_status
-      },
-      // Remove admin_credentials in production - send via email instead
-      admin_credentials: {
-        email: adminUser.email,
-        temporary_password: tempPassword,
-        note: 'Please change your password on first login'
+      return res.status(201).json({
+        success: true,
+        message: 'Firm registration submitted successfully. Your application is under review. You will receive access within 24 hours after verification.',
+        firm: {
+          id: firm.id,
+          firm_name: firm.firm_name,
+          email: firm.email,
+          approval_status: firm.approval_status
+        },
+        // Remove admin_credentials in production - send via email instead
+        admin_credentials: {
+          email: adminUser.email,
+          temporary_password: tempPassword,
+          note: 'Please change your password on first login'
+        }
+      });
+    } catch (createError) {
+      // Roll back orphaned admin user if firm/link creation failed
+      if (adminUser?.id) {
+        try {
+          await pool.query('DELETE FROM users WHERE id = $1', [adminUser.id]);
+        } catch (cleanupError) {
+          console.error('Failed to clean up orphaned firm admin user:', cleanupError);
+        }
       }
-    });
+      throw createError;
+    }
   } catch (error) {
     console.error('Error during firm registration:', error);
     res.status(500).json({ 
@@ -430,55 +445,9 @@ const login = async (req, res) => {
     }
     console.log(`[AuthController] User found: ${user.email}`);
 
-    if (user.is_blocked === true) {
-      return res.status(403).json({ message: 'You are blocked for policy violations.' });
-    }
-
-    // Check approval status for FIRM_ADMIN and FIRM_USER
-    if ((user.account_type === 'FIRM_ADMIN' || user.account_type === 'FIRM_USER')) {
-      // For FIRM_ADMIN, check firm's approval status first
-      if (user.account_type === 'FIRM_ADMIN') {
-        const firm = await Firm.findByAdminUserId(user.id);
-        if (firm) {
-          // If firm is APPROVED, allow login regardless of user approval_status
-          if (firm.approval_status === 'APPROVED') {
-            console.log(`[AuthController] Firm is APPROVED, allowing login for FIRM_ADMIN: ${user.email}`);
-            // Allow login - firm is approved
-          } else if (firm.approval_status === 'PENDING') {
-            return res.status(403).json({ 
-              message: 'Your account is pending approval. Please wait for admin verification.' 
-            });
-          } else if (firm.approval_status === 'REJECTED') {
-            return res.status(403).json({ 
-              message: 'Your account has been rejected. Please contact support.' 
-            });
-          }
-        } else {
-          // Firm not found - check user approval_status
-          if (user.approval_status === 'PENDING') {
-            return res.status(403).json({ 
-              message: 'Your account is pending approval. Please wait for admin verification.' 
-            });
-          }
-          if (user.approval_status === 'REJECTED') {
-            return res.status(403).json({ 
-              message: 'Your account has been rejected. Please contact support.' 
-            });
-          }
-        }
-      } else {
-        // For FIRM_USER, check user approval_status
-        if (user.approval_status === 'PENDING') {
-          return res.status(403).json({ 
-            message: 'Your account is pending approval. Please wait for admin verification.' 
-          });
-        }
-        if (user.approval_status === 'REJECTED') {
-          return res.status(403).json({ 
-            message: 'Your account has been rejected. Please contact support.' 
-          });
-        }
-      }
+    const denial = await getAuthDenial(user);
+    if (denial) {
+      return res.status(403).json(denial);
     }
 
     if (!user.password || typeof user.password !== 'string' || user.password.trim() === '') {
@@ -549,6 +518,11 @@ const verifyOtpAndLogin = async (req, res) => {
         success: false,
         message: 'User not found after OTP verification.' 
       });
+    }
+
+    const denial = await getAuthDenial(user);
+    if (denial) {
+      return res.status(403).json(denial);
     }
 
     // Handle first-time login password change
@@ -671,10 +645,9 @@ const firebaseGoogleSignIn = async (req, res) => {
       }
     }
 
-    if (user.is_blocked) {
-      return res.status(403).json({ 
-        message: "Your account is blocked. Please contact support." 
-      });
+    const denial = await getAuthDenial(user);
+    if (denial) {
+      return res.status(403).json(denial);
     }
 
     const activeUser = await markUserActiveSession(user.id) || user;

@@ -87,7 +87,9 @@ function buildSecretsApiBases() {
   add(SECRET_PROMPTS_API_BASE);
   add(`${GATEWAY_BASE_URL}/chat`);
   add(DOCS_BASE_URL);
-  add(CHAT_MODEL_BASE_URL);
+  // CHAT_MODEL_BASE_URL is the service host; secrets live at /api/chat/secrets
+  const chatHost = String(CHAT_MODEL_BASE_URL || '').replace(/\/api\/chat\/?$/, '').replace(/\/$/, '');
+  if (chatHost) add(`${chatHost}/api/chat`);
 
   return bases;
 }

@@ -1,10 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react"
 import { motion as Motion, AnimatePresence } from "framer-motion"
 import { useLocation } from "react-router-dom"
-import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
-import rehypeRaw from "rehype-raw"
-import rehypeSanitize from "rehype-sanitize"
+import FormattedAssistantContent from "../ChatInterface/FormattedAssistantContent"
 import { AI_CHATBOT_URL } from "../../config/apiConfig"
 
 // ── constants ─────────────────────────────────────────────────────────────────
@@ -359,45 +356,6 @@ const VoiceWave = () => (
   </div>
 )
 
-// ── markdown renderer — teal-themed, matches app ChatMessage style ─────────────
-
-const MD_COMPONENTS = {
-  h1: ({ node, ...p }) => <h1 className="text-[14px] font-bold mb-2 mt-3 text-gray-900 border-b pb-1" style={{ borderColor: T.softBorder }} {...p} />,
-  h2: ({ node, ...p }) => <h2 className="text-[13px] font-bold mb-2 mt-3 text-gray-900" {...p} />,
-  h3: ({ node, ...p }) => <h3 className="text-[12.5px] font-bold mb-1.5 mt-2 text-gray-800" {...p} />,
-  h4: ({ node, ...p }) => <h4 className="text-[12px] font-semibold mb-1 mt-2 text-gray-800" {...p} />,
-  p:  ({ node, ...p }) => <p  className="mb-2 leading-relaxed text-[12.5px] text-gray-800" {...p} />,
-  strong: ({ node, ...p }) => <strong className="font-bold text-gray-900" {...p} />,
-  em:     ({ node, ...p }) => <em className="italic text-gray-700" {...p} />,
-  ul: ({ node, ...p }) => <ul className="list-disc pl-4 mb-2 space-y-0.5 text-[12.5px] text-gray-800" {...p} />,
-  ol: ({ node, ...p }) => <ol className="list-decimal pl-4 mb-2 space-y-0.5 text-[12.5px] text-gray-800" {...p} />,
-  li: ({ node, ...p }) => <li className="leading-relaxed" {...p} />,
-  a:  ({ node, ...p }) => <a className="underline" style={{ color: T.dark }} target="_blank" rel="noopener noreferrer" {...p} />,
-  blockquote: ({ node, ...p }) => (
-    <blockquote className="my-2 py-2 px-3 italic text-gray-700 rounded-r-lg text-[12px]"
-      style={{ borderLeft: `3px solid ${T.primary}`, background: T.soft }} {...p} />
-  ),
-  code: ({ node, inline, ...p }) =>
-    inline
-      ? <code className="px-1.5 py-0.5 rounded text-[11px] font-mono" style={{ background: "#f0fdfc", color: T.darker }} {...p} />
-      : <code className="block p-3 rounded-lg text-[11px] font-mono overflow-x-auto my-2 text-gray-100" style={{ background: "#0f2a28" }} {...p} />,
-  pre: ({ node, ...p }) => <pre className="rounded-lg overflow-hidden my-2" style={{ background: "#0f2a28" }} {...p} />,
-  table: ({ node, ...p }) => (
-    <div className="overflow-x-auto my-3 rounded-lg" style={{ border: `1px solid ${T.softBorder}` }}>
-      <table className="min-w-full border-collapse text-[11.5px]" {...p} />
-    </div>
-  ),
-  thead: ({ node, ...p }) => <thead style={{ background: T.soft }} {...p} />,
-  th: ({ node, ...p }) => (
-    <th className="px-3 py-2 text-left font-semibold text-[11px] uppercase tracking-wide"
-      style={{ color: T.darker, borderBottom: `1.5px solid ${T.softBorder}` }} {...p} />
-  ),
-  tbody: ({ node, ...p }) => <tbody {...p} />,
-  tr: ({ node, ...p }) => <tr style={{ borderBottom: "1px solid #e8f5f5" }} {...p} />,
-  td: ({ node, ...p }) => <td className="px-3 py-2 text-gray-700" {...p} />,
-  hr: ({ node, ...p }) => <hr className="my-3" style={{ borderColor: T.softBorder }} {...p} />,
-}
-
 // Renders the AI answer section inside a Q&A card
 function AnswerBody({ text, error }) {
   if (error) {
@@ -405,15 +363,8 @@ function AnswerBody({ text, error }) {
       <p className="text-[12.5px] leading-relaxed" style={{ color: "#c53030" }}>{text}</p>
     )
   }
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeRaw, rehypeSanitize]}
-      components={MD_COMPONENTS}
-    >
-      {text}
-    </ReactMarkdown>
-  )
+  // Single shared assistant renderer — same markdown styling as every other surface.
+  return <FormattedAssistantContent raw={text} />
 }
 
 // A single Q&A turn rendered as a self-contained card

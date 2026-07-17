@@ -1,51 +1,12 @@
 import { convertJsonToPlainText } from './jsonToPlainText';
 import { isStructuredJsonResponse, renderSecretPromptResponse } from './renderSecretPromptResponse';
 
-const BOX_CHARS = /[┌└├┤┬┴┼│─]/;
+const BOX_CHARS = /[┌┐└┘├┤┬┴┼│─]/;
 
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function extractBoxInnerLines(block) {
-  const lines = [];
-  const parts = String(block).split('│');
-  parts.forEach((part) => {
-    const cleaned = part.replace(/[┌└├┤┬┴┼─]/g, ' ').replace(/\s+/g, ' ').trim();
-    if (cleaned && !/^[-─\s]+$/.test(cleaned)) {
-      lines.push(cleaned);
-    }
-  });
-  if (lines.length > 0) return lines;
-
-  String(block)
-    .split(/\n/)
-    .forEach((line) => {
-      const cleaned = line.replace(/[┌└├┤┬┴┼│─]/g, '').trim();
-      if (cleaned) lines.push(cleaned);
-    });
-  return lines;
-}
-
-function renderLegalBannerHtml(innerLines) {
-  if (!innerLines.length) return '';
-  const title = innerLines[0];
-  const meta = innerLines.slice(1).join(' · ');
-  const metaHtml = meta
-    ? `<div class="legal-response-banner__meta">${escapeHtml(meta)}</div>`
-    : '';
-  return (
-    `<div class="legal-response-banner">` +
-    `<div class="legal-response-banner__title">${escapeHtml(title)}</div>` +
-    metaHtml +
-    `</div>`
-  );
-}
-
+// Decorative model-emitted banners ("⚖️ LEXIS ...", "खटला: ... प्रश्नाचा प्रकार: ...")
+// are pure branding noise — drop the whole box instead of rendering it. The
+// system prompt forbids them, but old sessions and occasional slips still
+// contain boxes, so the formatter removes them defensively.
 function convertAsciiLegalBoxes(text) {
   if (!text || typeof text !== 'string' || !BOX_CHARS.test(text)) {
     return text;
@@ -53,15 +14,8 @@ function convertAsciiLegalBoxes(text) {
 
   let result = text;
 
-  result = result.replace(/┌[\s─]+┐[\s\S]*?└[\s─]+┘/g, (block) => {
-    const inner = extractBoxInnerLines(block);
-    return inner.length ? renderLegalBannerHtml(inner) : block;
-  });
-
-  result = result.replace(/┌[\s─]+┐\s*((?:│[^┌└]+│\s*)+)\s*└[\s─]+┘/g, (block) => {
-    const inner = extractBoxInnerLines(block);
-    return inner.length ? renderLegalBannerHtml(inner) : block;
-  });
+  result = result.replace(/┌[\s─]+┐[\s\S]*?└[\s─]+┘/g, '');
+  result = result.replace(/┌[\s─]+┐\s*((?:│[^┌└]+│\s*)+)\s*└[\s─]+┘/g, '');
 
   return result;
 }
@@ -70,7 +24,7 @@ function cleanupBoxDebris(text) {
   return String(text)
     .split('\n')
     .filter((line) => {
-      const stripped = line.replace(/[┌└├┤┬┴┼│─\s]/g, '');
+      const stripped = line.replace(/[┌┐└┘├┤┬┴┼│─\s]/g, '');
       return stripped.length > 0 || !BOX_CHARS.test(line);
     })
     .join('\n')
@@ -84,8 +38,9 @@ function normalizeAsterisks(text) {
 }
 
 /**
- * Convert **bold** markdown markers to <strong> so they never show as literal **.
- * Safe to run on mixed markdown/HTML (skips content that is already inside tags).
+ * Convert **bold** (and *italic*) markdown markers to HTML tags so they never show as
+ * literal asterisks during streaming, before the full markdown render pass runs.
+ * Safe to run on mixed markdown/HTML.
  */
 export function convertMarkdownBoldMarkers(text) {
   if (!text || typeof text !== 'string') return text;
@@ -93,18 +48,22 @@ export function convertMarkdownBoldMarkers(text) {
 
   let converted = normalizeAsterisks(text);
 
+  // Clean up empty markers
   converted = converted.replace(/\*\*\s*\*\*/g, '');
   converted = converted.replace(/\*\*📎\s*\*\*/g, '📎 ');
 
-  let previous = '';
-  let iterations = 0;
-  while (converted !== previous && iterations < 12) {
-    previous = converted;
-    converted = converted.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
-    iterations += 1;
-  }
+  // Tighten spaced bold/italic markers first so the conversion regexes match.
+  converted = converted
+    .replace(/(?<![A-Za-z0-9*])\*\*[ \t]+([^*\n]+?)[ \t]+\*\*/g, '**$1**')
+    .replace(/(?<![A-Za-z0-9*])\*\*[ \t]+([^*\n]+?)\*\*/g, '**$1**')
+    .replace(/(?<![A-Za-z0-9*])\*\*([^*\n]+?)[ \t]+\*\*/g, '**$1**')
+    .replace(/(?<![A-Za-z0-9*])\*[ \t]+([^*\n]+?)[ \t]+\*(?!\*)/g, '*$1*');
 
-  converted = converted.replace(/\*\*/g, '');
+  // Bold: **text** -> <strong>text</strong>
+  converted = converted.replace(/\*\*(?=\S)([^*]+?)(?<=\S)\*\*(?!\*)/g, '<strong>$1</strong>');
+
+  // Italic: *text* -> <em>text</em>
+  converted = converted.replace(/(?<!\*)\*(?=\S)([^*]+?)(?<=\S)\*(?!\*)/g, '<em>$1</em>');
 
   return converted;
 }
@@ -181,8 +140,6 @@ export function formatChatResponseForDisplay(raw) {
     text = convertAsciiLegalBoxes(text);
     text = cleanupBoxDebris(text);
   }
-
-  text = convertMarkdownBoldMarkers(text);
 
   if (looksLikeRawJsonString(text)) {
     // Strip code fences and try one more conversion pass before giving up

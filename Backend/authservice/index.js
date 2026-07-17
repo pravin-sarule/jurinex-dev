@@ -52,6 +52,7 @@ app.get("/health", (req, res) => {
 const rbacRoutes = require("./src/Rbac_service/rbacRoutes");
 const { initializeRbacSchema } = require("./src/Rbac_service/rbacDb");
 const { initializeUserActivitySchema } = require("./src/utils/userActivityDb");
+const { ensureFirmActiveColumn } = require("./src/utils/ensureFirmActiveColumn");
 
 app.use("/api/auth", authRoutes);
 app.use("/api/auth/internal", internalRoutes); // Internal service-to-service routes
@@ -68,6 +69,7 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, async () => {
   console.log(`Auth Service running on port ${PORT}`);
+  await ensureFirmActiveColumn();
   await initializeUserActivitySchema();
   await initializeRbacSchema();
 });

@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import uuid
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
+import psycopg2.pool
 from psycopg2.extras import execute_values, RealDictCursor
 
 
@@ -29,18 +31,43 @@ def get_connection_string() -> str:
     return url
 
 
+_doc_pool = None
+_doc_pool_lock = threading.Lock()
+
+
+def _get_doc_pool():
+    global _doc_pool
+    if _doc_pool is None:
+        with _doc_pool_lock:
+            if _doc_pool is None:
+                _doc_pool = psycopg2.pool.ThreadedConnectionPool(
+                    minconn=1,
+                    maxconn=int(os.environ.get("DOCUMENT_DB_POOL_MAX", "12")),
+                    dsn=get_connection_string(),
+                )
+    return _doc_pool
+
+
 @contextmanager
 def get_conn():
-    """Connection to Document_DB (user_files, file_chunks, chunk_vectors, cases)."""
-    conn = psycopg2.connect(get_connection_string())
+    """Pooled connection to Document_DB (user_files, file_chunks, chunk_vectors, cases)."""
+    pool_ref = _get_doc_pool()
+    conn = pool_ref.getconn()
+    if conn.closed:
+        pool_ref.putconn(conn, close=True)
+        conn = pool_ref.getconn()
+    discard = False
     try:
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            discard = True
         raise
     finally:
-        conn.close()
+        pool_ref.putconn(conn, close=discard or bool(conn.closed))
 
 
 def ensure_file_record(

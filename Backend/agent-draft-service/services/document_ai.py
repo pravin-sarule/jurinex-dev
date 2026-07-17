@@ -7,8 +7,10 @@ import io
 import json
 import logging
 import os
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Tuple
+from xml.etree import ElementTree
 
 from google.cloud.documentai_v1 import DocumentProcessorServiceClient  # type: ignore
 from google.cloud.documentai_v1.types import ProcessRequest, RawDocument  # type: ignore
@@ -211,12 +213,93 @@ def _process_one_batch(args: Tuple[bytes, int, str]) -> List[Dict[str, Any]]:
     ]
 
 
+_DOCX_MIME_TYPES = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-word.document.macroenabled.12",
+}
+
+_TEXT_MIME_PREFIXES = ("text/",)
+
+
+def _looks_like_docx_zip(file_buffer: bytes) -> bool:
+    """DOCX files are ZIP packages containing word/document.xml."""
+    if len(file_buffer) < 4 or file_buffer[:2] != b"PK":
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_buffer)) as archive:
+            return "word/document.xml" in archive.namelist()
+    except Exception:
+        return False
+
+
+def _extract_docx_pages(file_buffer: bytes) -> List[Dict[str, Any]]:
+    """
+    Extract text from a DOCX (zip) package natively — Document AI does not
+    accept DOCX mime types, so these must never reach _process_single_buffer.
+    Returns the same page-texts shape as the Document AI path.
+    """
+    with zipfile.ZipFile(io.BytesIO(file_buffer)) as archive:
+        document_xml = archive.read("word/document.xml")
+
+    root = ElementTree.fromstring(document_xml)
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    paragraphs: List[str] = []
+    for paragraph in root.findall(".//w:p", ns):
+        parts: List[str] = []
+        for node in paragraph.iter():
+            tag = node.tag.split("}")[-1]
+            if tag == "t" and node.text:
+                parts.append(node.text)
+            elif tag == "tab":
+                parts.append("\t")
+            elif tag == "br":
+                parts.append("\n")
+        text = "".join(parts)
+        if text.strip():
+            paragraphs.append(text)
+
+    full_text = "\n".join(paragraphs).strip()
+    if not full_text:
+        raise ValueError("DOCX document contains no extractable text")
+    return [{"text": full_text, "page_start": 1, "page_end": 1}]
+
+
+def _extract_plain_text_pages(file_buffer: bytes) -> List[Dict[str, Any]]:
+    text = file_buffer.decode("utf-8", errors="ignore").strip()
+    if not text:
+        raise ValueError("Text document is empty")
+    return [{"text": text, "page_start": 1, "page_end": 1}]
+
+
 def extract_text_from_document(file_buffer: bytes, mime_type: str) -> List[Dict[str, Any]]:
     """
-    Process document with Document AI. For large PDFs (over DOCUMENT_AI_PAGE_LIMIT pages),
-    splits into chunks and processes them in parallel, then merges results.
+    Extract page texts from an uploaded document.
+
+    - DOCX (by mime type or ZIP sniffing) → native XML extraction.
+    - Plain text → decoded directly.
+    - PDF → Document AI, with large PDFs split and processed in parallel.
+    - Everything else (images, etc.) → Document AI single request.
     """
     mime = (mime_type or "").lower()
+
+    # DOCX: detected by mime type, or by content sniffing when the browser
+    # sent a generic/incorrect content type. Document AI rejects DOCX.
+    if mime in _DOCX_MIME_TYPES or (
+        mime in ("", "application/octet-stream", "application/msword", "application/zip")
+        and _looks_like_docx_zip(file_buffer)
+    ):
+        logger.info("Extracting DOCX text natively (%d bytes)", len(file_buffer))
+        return _extract_docx_pages(file_buffer)
+
+    if mime == "application/msword":
+        # Legacy binary .doc (not a zip) — no extractor available.
+        raise ValueError(
+            "Legacy .doc format is not supported. Please upload the document as PDF or DOCX."
+        )
+
+    if any(mime.startswith(prefix) for prefix in _TEXT_MIME_PREFIXES):
+        return _extract_plain_text_pages(file_buffer)
+
     if mime not in ("application/pdf", "application/x-pdf") or len(file_buffer) == 0:
         return _process_single_buffer(file_buffer, mime_type)
 

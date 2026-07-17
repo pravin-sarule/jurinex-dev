@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import date, datetime
 from typing import Any, AsyncIterator
@@ -20,6 +21,7 @@ from app.services.chat_helpers import (
     parse_file_ids_from_body,
     resolve_attached_files_for_session,
     simplify_history,
+    wants_judgement_search,
 )
 from app.services.chat_repository import FileChatRepository, FileRepository
 from app.services.gcs_service import (
@@ -40,11 +42,12 @@ from app.services.llm_config_service import (
 from app.services.llm_policy_service import assert_chat_allowed, assert_stored_file_meets_limits, assert_upload_allowed
 from app.services.storage_policy import assert_storage_allowed
 from app.services.llm_service import count_tokens_from_gcs, stream_llm_general, stream_llm_with_gcs
+from app.services.judgement_search_service import JUDGEMENT_SEARCH_SECTION, stream_judgement_search
 from app.services.secret_prompt_service import resolve_secret_prompt
 from app.services.system_prompt_service import build_system_instruction, build_profile_query_prefix
 from app.services.user_profile_service import get_full_profile
 from app.services import gemini_cache_service
-from app.services.token_usage_log import log_token_usage_table
+from app.services.token_usage_log import log_table, log_token_usage_table
 
 logger = logging.getLogger(__name__)
 SIGNED_UPLOAD_TOKEN_TTL = 15 * 60
@@ -374,6 +377,14 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
 
     used_secret = bool(body.get("used_secret_prompt"))
     question = (body.get("question") or "").strip()
+
+    # Web-search judgement / citation finder (frontend "Citation" mode or intent).
+    # Runs grounded in the uploaded document; bypasses the document cache path.
+    if wants_judgement_search(body):
+        async for line in stream_judgement_chat(ctx):
+            yield line
+        return
+
     if not used_secret and not question:
         yield sse({"type": "error", "message": "Question is required"})
         yield sse("[DONE]")
@@ -670,6 +681,13 @@ async def stream_general_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
 
     yield sse({"type": "status", "status": "initializing", "message": "Starting legal chat..."})
     question = (body.get("question") or "").strip()
+
+    # Web-search judgement / citation finder (no document attached).
+    if wants_judgement_search(body):
+        async for line in stream_judgement_chat(ctx):
+            yield line
+        return
+
     if not question:
         yield sse({"type": "error", "message": "Question is required"})
         yield sse("[DONE]")
@@ -799,6 +817,346 @@ async def stream_general_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
         yield sse("[DONE]")
 
 
+async def stream_judgement_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
+    """Web-search grounded judgement / citation finder.
+
+    Works with or without an uploaded document:
+    - With files: identifies the document's legal issues and searches the web for
+      relevant judgements / case law.
+    - Without files: searches the web for judgements relevant to the question.
+
+    Emits a ``sources`` SSE event with the grounding links, and appends a
+    "## Sources" section to the saved answer.
+    """
+    body = ctx.get("request_body") or {}
+    user_id = str(ctx["user_id"])
+    authorization = ctx.get("authorization")
+    llm_cfg = ctx.get("llm_config") or get_llm_config(user_id)
+    llm_req = ctx.get("llm_config_for_request") or merge_request_overrides(llm_cfg, body)
+    delay_ms = get_streaming_delay_ms(llm_cfg)
+
+    def sse(obj: Any) -> str:
+        if isinstance(obj, str):
+            return f"data: {obj}\n\n"
+        return f"data: {json.dumps(obj, cls=_JsonEncoder)}\n\n"
+
+    # ── Background step trace (logged to console as an ASCII table at the end) ──
+    _t0 = time.monotonic()
+    _last = [_t0]
+    trace: list[list[Any]] = []
+
+    def step(name: str, status: str, detail: str = "") -> None:
+        now = time.monotonic()
+        trace.append([
+            f"{len(trace) + 1}",
+            name,
+            status,
+            (detail[:60] if detail else "-"),
+            f"{(now - _last[0]) * 1000:.0f}",
+            f"{(now - _t0) * 1000:.0f}",
+        ])
+        _last[0] = now
+
+    def flush_trace() -> None:
+        log_table(
+            "JUDGEMENT / CITATION SEARCH - BACKGROUND TRACE",
+            ["#", "Step", "Status", "Detail", "dt ms", "Total ms"],
+            trace,
+        )
+
+    yield sse({"type": "status", "status": "initializing", "message": "Starting citation search..."})
+
+    question = (body.get("question") or "").strip()
+    used_secret = body.get("used_secret", False)
+    if used_secret:
+        secret = await resolve_secret_prompt(str(body["secret_id"]), body.get("additional_input") or "")
+        question = secret["prompt_text"]
+    
+    file_ids = parse_file_ids_from_body(body)
+    step("Classify request", "citation_mode", f"files={len(file_ids)} question={'yes' if question else 'no'}")
+    if not question and not file_ids:
+        step("Validate input", "error", "no question and no document")
+        flush_trace()
+        yield sse({"type": "error", "message": "Question or a document is required"})
+        yield sse("[DONE]")
+        return
+
+    has_session = is_valid_uuid(body.get("session_id"))
+    final_session = body["session_id"] if has_session else str(uuid.uuid4())
+    primary_file = file_ids[0] if file_ids else None
+    
+    # Prioritize Gemini 2.5 Pro for citation search as requested by user
+    resolved_model = body.get("llm_name") or "gemini-2.5-pro"
+    
+    try:
+        file_specs: list[dict[str, Any]] = []
+        file_uris: list[str] = []
+        files: list[dict[str, Any]] = []
+        bucket = get_settings().gcs_bucket_name
+        # Vertex can read gs:// URIs directly (no 20MB inline-request limit);
+        # an API-key client cannot, so it must receive inline bytes.
+        use_api_key = bool(get_settings().gemini_api_key)
+        if file_ids:
+            yield sse({"type": "status", "status": "validating", "message": "Validating file access..."})
+            files, file_uris = await _load_files_for_chat(user_id, file_ids, llm_cfg)
+            if use_api_key:
+                for f in files:
+                    file_specs.append(
+                        {
+                            "buffer": await asyncio.get_event_loop().run_in_executor(
+                                None, lambda path=f["gcs_path"]: download_object_buffer(bucket, path)
+                            ),
+                            "mimetype": f.get("mimetype") or "application/octet-stream",
+                            "filename": f.get("originalname") or "document",
+                        }
+                    )
+                _kb = sum(len(s.get("buffer") or b"") for s in file_specs) // 1024
+                step("Load documents", "ok", f"{len(files)} file(s), {_kb} KB (inline)")
+            else:
+                step("Load documents", "ok", f"{len(files)} file(s) via GCS URI")
+        else:
+            step("Load documents", "skipped", "no document attached")
+
+        # Conversation history (last turn only, mirroring the other chat flows)
+        if primary_file:
+            history_rows = (
+                FileChatRepository.get_history(primary_file, final_session)
+                if has_session
+                else FileChatRepository.get_history(primary_file, None)[-5:]
+            )
+        else:
+            history_rows = (
+                FileChatRepository.get_general_history(user_id, final_session) if has_session else []
+            )
+        conv = format_conversation_history(history_rows[-1:])
+        step("Load history", "ok", f"{len(history_rows)} turn(s)")
+
+        profile = await get_full_profile(user_id, authorization)
+        if not profile:
+            profile = _derive_fallback_profile(ctx)
+        # Use the non-document-grounded base: the judgement section explains how to
+        # use any attached document (extract issues, then search), which would
+        # otherwise conflict with the "answer ONLY from the document" grounding rule.
+        system = build_system_instruction(profile, is_document_chat=False) + JUDGEMENT_SEARCH_SECTION
+        profile_prefix = build_profile_query_prefix(profile)
+
+        if file_ids:
+            # Instruct the model to extract concrete facts FIRST, then search for
+            # factually parallel judgements — not just topically related ones.
+            fact_extraction_prefix = (
+                "TASK: Find court judgements whose FACTS are similar to the facts in the attached document.\n\n"
+                "STEP 1 — Extract facts from the document:\n"
+                "Read the attached document carefully and identify:\n"
+                "  a) The specific dispute/incident (what happened, when, where)\n"
+                "  b) The parties involved (type of parties, their relationship)\n"
+                "  c) The exact legal claims or offences alleged\n"
+                "  d) The specific relief or remedy being sought\n"
+                "  e) Any specific statutes, sections, or contracts mentioned\n\n"
+                "STEP 2 — Build FACT-SPECIFIC search queries:\n"
+                "Use those extracted facts to build search queries like:\n"
+                "  '[specific fact] [specific section] court judgment India'\n"
+                "  '[type of dispute] [specific circumstance] High Court quash'\n"
+                "Run at least 3-4 searches with different fact-combinations.\n\n"
+                "STEP 3 — Only cite judgements where the FACTS match:\n"
+                "A judgement is relevant ONLY if:\n"
+                "  - The type of dispute/incident is the same or very similar\n"
+                "  - The parties are in a similar relationship\n"
+                "  - The court dealt with the same specific legal question arising from similar facts\n"
+                "DO NOT cite cases that merely discuss the same statute or legal principle "
+                "if the underlying facts are completely different.\n\n"
+            )
+            user_q = question or "Find judgements with similar facts to the attached document."
+            search_question = fact_extraction_prefix + "USER QUESTION: " + user_q
+        else:
+            search_question = question or "Find court judgements and case law relevant to this legal matter."
+
+        if conv:
+            search_question = f"PREVIOUS CONVERSATION:\n{conv}\n\nCURRENT QUESTION:\n{search_question}"
+        if profile_prefix:
+            search_question = f"{profile_prefix}\n\n{search_question}"
+
+        step("Build prompt", "ok", f"model={resolved_model} q_len={len(search_question)}")
+        yield sse({"type": "status", "status": "searching", "message": "Searching the web for relevant judgements..."})
+        yield sse({"type": "metadata", "session_id": final_session})
+
+        search_queries: list[str] = []
+        full_answer = ""
+        chunk_count = 0
+        captured_usage = None
+        sources: list[dict[str, Any]] = []
+        search_error: str | None = None
+
+        async for ev in stream_judgement_search(
+            question=search_question,
+            llm_config=llm_req,
+            system_instruction=system,
+            file_specs=file_specs or None,
+            gcs_uris=file_uris or None,
+            model_name=resolved_model,
+            metadata={
+                "userId": user_id,
+                "fileId": primary_file,
+                "sessionId": final_session,
+                "endpoint": "/api/chat/ask/judgement/stream",
+            },
+        ):
+            etype = ev.get("type")
+            if etype == "thought":
+                yield sse({"type": "thought", "text": ev.get("text", "")})
+            elif etype == "chunk":
+                full_answer += ev.get("text", "")
+                chunk_count += 1
+                yield sse({"type": "chunk", "text": ev.get("text", "")})
+                if delay_ms > 0:
+                    await asyncio.sleep(delay_ms / 1000.0)
+            elif etype == "sources":
+                sources = ev.get("sources") or []
+                search_queries = ev.get("queries") or []
+                yield sse({"type": "sources", "sources": sources, "queries": search_queries})
+            elif etype == "usage":
+                captured_usage = ev
+            elif etype == "error":
+                # Capture but don't surface yet — we fall back to a model-knowledge
+                # answer below so the user is never left with a blank card.
+                search_error = ev.get("message")
+                step("Web search", "error", (search_error or "")[:60])
+
+        step(
+            "Web search",
+            "ok" if full_answer.strip() else "empty",
+            f"queries={len(search_queries)} sources={len(sources)} chunks={chunk_count}",
+        )
+
+        # ── Fallback: grounding unavailable/empty → answer from model knowledge ──
+        if not full_answer.strip():
+            logger.warning("Judgement grounding empty (err=%s); falling back to model knowledge", search_error)
+            step("Fallback", "model_knowledge", (search_error or "grounding returned no text")[:60])
+            yield sse({"type": "status", "status": "generating", "message": "Composing judgement answer..."})
+            fb_system = system + (
+                "\n\nNOTE: live web search was unavailable or returned no results for this query. Answer from "
+                "your own legal knowledge using Gemini 2.5 Pro, but follow these rules strictly:\n"
+                "- Begin with this exact line: '> ⚠️ Live web search was unavailable or returned no results, so the "
+                "judgements below are from general knowledge and MUST be independently verified "
+                "on Indian Kanoon or the official court website before relying on them.'\n"
+                "- Only mention landmark/well-established reported judgements you are highly "
+                "confident actually exist. If unsure, say you cannot confirm a specific case.\n"
+                "- Do NOT write any URLs, 'Indian Kanoon:' lines, or fake source links — you "
+                "have no verified sources."
+            )
+            async for ev in stream_llm_general(
+                prompt_text=search_question,
+                llm_config=llm_req,
+                system_instruction=fb_system,
+                model_name=resolved_model,
+                metadata={
+                    "userId": user_id,
+                    "sessionId": final_session,
+                    "endpoint": "/api/chat/ask/judgement/stream",
+                },
+            ):
+                if ev.get("type") == "thought":
+                    yield sse({"type": "thought", "text": ev.get("text", "")})
+                elif ev.get("type") == "chunk":
+                    full_answer += ev.get("text", "")
+                    chunk_count += 1
+                    yield sse({"type": "chunk", "text": ev.get("text", "")})
+                    if delay_ms > 0:
+                        await asyncio.sleep(delay_ms / 1000.0)
+                elif ev.get("type") == "usage":
+                    captured_usage = ev
+
+        if not full_answer.strip():
+            step("Generate answer", "empty", (search_error or "no judgements found")[:60])
+            flush_trace()
+            yield sse({"type": "error", "message": search_error or "Could not generate a judgement answer. Please try again."})
+            yield sse("[DONE]")
+            return
+        step("Generate answer", "ok", f"{len(full_answer)} chars")
+
+        # Log the grounding sources as their own console table.
+        if sources:
+            log_table(
+                "JUDGEMENT / CITATION SEARCH - SOURCES",
+                ["#", "Title", "URL"],
+                [[str(i + 1), (s.get("title") or "")[:50], (s.get("uri") or "")] for i, s in enumerate(sources)],
+            )
+
+        # The model already renders each case with an inline clickable [Source](url)
+        # link, so the answer is persisted as-is (no extra Sources section).
+        answer_to_save = full_answer
+
+        yield sse({"type": "status", "status": "saving", "message": "Saving conversation to database..."})
+        hist_storage = simplify_history(history_rows)
+        saved = {}
+        try:
+            attached_snapshot = build_attached_files_snapshot(files, bucket) if files else []
+            if sources:
+                if attached_snapshot is None:
+                    attached_snapshot = []
+                attached_snapshot.append({"type": "sources_metadata", "sources": sources})
+            
+            saved = FileChatRepository.save_chat(
+                primary_file,
+                user_id,
+                question or "Find relevant judgements",
+                answer_to_save,
+                final_session,
+                chat_history=hist_storage,
+                attached_files=attached_snapshot,
+            )
+            step("Save chat", "ok", f"chat_id={saved.get('id')}")
+        except Exception as save_exc:
+            step("Save chat", "error", str(save_exc)[:60])
+            logger.warning("save_chat (judgement) failed: %s", save_exc)
+
+        token_usage_payload = (
+            {
+                "inputTokens": captured_usage.get("inputTokens"),
+                "outputTokens": captured_usage.get("outputTokens"),
+                "totalTokens": captured_usage.get("totalTokens"),
+                "modelName": captured_usage.get("modelName") or resolved_model,
+            }
+            if captured_usage
+            else None
+        )
+        log_token_usage_table(
+            context="stream_judgement_chat",
+            usage=token_usage_payload,
+            model_name=resolved_model,
+            endpoint="/api/chat/ask/judgement/stream",
+            session_id=final_session,
+            user_id=user_id,
+            answer_length=len(full_answer),
+            chunks_received=chunk_count,
+            cache_mechanism="web_search_grounding",
+        )
+        flush_trace()
+        yield sse(
+            {
+                "type": "done",
+                "session_id": final_session,
+                "chat_id": saved.get("id"),
+                "answer": answer_to_save,
+                "file_id": primary_file,
+                "file_ids": file_ids,
+                "filename": files[0].get("originalname") if files else None,
+                "answer_length": len(answer_to_save),
+                "chunks_received": chunk_count,
+                "sources": sources,
+                "is_general_chat": not bool(file_ids),
+                "used_web_search": True,
+                "token_usage": token_usage_payload,
+            }
+        )
+        yield sse("[DONE]")
+    except Exception as exc:
+        logger.exception("stream_judgement_chat failed")
+        step("Fatal error", "error", str(exc)[:60])
+        flush_trace()
+        yield sse({"type": "error", "message": str(exc)})
+        yield sse("[DONE]")
+
+
 def get_user_files_payload(user_id: str) -> dict[str, Any]:
     files = FileRepository.find_by_user(user_id)
     return {
@@ -831,8 +1189,20 @@ def get_chat_history_payload(user_id: str, file_id: str, session_id: str | None)
     bucket = get_settings().gcs_bucket_name
     attached = resolve_attached_files_for_session(history_rows, file_row, file_id, bucket)
     file_ids = list({a.get("file_id") for a in attached if a.get("file_id")}) if attached else [file_id]
-    history = [
-        {
+    history = []
+    for r in history_rows:
+        raw_attached = parse_attached_files_cell(r.get("attached_files"))
+        sources = []
+        final_attached = raw_attached
+        if isinstance(raw_attached, list):
+            # Extract sources_metadata if present
+            sources_item = next((item for item in raw_attached if isinstance(item, dict) and item.get("type") == "sources_metadata"), None)
+            if sources_item:
+                sources = sources_item.get("sources") or []
+                # Filter out the metadata item from the files list
+                final_attached = [item for item in raw_attached if not (isinstance(item, dict) and item.get("type") == "sources_metadata")]
+        
+        history.append({
             "id": r.get("id"),
             "question": r.get("question"),
             "answer": r.get("answer"),
@@ -842,10 +1212,9 @@ def get_chat_history_payload(user_id: str, file_id: str, session_id: str | None)
             "prompt_label": r.get("prompt_label"),
             "secret_id": r.get("secret_id"),
             "file_id": r.get("file_id") or file_id,
-            "attached_files": parse_attached_files_cell(r.get("attached_files")),
-        }
-        for r in history_rows
-    ]
+            "attached_files": final_attached,
+            "sources": sources,
+        })
     return {
         "success": True,
         "data": {
@@ -884,8 +1253,18 @@ def get_general_history_payload(user_id: str, session_id: str) -> dict[str, Any]
     if not is_valid_uuid(session_id):
         raise ValueError("Invalid session_id format")
     rows = FileChatRepository.get_general_history(user_id, session_id)
-    history = [
-        {
+    history = []
+    for r in rows:
+        raw_attached = parse_attached_files_cell(r.get("attached_files"))
+        sources = []
+        final_attached = raw_attached
+        if isinstance(raw_attached, list):
+            sources_item = next((item for item in raw_attached if isinstance(item, dict) and item.get("type") == "sources_metadata"), None)
+            if sources_item:
+                sources = sources_item.get("sources") or []
+                final_attached = [item for item in raw_attached if not (isinstance(item, dict) and item.get("type") == "sources_metadata")]
+        
+        history.append({
             "id": r.get("id"),
             "question": r.get("question"),
             "answer": r.get("answer"),
@@ -895,9 +1274,9 @@ def get_general_history_payload(user_id: str, session_id: str) -> dict[str, Any]
             "prompt_label": None,
             "file_id": None,
             "is_general_chat": True,
-        }
-        for r in rows
-    ]
+            "attached_files": final_attached,
+            "sources": sources,
+        })
     return {
         "success": True,
         "data": {"session_id": session_id, "history": history, "count": len(history), "is_general_chat": True},
