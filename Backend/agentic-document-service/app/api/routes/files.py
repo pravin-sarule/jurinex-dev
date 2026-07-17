@@ -4610,6 +4610,9 @@ async def intelligent_chat_stream(
                 # prompt, which already carries the template text.
                 _ns_draft = locals().get("_draft_contents")
                 _deep_fallback_done = False
+                # Model the generic-QA path below runs on. Normally the admin-selected model; a failed
+                # free-tier gemma deep call retargets this at its fallback (see the except handler).
+                _qa_model_override = selected_model_name
                 if (
                     is_comprehensive and not learning_mode and _ns_provider == "gemini"
                     and _ns_model and _ns_cfg is not None and _ns_client is not None and _ns_prompt
@@ -4655,33 +4658,51 @@ async def intelligent_chat_stream(
                             from app.services.adapters.document_ai import GemmaInputTPMExceeded as _TPMExc
                         except Exception:
                             _TPMExc = ()  # type: ignore[assignment]
-                        if _TPMExc and isinstance(_ns_deep_exc, _TPMExc):
+                        _is_tpm_exc = bool(_TPMExc) and isinstance(_ns_deep_exc, _TPMExc)
+                        if _gemma_capped_chat or _is_tpm_exc:
+                            # Retry a failed free-tier gemma deep call on its fallback chain
+                            # (26b -> 31b -> flash-lite), reusing the drafting pipeline's chain so both
+                            # share one definition. _call_gemini_for_qa resolves the API key per model
+                            # (_gemini_api_key_for_model), so the paid backstop uses GEMINI_API_KEY.
+                            #
+                            # BUT never chain a SECOND gemma call after a timeout or a TPM breach: the
+                            # deep call runs via run_in_executor, so a timed-out thread is NOT cancelled
+                            # and still holds part of the free 16K/min input budget, and a TPM breach
+                            # means that budget is already gone. Another gemma call would stack on the
+                            # same pool and 429. The paid backstop draws on a different key/quota, so it
+                            # is safe in both cases — drop the gemma hops and jump straight to it.
+                            from app.services.template_drafting import _reliable_alt_chain as _alt_chain
+                            from app.services.adapters.document_ai import _is_gemma_model as _is_gemma
+                            _fb_chain = _alt_chain(_ns_model or selected_model_name or "")
+                            _skip_gemma_hops = _is_tpm_exc or isinstance(_ns_deep_exc, TimeoutError)
+                            if _skip_gemma_hops:
+                                _fb_chain = [m for m in _fb_chain if not _is_gemma(m)]
+                            if _fb_chain:
+                                _qa_model_override = _fb_chain[0]
+                                logger.warning(
+                                    "[Route:intelligent_chat_stream] folder=%s gemma deep fallback failed (%s) — retrying generic QA on %s (skip_gemma_hops=%s)",
+                                    folder_name,
+                                    _ns_deep_exc,
+                                    _qa_model_override,
+                                    _skip_gemma_hops,
+                                )
+                            else:
+                                logger.warning(
+                                    "[Route:intelligent_chat_stream] folder=%s gemma deep fallback failed (%s) — no usable fallback, clean message",
+                                    folder_name,
+                                    _ns_deep_exc,
+                                )
+                                yield _sse({
+                                    "type": "error",
+                                    "message": _GEMMA_INPUT_TPM_USER_MESSAGE if _is_tpm_exc else _GEMMA_SLOW_TIMEOUT_USER_MESSAGE,
+                                })
+                                return
+                        else:
                             logger.warning(
-                                "[Route:intelligent_chat_stream] folder=%s Gemma input-TPM quota exhausted — clean message",
-                                folder_name,
-                            )
-                            yield _sse({"type": "error", "message": _GEMMA_INPUT_TPM_USER_MESSAGE})
-                            return
-                        # For gemma, DO NOT chain the generic-QA fallback: the deep call ran via
-                        # run_in_executor, so on a timeout the thread is NOT cancelled — it keeps
-                        # running and holding part of the 16K/min input budget. Firing generic QA now
-                        # stacks a SECOND concurrent gemma call → ~2-3x input tokens/min → the 429 we
-                        # just fixed, then another long hang. One honest deep call (now with the
-                        # generous gemma_non_stream_timeout_s) is authoritative; on failure, a clean
-                        # retry message beats stacking. Non-gemma models keep the generic-QA fallback.
-                        if _gemma_capped_chat:
-                            logger.warning(
-                                "[Route:intelligent_chat_stream] folder=%s gemma deep non-stream fallback failed (%s) — clean message (NOT stacking generic QA, avoids a 2nd concurrent free-tier call)",
+                                "[Route:intelligent_chat_stream] folder=%s deep non-stream fallback failed (%s) — using generic QA",
                                 folder_name,
                                 _ns_deep_exc,
                             )
-                            yield _sse({"type": "error", "message": _GEMMA_SLOW_TIMEOUT_USER_MESSAGE})
-                            return
-                        logger.warning(
-                            "[Route:intelligent_chat_stream] folder=%s deep non-stream fallback failed (%s) — using generic QA",
-                            folder_name,
-                            _ns_deep_exc,
-                        )
 
                 if not _deep_fallback_done:
                     # Run via the SESSION-BINDING wrapper so the fallback model's REAL token
@@ -4717,7 +4738,7 @@ async def intelligent_chat_stream(
                             ),
                             summarization_llm_config=llm_config,
                             agent_name=learning_agent_name,
-                            model_name_override=selected_model_name,
+                            model_name_override=_qa_model_override,
                         ),
                         timeout_s=non_stream_timeout_s,
                         timeout_message="gemini_non_stream_generation",
