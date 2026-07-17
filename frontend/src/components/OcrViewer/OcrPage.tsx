@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import type { OcrPage } from '../../types/ocr';
 import type { OcrConfidenceFilter } from '../../hooks/useOcrDocumentViewer';
 import OcrWordBox from './OcrWord';
+import { pageRenderHeight } from './constants';
 
 export interface OcrPageProps {
   page: OcrPage;
@@ -57,15 +58,20 @@ const OcrPageView: React.FC<OcrPageProps> = ({
   );
 
   return (
-    <div className="w-full h-full flex items-stretch justify-center">
+    <div className="w-full h-full flex items-center justify-center">
+      {/* Height-driven from pageRenderHeight (the SAME number the PDF panel sizes its page with), so
+          the two pages are the same rect and a word sits at the same y on both sides. The width must
+          stay derived from aspectRatio: an explicit width (`w-full`) plus a stretched height resolves
+          both axes, at which point CSS drops aspectRatio and the page fills the panel instead.
+          Zoom is real layout height, not `transform: scale` — a transform does not reflow, so the
+          scaled page kept its unscaled box and drifted out of alignment above 100%. */}
       <div
-        className="relative w-full max-h-full bg-white border border-gray-200 rounded-md shadow-sm overflow-hidden"
+        className="relative bg-white border border-gray-200 rounded-md shadow-sm overflow-hidden shrink-0"
         style={{
+          height: pageRenderHeight(zoom),
           aspectRatio: `${width} / ${height}`,
           // Makes 1cqw == 1% of this box's width, which is what the word font sizes are expressed in.
           containerType: 'inline-size',
-          transform: `scale(${zoom})`,
-          transformOrigin: 'top left',
         }}
       >
         <div className="absolute inset-0 bg-white/90">{wordBoxes}</div>

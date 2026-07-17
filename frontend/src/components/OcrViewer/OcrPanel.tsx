@@ -6,7 +6,7 @@ import type {
   OcrConfidenceFilter,
 } from '../../hooks/useOcrDocumentViewer';
 import OcrPageView from './OcrPage';
-import { PDF_VIEWER_PAGE_HEIGHT } from './constants';
+import { PDF_VIEWER_PAGE_HEIGHT, PAGE_LABEL_HEIGHT } from './constants';
 
 const OcrConfidenceLegend: React.FC = () => (
   <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-gray-500">
@@ -123,7 +123,10 @@ const OcrPanel: React.FC<OcrPanelProps> = ({
                 className="flex flex-col px-1 py-1 bg-gray-50"
                 style={{ height: PDF_VIEWER_PAGE_HEIGHT }}
               >
-                <div className="mb-0 text-[10px] text-gray-500 flex items-center justify-between shrink-0">
+                <div
+                  className="mb-0 text-[10px] text-gray-500 flex items-center justify-between shrink-0"
+                  style={{ height: PAGE_LABEL_HEIGHT }}
+                >
                   <span className="font-medium text-gray-700">
                     Page {pageNumber}
                   </span>

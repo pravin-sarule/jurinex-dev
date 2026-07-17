@@ -1,7 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { Virtuoso } from 'react-virtuoso';
-import { PDF_VIEWER_PAGE_HEIGHT } from './constants';
+import {
+  PDF_VIEWER_PAGE_HEIGHT,
+  PAGE_LABEL_HEIGHT,
+  pageRenderHeight,
+} from './constants';
 import 'react-pdf/dist/Page/TextLayer.css';
 // Vite resolves `?url` to the emitted worker asset; a bare specifier would not resolve here.
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -19,9 +23,6 @@ const PDF_OPTIONS = {
   disableStream: true,
   disableAutoFetch: true,
 };
-
-/** Height of the per-page label row; mirrors OcrPanel so both lists scroll 1:1. */
-const PAGE_LABEL_HEIGHT = 18;
 
 export interface PdfPanelProps {
   pdfUrl: string | null;
@@ -155,9 +156,7 @@ const PdfPanel: React.FC<PdfPanelProps> = ({
                   <div className="flex-1 min-h-0 flex items-center justify-center overflow-hidden">
                     <Page
                       pageNumber={index + 1}
-                      height={Math.round(
-                        (PDF_VIEWER_PAGE_HEIGHT - PAGE_LABEL_HEIGHT) * zoom,
-                      )}
+                      height={pageRenderHeight(zoom)}
                       renderAnnotationLayer={false}
                       renderTextLayer
                       loading={
