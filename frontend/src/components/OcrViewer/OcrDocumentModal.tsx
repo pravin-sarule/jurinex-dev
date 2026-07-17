@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import type { OcrJson } from '../../types/ocr';
@@ -7,7 +7,6 @@ import OcrToolbar from './OcrToolbar';
 import OcrStats from './OcrStats';
 import PdfPanel from './PdfPanel';
 import OcrPanel from './OcrPanel';
-import { PDF_VIEWER_PAGE_HEIGHT } from './constants';
 
 interface OcrDocumentModalProps {
   document: {
@@ -38,16 +37,6 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
   }, [document]);
 
   const [isFullSize, setIsFullSize] = useState(false);
-
-  const leftScrollerRef = useRef<HTMLDivElement | null>(null);
-  const rightScrollerRef = useRef<HTMLDivElement | null>(null);
-  const syncingFromLeftRef = useRef(false);
-  const syncingFromRightRef = useRef(false);
-  const scrollRefsReadyFiredRef = useRef(false);
-  const lastScrollSyncedPageRef = useRef(1);
-  const lastScrollTopForPageRef = useRef(0);
-  const [scrollRefsReady, setScrollRefsReady] = useState(0);
-  const pageChangeSourceRef = useRef<'scroll' | 'toolbar' | 'other'>('other');
 
   const {
     overview,
@@ -157,116 +146,18 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
     };
   }, []);
 
-  // Scroll sync: mirror scroll position and only update currentPage when page actually changed (avoids jump-to-1)
-  useEffect(() => {
-    const leftEl = leftScrollerRef.current;
-    const rightEl = rightScrollerRef.current;
-    if (!leftEl || !rightEl || !isOcrVisible) return;
-    let leftRafId = 0;
-    let rightRafId = 0;
-    const PAGE_HEIGHT = PDF_VIEWER_PAGE_HEIGHT;
-    const MIN_SCROLL_DELTA = 80; // only update page when scrolled at least this much
-    const JUMP_BACK_THRESHOLD = PAGE_HEIGHT * 1.5; // don't set currentPage to 1 if we were past this (spurious reset)
-    const onLeftScroll = () => {
-      if (syncingFromRightRef.current) return;
-      const left = leftScrollerRef.current;
-      const right = rightScrollerRef.current;
-      if (!left || !right) return;
-      if (leftRafId) cancelAnimationFrame(leftRafId);
-      leftRafId = requestAnimationFrame(() => {
-        leftRafId = 0;
-        syncingFromLeftRef.current = true;
-        const topInner = left.scrollTop;
-        right.scrollTop = topInner;
-        const page = Math.max(1, Math.floor(topInner / PAGE_HEIGHT) + 1);
-        const delta = Math.abs(topInner - lastScrollTopForPageRef.current);
-        const spuriousJumpTo1 = page === 1 && lastScrollTopForPageRef.current > JUMP_BACK_THRESHOLD;
-        if (spuriousJumpTo1) {
-          // Sync scroll only; don't update page or refs so next real scroll can correct
-        } else if (delta >= MIN_SCROLL_DELTA && page !== lastScrollSyncedPageRef.current) {
-          lastScrollTopForPageRef.current = topInner;
-          lastScrollSyncedPageRef.current = page;
-          pageChangeSourceRef.current = 'scroll';
-          setCurrentPage(page);
-        } else {
-          lastScrollTopForPageRef.current = topInner;
-          lastScrollSyncedPageRef.current = page;
-        }
-        requestAnimationFrame(() => {
-          syncingFromLeftRef.current = false;
-        });
-      });
-    };
-    const onRightScroll = () => {
-      if (syncingFromLeftRef.current) return;
-      const left = leftScrollerRef.current;
-      const right = rightScrollerRef.current;
-      if (!left || !right) return;
-      if (rightRafId) cancelAnimationFrame(rightRafId);
-      rightRafId = requestAnimationFrame(() => {
-        rightRafId = 0;
-        syncingFromRightRef.current = true;
-        const topInner = right.scrollTop;
-        left.scrollTop = topInner;
-        const page = Math.max(1, Math.floor(topInner / PAGE_HEIGHT) + 1);
-        const delta = Math.abs(topInner - lastScrollTopForPageRef.current);
-        const spuriousJumpTo1 = page === 1 && lastScrollTopForPageRef.current > JUMP_BACK_THRESHOLD;
-        if (spuriousJumpTo1) {
-          // Sync scroll only; don't update page or refs so next real scroll can correct
-        } else if (delta >= MIN_SCROLL_DELTA && page !== lastScrollSyncedPageRef.current) {
-          lastScrollTopForPageRef.current = topInner;
-          lastScrollSyncedPageRef.current = page;
-          pageChangeSourceRef.current = 'scroll';
-          setCurrentPage(page);
-        } else {
-          lastScrollTopForPageRef.current = topInner;
-          lastScrollSyncedPageRef.current = page;
-        }
-        requestAnimationFrame(() => {
-          syncingFromRightRef.current = false;
-        });
-      });
-    };
-    leftEl.addEventListener('scroll', onLeftScroll, { passive: true });
-    rightEl.addEventListener('scroll', onRightScroll, { passive: true });
-    return () => {
-      if (leftRafId) cancelAnimationFrame(leftRafId);
-      if (rightRafId) cancelAnimationFrame(rightRafId);
-      leftEl.removeEventListener('scroll', onLeftScroll);
-      rightEl.removeEventListener('scroll', onRightScroll);
-    };
-  }, [isOcrVisible, setCurrentPage, scrollRefsReady]);
-
-  // Reset scroll refs when document or OCR visibility changes so we can re-attach once both panels are mounted
-  useEffect(() => {
-    console.log('[OCR SCROLL] Reset effect: document?.id=', document?.id, 'isOcrVisible=', isOcrVisible);
-    leftScrollerRef.current = null;
-    rightScrollerRef.current = null;
-    scrollRefsReadyFiredRef.current = false;
-    lastScrollSyncedPageRef.current = currentPage;
-    lastScrollTopForPageRef.current = (currentPage - 1) * PDF_VIEWER_PAGE_HEIGHT;
-    setScrollRefsReady(0);
-  }, [document?.id, isOcrVisible]);
-
-  const onLeftScrollerRef = useCallback((el: HTMLDivElement | null) => {
-    leftScrollerRef.current = el;
-    if (el && rightScrollerRef.current && !scrollRefsReadyFiredRef.current) {
-      scrollRefsReadyFiredRef.current = true;
-      setScrollRefsReady(1);
-    }
-  }, []);
-  const onRightScrollerRef = useCallback((el: HTMLDivElement | null) => {
-    rightScrollerRef.current = el;
-    if (el && leftScrollerRef.current && !scrollRefsReadyFiredRef.current) {
-      scrollRefsReadyFiredRef.current = true;
-      setScrollRefsReady(1);
-    }
-  }, []);
-
+  // Both panels render their pages into our own DOM as virtualized lists of equal row height, so they
+  // stay in step through currentPage alone: each scrolls itself to currentPage and reports the page it
+  // lands on back here. No scrollTop mirroring between panels is needed.
   const setCurrentPageFromToolbar = useCallback(
     (page: number) => {
-      pageChangeSourceRef.current = 'toolbar';
-      console.log('[OCR SCROLL] toolbar setCurrentPage(', page, ')');
+      setCurrentPage(page);
+    },
+    [setCurrentPage],
+  );
+
+  const setCurrentPageFromPanelScroll = useCallback(
+    (page: number) => {
       setCurrentPage(page);
     },
     [setCurrentPage],
@@ -417,44 +308,6 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
   );
 
 
-  // When currentPage changes (e.g. toolbar page dropdown), scroll both panels to that page if they're not already there.
-  // Guards: (1) never scroll to page 1 when both panels are already scrolled down; (2) if panels disagree by >1 page, don't scroll (let sync fix it).
-  useEffect(() => {
-    const left = leftScrollerRef.current;
-    const right = rightScrollerRef.current;
-    if (!left || !right) return;
-    if (pageChangeSourceRef.current !== 'toolbar') {
-      return;
-    }
-    const expectedTop = (currentPage - 1) * PDF_VIEWER_PAGE_HEIGHT;
-    const tolerance = 20;
-    const leftOff = Math.abs(left.scrollTop - expectedTop) > tolerance;
-    const rightOff = Math.abs(right.scrollTop - expectedTop) > tolerance;
-    const minScrollTop = Math.min(left.scrollTop, right.scrollTop);
-    const maxScrollTop = Math.max(left.scrollTop, right.scrollTop);
-    const impliedPage = Math.floor(minScrollTop / PDF_VIEWER_PAGE_HEIGHT) + 1;
-    const panelsOutOfSync = maxScrollTop - minScrollTop > PDF_VIEWER_PAGE_HEIGHT;
-
-    console.log('[OCR SCROLL] scroll-to-page effect: currentPage=', currentPage, 'left.scrollTop=', left.scrollTop, 'right.scrollTop=', right.scrollTop, 'expectedTop=', expectedTop, 'impliedPage=', impliedPage, 'panelsOutOfSync=', panelsOutOfSync);
-
-    if (!leftOff && !rightOff) return;
-    if (panelsOutOfSync) {
-      console.log('[OCR SCROLL] scroll-to-page SKIP: panels out of sync (one may have reset), not forcing scroll');
-      return;
-    }
-    lastScrollSyncedPageRef.current = currentPage;
-    lastScrollTopForPageRef.current = expectedTop;
-    syncingFromLeftRef.current = true;
-    syncingFromRightRef.current = true;
-    console.log('[OCR SCROLL] scroll-to-page APPLY: scrolling both to', expectedTop);
-    left.scrollTop = expectedTop;
-    right.scrollTop = expectedTop;
-    requestAnimationFrame(() => {
-      syncingFromLeftRef.current = false;
-      syncingFromRightRef.current = false;
-    });
-  }, [currentPage]);
-
   const content = (
     <div
       className={`fixed inset-0 bg-black/70 z-[1000] flex items-center justify-center ${
@@ -577,9 +430,9 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
                   pdfUrl={pdfUrlResolved}
                   pageCount={totalPagesFromOcr}
                   currentPage={currentPage}
+                  onCurrentPageChange={setCurrentPageFromPanelScroll}
                   zoom={zoom}
                   onPageCount={() => {}}
-                  onScrollerRef={onLeftScrollerRef}
                 />
               </div>
 
@@ -623,10 +476,10 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
                       ocrData={ocrData}
                       metadata={metadata}
                       currentPage={currentPage}
+                      onCurrentPageChange={setCurrentPageFromPanelScroll}
                       displayMode={displayMode}
                       zoom={zoom}
                       confidenceFilter={confidenceFilter}
-                      onScrollerRef={onRightScrollerRef}
                     />
                   )}
                 </div>

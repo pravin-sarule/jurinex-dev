@@ -1,4 +1,4 @@
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import type { OcrJson, OcrMetadata } from '../../types/ocr';
 import type {
@@ -34,22 +34,19 @@ export interface OcrPanelProps {
   displayMode: OcrDisplayMode;
   zoom: number;
   confidenceFilter: OcrConfidenceFilter;
-  onScrollerRef?: (el: HTMLDivElement | null) => void;
 }
 
 const OcrPanel: React.FC<OcrPanelProps> = ({
   ocrData,
   metadata,
   currentPage,
-  onCurrentPageChange: _onCurrentPageChange,
+  onCurrentPageChange,
   displayMode,
   zoom,
   confidenceFilter,
-  onScrollerRef,
 }) => {
   const hasOcrPages = !!ocrData?.pages?.length;
 
-  const scrollRootRef = useRef<HTMLDivElement | null>(null);
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const isProgrammaticScrollRef = useRef(false);
   const lastReportedPageRef = useRef<number>(currentPage);
@@ -64,7 +61,20 @@ const OcrPanel: React.FC<OcrPanelProps> = ({
   const totalPages =
     metadata?.pageCount ?? ocrData?.pageCount ?? pagesInOrder.length ?? 0;
 
-  // Scroll position is driven by modal (scroll sync); rangeChanged still reports page for toolbar.
+  // Virtuoso virtualizes its rows, so assigning scrollTop on the scroller does not bring the
+  // target page into view — it must be scrolled via scrollToIndex.
+  useEffect(() => {
+    if (!hasOcrPages || !pagesInOrder.length) return;
+    if (currentPage === lastReportedPageRef.current) return;
+    const index = Math.max(0, Math.min(pagesInOrder.length - 1, currentPage - 1));
+    lastReportedPageRef.current = index + 1;
+    isProgrammaticScrollRef.current = true;
+    virtuosoRef.current?.scrollToIndex({ index, align: 'start' });
+    const timer = window.setTimeout(() => {
+      isProgrammaticScrollRef.current = false;
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [currentPage, hasOcrPages, pagesInOrder.length]);
 
   if (!hasOcrPages) {
     return (
@@ -103,20 +113,14 @@ const OcrPanel: React.FC<OcrPanelProps> = ({
           fixedItemHeight={PDF_VIEWER_PAGE_HEIGHT}
           defaultItemHeight={PDF_VIEWER_PAGE_HEIGHT}
           computeItemKey={(index) => pagesInOrder[index]?.page ?? index}
-          scrollerRef={(el) => {
-            if (el instanceof HTMLDivElement) {
-              scrollRootRef.current = el;
-              onScrollerRef?.(el);
-            }
-          }}
           rangeChanged={({ startIndex }) => {
             const page = startIndex + 1;
             if (
               page !== lastReportedPageRef.current &&
               !isProgrammaticScrollRef.current
             ) {
-              console.log('[OCR SCROLL] OcrPanel rangeChanged: startIndex=', startIndex, '-> page=', page);
               lastReportedPageRef.current = page;
+              onCurrentPageChange?.(page);
             }
           }}
           increaseViewportBy={{ top: 1200, bottom: 1800 }}
