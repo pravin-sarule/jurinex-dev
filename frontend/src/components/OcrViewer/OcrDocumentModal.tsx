@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import type { OcrJson } from '../../types/ocr';
@@ -7,6 +7,7 @@ import OcrToolbar from './OcrToolbar';
 import OcrStats from './OcrStats';
 import PdfPanel from './PdfPanel';
 import OcrPanel from './OcrPanel';
+import { PDF_VIEWER_PAGE_HEIGHT } from './constants';
 
 interface OcrDocumentModalProps {
   document: {
@@ -37,6 +38,27 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
   }, [document]);
 
   const [isFullSize, setIsFullSize] = useState(false);
+
+  const leftScrollerRef = useRef<HTMLDivElement | null>(null);
+  const rightScrollerRef = useRef<HTMLDivElement | null>(null);
+  const isSyncingScrollRef = useRef(false);
+  const lastSyncedPageRef = useRef(1);
+  // Bumped when a panel hands over its scroller so the mirror effect re-attaches. The refs are never
+  // cleared elsewhere: Virtuoso's scrollerRef callback fires once, so nulling them would strand it.
+  const [scrollersReady, setScrollersReady] = useState(0);
+
+  // Bail out when handed the element we already hold: Virtuoso re-invokes scrollerRef on re-render, so
+  // an unguarded setState here re-renders and re-invokes it again — an infinite update loop.
+  const onLeftScrollerRef = useCallback((el: HTMLDivElement | null) => {
+    if (leftScrollerRef.current === el) return;
+    leftScrollerRef.current = el;
+    if (el) setScrollersReady((v) => v + 1);
+  }, []);
+  const onRightScrollerRef = useCallback((el: HTMLDivElement | null) => {
+    if (rightScrollerRef.current === el) return;
+    rightScrollerRef.current = el;
+    if (el) setScrollersReady((v) => v + 1);
+  }, []);
 
   const {
     overview,
@@ -146,21 +168,66 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
     };
   }, []);
 
-  // Both panels render their pages into our own DOM as virtualized lists of equal row height, so they
-  // stay in step through currentPage alone: each scrolls itself to currentPage and reports the page it
-  // lands on back here. No scrollTop mirroring between panels is needed.
+  // Both panels now render into our own DOM as virtualized lists sharing PDF_VIEWER_PAGE_HEIGHT, so a
+  // scroll offset means the same thing in each and can be mirrored 1:1. This modal owns every scroll:
+  // panels only expose their scroller and report the page they land on.
+  const scrollTo = useCallback((top: number) => {
+    isSyncingScrollRef.current = true;
+    const left = leftScrollerRef.current;
+    const right = rightScrollerRef.current;
+    if (left) left.scrollTop = top;
+    if (right) right.scrollTop = top;
+    requestAnimationFrame(() => {
+      isSyncingScrollRef.current = false;
+    });
+  }, []);
+
+  // Mirror scrolling between the panels and derive the page from the offset. The page is computed from
+  // scrollTop rather than Virtuoso's rangeChanged because that reports the *rendered* range, which
+  // includes the increaseViewportBy overscan and would name a page above the one on screen.
+  // Assigning an unchanged scrollTop fires no scroll event, so the mirror settles after one hop.
+  useEffect(() => {
+    const left = leftScrollerRef.current;
+    const right = rightScrollerRef.current;
+    const scrollers = [left, right].filter(Boolean) as HTMLDivElement[];
+    if (!scrollers.length) return;
+
+    const onScroll = (from: HTMLDivElement) => () => {
+      if (isSyncingScrollRef.current) return;
+      isSyncingScrollRef.current = true;
+      const top = from.scrollTop;
+      for (const other of scrollers) {
+        if (other !== from) other.scrollTop = top;
+      }
+      const page = Math.max(1, Math.floor(top / PDF_VIEWER_PAGE_HEIGHT) + 1);
+      if (page !== lastSyncedPageRef.current) {
+        lastSyncedPageRef.current = page;
+        setCurrentPage(page);
+      }
+      requestAnimationFrame(() => {
+        isSyncingScrollRef.current = false;
+      });
+    };
+
+    const handlers = scrollers.map((el) => {
+      const handler = onScroll(el);
+      el.addEventListener('scroll', handler, { passive: true });
+      return { el, handler };
+    });
+    return () => {
+      for (const { el, handler } of handlers) {
+        el.removeEventListener('scroll', handler);
+      }
+    };
+  }, [isOcrVisible, scrollersReady, setCurrentPage]);
+
   const setCurrentPageFromToolbar = useCallback(
     (page: number) => {
+      lastSyncedPageRef.current = page;
       setCurrentPage(page);
+      scrollTo((page - 1) * PDF_VIEWER_PAGE_HEIGHT);
     },
-    [setCurrentPage],
-  );
-
-  const setCurrentPageFromPanelScroll = useCallback(
-    (page: number) => {
-      setCurrentPage(page);
-    },
-    [setCurrentPage],
+    [setCurrentPage, scrollTo],
   );
 
   const safeBaseFilename = useCallback(() => {
@@ -430,9 +497,8 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
                   pdfUrl={pdfUrlResolved}
                   pageCount={totalPagesFromOcr}
                   currentPage={currentPage}
-                  onCurrentPageChange={setCurrentPageFromPanelScroll}
+                  onScrollerRef={onLeftScrollerRef}
                   zoom={zoom}
-                  onPageCount={() => {}}
                 />
               </div>
 
@@ -475,8 +541,7 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
                     <OcrPanel
                       ocrData={ocrData}
                       metadata={metadata}
-                      currentPage={currentPage}
-                      onCurrentPageChange={setCurrentPageFromPanelScroll}
+                      onScrollerRef={onRightScrollerRef}
                       displayMode={displayMode}
                       zoom={zoom}
                       confidenceFilter={confidenceFilter}

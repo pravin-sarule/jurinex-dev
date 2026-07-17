@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
+import { Virtuoso } from 'react-virtuoso';
 import { PDF_VIEWER_PAGE_HEIGHT } from './constants';
 import 'react-pdf/dist/Page/TextLayer.css';
 // Vite resolves `?url` to the emitted worker asset; a bare specifier would not resolve here.
@@ -28,7 +28,7 @@ export interface PdfPanelProps {
   pageCount: number;
   currentPage: number;
   onPageCount?: (pageCount: number) => void;
-  onCurrentPageChange?: (page: number) => void;
+  onScrollerRef?: (el: HTMLDivElement | null) => void;
   zoom: number;
 }
 
@@ -37,15 +37,19 @@ const PdfPanel: React.FC<PdfPanelProps> = ({
   pageCount,
   currentPage,
   onPageCount,
-  onCurrentPageChange,
+  onScrollerRef,
   zoom,
 }) => {
   const [loadedPageCount, setLoadedPageCount] = useState(0);
   const [pdfFailed, setPdfFailed] = useState(false);
 
-  const virtuosoRef = useRef<VirtuosoHandle | null>(null);
-  const isProgrammaticScrollRef = useRef(false);
-  const lastReportedPageRef = useRef<number>(currentPage);
+  // Must keep a stable identity: Virtuoso re-invokes scrollerRef whenever the callback changes.
+  const handleScrollerRef = useCallback(
+    (el: HTMLElement | Window | null) => {
+      onScrollerRef?.(el instanceof HTMLDivElement ? el : null);
+    },
+    [onScrollerRef],
+  );
 
   // Signed URLs carry no fragment of their own, but strip one defensively so #page= stays ours.
   const baseUrl = pdfUrl ? pdfUrl.split('#')[0] : null;
@@ -60,20 +64,8 @@ const PdfPanel: React.FC<PdfPanelProps> = ({
     if (pageCount > 0) onPageCount?.(pageCount);
   }, [pageCount, onPageCount]);
 
-  // Virtuoso virtualizes its rows, so the page must be brought into view via scrollToIndex rather
-  // than by assigning scrollTop. lastReportedPageRef keeps this from fighting rangeChanged.
-  useEffect(() => {
-    if (pdfFailed || !totalPages) return;
-    if (currentPage === lastReportedPageRef.current) return;
-    const index = Math.max(0, Math.min(totalPages - 1, currentPage - 1));
-    lastReportedPageRef.current = index + 1;
-    isProgrammaticScrollRef.current = true;
-    virtuosoRef.current?.scrollToIndex({ index, align: 'start' });
-    const timer = window.setTimeout(() => {
-      isProgrammaticScrollRef.current = false;
-    }, 300);
-    return () => window.clearTimeout(timer);
-  }, [currentPage, totalPages, pdfFailed]);
+  // Scroll position is owned by OcrDocumentModal, which drives this panel's scroller directly and
+  // mirrors it to the OCR panel; both lists share PDF_VIEWER_PAGE_HEIGHT so their offsets map 1:1.
 
   if (!baseUrl) {
     return (
@@ -137,21 +129,11 @@ const PdfPanel: React.FC<PdfPanelProps> = ({
         >
           {totalPages > 0 && (
             <Virtuoso
-              ref={virtuosoRef}
               style={{ height: '100%' }}
               totalCount={totalPages}
               fixedItemHeight={PDF_VIEWER_PAGE_HEIGHT}
               defaultItemHeight={PDF_VIEWER_PAGE_HEIGHT}
-              rangeChanged={({ startIndex }) => {
-                const page = startIndex + 1;
-                if (
-                  page !== lastReportedPageRef.current &&
-                  !isProgrammaticScrollRef.current
-                ) {
-                  lastReportedPageRef.current = page;
-                  onCurrentPageChange?.(page);
-                }
-              }}
+              scrollerRef={handleScrollerRef}
               increaseViewportBy={{ top: 1200, bottom: 1800 }}
               itemContent={(index) => (
                 <div
