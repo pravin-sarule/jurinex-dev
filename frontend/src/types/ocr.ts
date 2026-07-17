@@ -46,6 +46,10 @@ export interface OcrDocumentOverview {
   viewer_status?: 'ready' | 'processing_ocr' | 'missing_ocr' | 'failed' | string;
   ocr_available?: boolean;
   ocr_processing?: boolean;
+  // The original upload's type and name, straight off the user_files row. The signed URL below points
+  // at the RAW object, so the viewer must know what it is: only a PDF can go to pdf.js.
+  mimetype?: string | null;
+  file_name?: string | null;
   pdf_signed_url?: string | null;
   ocr_signed_url?: string | null;
   page_count?: number;

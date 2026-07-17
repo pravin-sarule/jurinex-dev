@@ -6,6 +6,7 @@ import {
   PAGE_LABEL_HEIGHT,
   pageRenderHeight,
 } from './constants';
+import type { PreviewKind } from './previewKind';
 import 'react-pdf/dist/Page/TextLayer.css';
 // Vite resolves `?url` to the emitted worker asset; a bare specifier would not resolve here.
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -31,6 +32,8 @@ export interface PdfPanelProps {
   onPageCount?: (pageCount: number) => void;
   onScrollerRef?: (el: HTMLDivElement | null) => void;
   zoom: number;
+  previewKind?: PreviewKind;
+  onDownload?: () => void;
 }
 
 const PdfPanel: React.FC<PdfPanelProps> = ({
@@ -40,6 +43,8 @@ const PdfPanel: React.FC<PdfPanelProps> = ({
   onPageCount,
   onScrollerRef,
   zoom,
+  previewKind = 'pdf',
+  onDownload,
 }) => {
   const [loadedPageCount, setLoadedPageCount] = useState(0);
   const [pdfFailed, setPdfFailed] = useState(false);
@@ -81,9 +86,43 @@ const PdfPanel: React.FC<PdfPanelProps> = ({
     );
   }
 
+  // A file the browser cannot display must never reach the iframe below. Navigating an iframe to, say, a
+  // .docx makes the browser treat it as a download instead of a view, so the panel stayed blank AND the
+  // file landed in Downloads just for opening the preview. Offer the download explicitly instead.
+  if (previewKind === 'unsupported') {
+    return (
+      <div className="flex flex-col h-full min-h-0 gap-3">
+        <h3 className="text-sm font-semibold text-gray-900 shrink-0">
+          Original Document
+        </h3>
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 px-6 text-center bg-gray-50 rounded-lg border border-gray-200">
+          <div>
+            <p className="text-sm font-medium text-gray-700 mb-1">
+              This file type cannot be previewed
+            </p>
+            <p className="text-xs text-gray-500 max-w-md">
+              The reconstructed text is still shown in the OCR panel.
+            </p>
+          </div>
+          {onDownload && (
+            <button
+              type="button"
+              onClick={onDownload}
+              className="inline-flex items-center justify-center px-4 py-2 rounded-md text-sm font-medium text-white"
+              style={{ backgroundColor: '#21C1B6' }}
+            >
+              Download original
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // Fallback: if pdf.js cannot load the file (worker failure, CORS, corrupt PDF) hand the URL to the
-  // browser's own viewer. It only honours #page=N on initial load, hence the key-based remount.
-  if (pdfFailed) {
+  // browser's own viewer. It only honours #page=N on initial load, hence the key-based remount. Safe for
+  // the kinds that reach here: the browser renders PDFs, images and text natively.
+  if (pdfFailed || previewKind === 'native') {
     return (
       <div className="flex flex-col h-full min-h-0 gap-3">
         <h3 className="text-sm font-semibold text-gray-900 shrink-0">

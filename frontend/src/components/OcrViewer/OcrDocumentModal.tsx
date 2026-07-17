@@ -6,7 +6,10 @@ import useOcrDocumentViewer from '../../hooks/useOcrDocumentViewer';
 import OcrToolbar from './OcrToolbar';
 import OcrStats from './OcrStats';
 import PdfPanel from './PdfPanel';
+import DocxPanel from './DocxPanel';
 import OcrPanel from './OcrPanel';
+import { resolvePreviewKind } from './previewKind';
+import { getFileExtension } from '../../utils/fileHelpers';
 import { PDF_VIEWER_PAGE_HEIGHT } from './constants';
 
 interface OcrDocumentModalProps {
@@ -121,6 +124,15 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
   const pdfUrlResolved =
     pdfUrl || document.previewUrl || document.viewUrl || null;
 
+  // The URL above serves the RAW upload, so the renderer has to be chosen by what that file actually is
+  // rather than assumed to be a PDF. The view response is authoritative (it reads the user_files row);
+  // the caller's props are the fallback for when that request failed and returned no document at all.
+  const originalName = overview?.file_name || document?.name || null;
+  const previewKind = resolvePreviewKind(
+    overview?.mimetype || document?.mimetype,
+    originalName,
+  );
+
   // Debug log for PDF URL resolution
   React.useEffect(() => {
     if (pdfUrlResolved) {
@@ -230,13 +242,22 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
     [setCurrentPage, scrollTo],
   );
 
+  // Base and extension must come from the SAME name, or a caller that only knows the placeholder
+  // "Untitled document" would pair it with the real file's extension: "Untitled_document.docx".
   const safeBaseFilename = useCallback(() => {
-    const rawName = document?.name || 'document';
+    const rawName = originalName || 'document';
     return rawName
       .replace(/\.[^.]+$/, '')
       .replace(/[^a-zA-Z0-9._-]+/g, '_')
       .replace(/^_+|_+$/g, '') || 'document';
-  }, [document?.name]);
+  }, [originalName]);
+
+  // This button downloads the ORIGINAL bytes, so it has to keep the original extension. It used to hard
+  // code ".pdf", which handed back a .docx named .pdf that the OS then opened with the wrong app.
+  const originalDownloadName = useCallback(
+    () => `${safeBaseFilename()}${getFileExtension(originalName || '') || '.pdf'}`,
+    [safeBaseFilename, originalName],
+  );
 
   const triggerBlobDownload = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -439,7 +460,7 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
           isFullSize={isFullSize}
           onToggleFullSize={() => setIsFullSize((prev) => !prev)}
           onDownloadOriginalPdf={() => {
-            downloadUrl(pdfUrlResolved, `${safeBaseFilename()}.pdf`);
+            downloadUrl(pdfUrlResolved, originalDownloadName());
           }}
           onDownloadOcrPlainPdf={() => {
             downloadOcrPdf('plain');
@@ -493,13 +514,42 @@ const OcrDocumentModal: React.FC<OcrDocumentModalProps> = ({
                   isOcrVisible ? 'basis-1/2' : 'basis-full'
                 } flex-1 flex flex-col min-w-0 min-h-0`}
               >
-                <PdfPanel
-                  pdfUrl={pdfUrlResolved}
-                  pageCount={totalPagesFromOcr}
-                  currentPage={currentPage}
-                  onScrollerRef={onLeftScrollerRef}
-                  zoom={zoom}
-                />
+                {!overview && loading ? (
+                  // Until the view response lands there is nothing authoritative to classify, and the
+                  // caller's props may carry no usable name or mimetype — which would resolve to
+                  // 'unsupported' and flash "cannot be previewed" through the translucent loading
+                  // overlay before settling on the real renderer.
+                  <div className="flex flex-col h-full min-h-0 gap-3">
+                    <h3 className="text-sm font-semibold text-gray-900 shrink-0">
+                      Original Document
+                    </h3>
+                    <div className="flex-1 min-h-0 rounded-lg border border-gray-200 bg-gray-100" />
+                  </div>
+                ) : previewKind === 'docx' ? (
+                  // DocxPanel deliberately does not hand over a scroller: its pages are laid out by the
+                  // document's own geometry, not the fixed PDF_VIEWER_PAGE_HEIGHT slots the mirroring
+                  // maps 1:1, so syncing the two would scroll the OCR panel to the wrong place. The
+                  // mirror effect handles a single scroller, so the OCR side still tracks its own pages.
+                  <DocxPanel
+                    url={pdfUrlResolved}
+                    zoom={zoom}
+                    onDownload={() =>
+                      downloadUrl(pdfUrlResolved, originalDownloadName())
+                    }
+                  />
+                ) : (
+                  <PdfPanel
+                    pdfUrl={pdfUrlResolved}
+                    pageCount={totalPagesFromOcr}
+                    currentPage={currentPage}
+                    onScrollerRef={onLeftScrollerRef}
+                    zoom={zoom}
+                    previewKind={previewKind}
+                    onDownload={() =>
+                      downloadUrl(pdfUrlResolved, originalDownloadName())
+                    }
+                  />
+                )}
               </div>
 
               {isOcrVisible && (

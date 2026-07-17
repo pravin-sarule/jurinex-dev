@@ -236,6 +236,10 @@ const ocrApi = {
         viewer_status: ocrAvailable ? 'ready' : statusLooksProcessing(doc.status) ? 'processing_ocr' : 'missing_ocr',
         ocr_available: ocrAvailable,
         ocr_processing: statusLooksProcessing(doc.status),
+        // `document.mimetype`/`name` come from the user_files row and are the authoritative answer to
+        // "what is behind pdf_signed_url". Dropping them used to leave the viewer assuming PDF.
+        mimetype: doc.mimetype || null,
+        file_name: doc.name || null,
         pdf_signed_url: pdfUrl,
         ocr_signed_url: ocrAvailable ? 'inline-structured-json' : null,
         page_count: ocrData?.pageCount || ocrPayload?.pageCount || 0,
