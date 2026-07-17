@@ -68,6 +68,10 @@ import PromptChipsBar from "../PromptChipsBar";
 import OcrViewer from "../OcrViewer";
 import { fetchSecretsList, peekSecretsList, fetchSecretById } from "../../services/secretsService";
 
+// Draft-from-template is hidden for now: a single draft costs a lot of tokens. The implementation is
+// left intact — flip this back to true once the token-cost optimisations land.
+const DRAFT_FROM_TEMPLATE_ENABLED = false;
+
 const VIEWER_IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
 
 const detectViewerFileType = (url = "", mime = "") => {
@@ -4030,7 +4034,10 @@ const ChatInterface = () => {
                 )}
               </button>
 
-              {/* Draft from template: fill an uploaded template from this case's documents */}
+              {/* Draft from template: fill an uploaded template from this case's documents.
+                  Hidden behind DRAFT_FROM_TEMPLATE_ENABLED while the token cost is optimised. */}
+              {DRAFT_FROM_TEMPLATE_ENABLED && (
+              <>
               <input
                 ref={templateInputRef}
                 type="file"
@@ -4101,6 +4108,8 @@ const ChatInterface = () => {
                 >
                   {isUploadingTemplate ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
                 </button>
+              )}
+              </>
               )}
 
               <input
