@@ -14,7 +14,9 @@ const useOcrDocumentViewer = (documentId?: string | null) => {
   const [error, setError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [zoom, setZoom] = useState(1);
-  const [isOcrVisible, setIsOcrVisible] = useState(true);
+  // Closed until asked for: the preview opens on the original document, and the OCR panel is opened by
+  // the toolbar's OCR button. Open by default it also halves the width the original gets.
+  const [isOcrVisible, setIsOcrVisible] = useState(false);
   const [displayMode, setDisplayMode] = useState<OcrDisplayMode>('words');
   const [confidenceFilter, setConfidenceFilter] = useState<OcrConfidenceFilter>('none');
   const [hasOcrData, setHasOcrData] = useState<boolean | null>(null);
