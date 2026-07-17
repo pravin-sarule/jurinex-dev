@@ -143,6 +143,15 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("DRAFT_GUARDIAN_MODEL"),
     )
+    # Master switch for the draft GUARDIAN (Stage D/E audit + repair). Default False = guardian is
+    # OFF: drafts skip the grounding/format audit, section repair and slot recovery entirely, saving
+    # the guardian model's tokens on every draft. Set True to re-enable it (then draft_guardian_model
+    # / the frontend dropdown pick which model runs the audit). The dropdown can also force it off
+    # per-draft with a "disabled"/"none"/"off" value even when this is True.
+    draft_guardian_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("DRAFT_GUARDIAN_ENABLED"),
+    )
     # Minimum seconds between successive Gemma API requests (GLOBAL across threads, retries
     # included). Free Google AI Studio keys allow only 15 requests/min on gemma models, and
     # the gemma endpoint 500s far more under rapid-fire calls — 9s spacing ≈ 6-7 RPM keeps

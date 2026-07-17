@@ -4078,10 +4078,11 @@ const ChatInterface = () => {
                   <select
                     value={guardianModel}
                     onChange={(e) => setGuardianModel(e.target.value)}
-                    title="Guardian (Stage D/E) — audits the finished draft against the case facts, repairs flagged sections and recovers unfilled slots. This model is billed on every draft."
+                    title="Guardian (Stage D/E) — audits the finished draft against the case facts, repairs flagged sections and recovers unfilled slots. Off by default (it is billed on every draft); pick a model to enable it, or 'Disabled' to force it off."
                     className="flex-shrink-0 text-xs rounded-lg border border-gray-200 bg-white text-gray-700 px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-[#21C1B6] cursor-pointer"
                   >
-                    <option value="">Guardian: auto (default)</option>
+                    <option value="disabled">Guardian: Disabled (skip audit)</option>
+                    <option value="">Guardian: Auto (off by default)</option>
                     <option value="claude-opus-4-8">Guardian: Claude Opus</option>
                     <option value="claude-sonnet-5">Guardian: Claude Sonnet</option>
                     <option value="gemini-3.1-pro-preview">Guardian: Gemini 3.1 Pro</option>

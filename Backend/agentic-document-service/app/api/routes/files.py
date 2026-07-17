@@ -3993,10 +3993,25 @@ async def intelligent_chat_stream(
                         else:
                             from google.genai import types as _draft_types
                             stream_provider = "gemini"
-                            stream_cfg = _draft_types.GenerateContentConfig(
+                            _draft_cfg_kwargs: dict[str, Any] = dict(
                                 temperature=0.2,
                                 max_output_tokens=int(getattr(settings, "draft_max_output_tokens", 0) or 65536),
                             )
+                            # Gemma-4 is a thinking model whose thinking + answer SHARE the output budget
+                            # and defaults to HEAVY thinking → slow drafts with most tokens burned on
+                            # hidden reasoning. Force minimal thinking for a gemma draft engine here too
+                            # (the section pipeline already does this via _build_gemini_config; this covers
+                            # the single-call draft path). Other gemini models don't accept thinking_level,
+                            # so apply it ONLY for gemma.
+                            try:
+                                from app.services.adapters.document_ai import _is_gemma_model as _dm_is_gemma
+                                if _dm_is_gemma(_draft_model_name):
+                                    _dlvl = str(getattr(settings, "gemma_thinking_level", "minimal") or "minimal").strip().lower()
+                                    if _dlvl in ("minimal", "high"):
+                                        _draft_cfg_kwargs["thinking_config"] = _draft_types.ThinkingConfig(thinking_level=_dlvl)
+                            except Exception:
+                                pass
+                            stream_cfg = _draft_types.GenerateContentConfig(**_draft_cfg_kwargs)
 
                     # ── DRAFT PIPELINE (4-stage: analyze → fact inventory → per-section draft → audit) ──
                     # Structure-first successor to the single-call draft; scales to long templates without
@@ -4122,30 +4137,53 @@ async def intelligent_chat_stream(
                         #   3) auto: Opus when an Anthropic key exists, else gemini-3.1-pro
                         # Same allowlist as the structure model, so an arbitrary model string
                         # cannot be injected through the request.
+                        # Guardian is OPT-IN. It is OFF by default (DRAFT_GUARDIAN_ENABLED=false): the
+                        # Stage D/E audit passes burned the guardian model's tokens for little gain, so
+                        # drafts now skip them unless an admin turns it back on. The frontend guardian
+                        # dropdown can ALSO force it off per-draft with a "disabled"/"none"/"off" value.
                         _draft_engine_lc = (resolved_model_name or "").lower()
                         _req_guardian = (getattr(chat_request, "guardian_model", None) or "").strip()
                         _env_guardian = (getattr(settings, "draft_guardian_model", "") or "").strip()
-                        if _req_guardian in _GUARDIAN_ALLOWED_MODELS:
-                            _guardian_model = _req_guardian
-                            _guardian_src = "request"
-                        elif _env_guardian in _GUARDIAN_ALLOWED_MODELS:
-                            _guardian_model = _env_guardian
-                            _guardian_src = "env"
-                        elif _draft_engine_lc.startswith("claude-opus"):
-                            _guardian_model = resolved_model_name
-                            _guardian_src = "auto(engine-is-opus)"
-                        elif getattr(settings, "anthropic_api_key", "") or getattr(settings, "ANTHROPIC_API_KEY", ""):
-                            _guardian_model = "claude-opus-4-8"
-                            _guardian_src = "auto(anthropic-key)"
-                        else:
-                            _guardian_model = "gemini-3.1-pro-preview"
-                            _guardian_src = "auto(no-anthropic-key)"
-                        logger.info(
-                            "[Route:intelligent_chat_stream] folder=%s draft engine=%s structure=%s "
-                            "guardian(audit)=%s via=%s",
-                            folder_name, resolved_model_name, _analysis_model,
-                            _guardian_model, _guardian_src,
+                        # Guardian is OFF by default. It runs only when explicitly turned on:
+                        #   • the dropdown picks an allowed guardian model → runs (per-draft opt-in), OR
+                        #   • the master switch DRAFT_GUARDIAN_ENABLED=true → auto/env resolves the model.
+                        # Force-OFF when the dropdown sends a disable sentinel, or when nothing is chosen
+                        # AND the master switch is off. So "Disabled"/"Auto(off)" skip; picking a model runs.
+                        _explicit_off = _req_guardian.lower() in {"disabled", "disable", "none", "off", "no", "skip"}
+                        _explicit_model = _req_guardian in _GUARDIAN_ALLOWED_MODELS
+                        _guardian_disabled = _explicit_off or (
+                            not _explicit_model and not bool(getattr(settings, "draft_guardian_enabled", False))
                         )
+                        if _guardian_disabled:
+                            _guardian_model = None
+                            _guardian_src = "disabled"
+                            logger.info(
+                                "[Route:intelligent_chat_stream] folder=%s draft GUARDIAN DISABLED — "
+                                "Stage D/E audit skipped (no guardian tokens). engine=%s structure=%s",
+                                folder_name, resolved_model_name, _analysis_model,
+                            )
+                        else:
+                            if _req_guardian in _GUARDIAN_ALLOWED_MODELS:
+                                _guardian_model = _req_guardian
+                                _guardian_src = "request"
+                            elif _env_guardian in _GUARDIAN_ALLOWED_MODELS:
+                                _guardian_model = _env_guardian
+                                _guardian_src = "env"
+                            elif _draft_engine_lc.startswith("claude-opus"):
+                                _guardian_model = resolved_model_name
+                                _guardian_src = "auto(engine-is-opus)"
+                            elif getattr(settings, "anthropic_api_key", "") or getattr(settings, "ANTHROPIC_API_KEY", ""):
+                                _guardian_model = "claude-opus-4-8"
+                                _guardian_src = "auto(anthropic-key)"
+                            else:
+                                _guardian_model = "gemini-3.1-pro-preview"
+                                _guardian_src = "auto(no-anthropic-key)"
+                            logger.info(
+                                "[Route:intelligent_chat_stream] folder=%s draft engine=%s structure=%s "
+                                "guardian(audit)=%s via=%s",
+                                folder_name, resolved_model_name, _analysis_model,
+                                _guardian_model, _guardian_src,
+                            )
                         # Mark where this draft's token entries begin so we can report the
                         # per-model burn for JUST this draft after the pipeline finishes.
                         _draft_usage_start = usage_entry_count(usage_session_key)
@@ -4165,7 +4203,7 @@ async def intelligent_chat_stream(
                                 run_blocking=_draft_run_blocking,
                                 doc_title=None,
                                 cached_fact_inventory=_DRAFT_FACTINV_CACHE.get(_fi_key),
-                                enable_audit=True,
+                                enable_audit=not _guardian_disabled,
                                 retrieve_fn=_draft_retrieve,
                                 audit_model=_guardian_model,
                             ):
