@@ -3029,6 +3029,14 @@ def recover_section_slots(
     return cleaned if cleaned else drafted_md
 
 
+# Paid backstop a failed free-tier gemma stage is retried on. flash-lite rather than 3.1-pro because
+# these stages are bounded structured extraction (template structure, fact matrix), not open reasoning:
+# measured on a real fact-matrix extraction it returned identical output 5x faster (1.7s vs 8.6s) with
+# 0 thinking tokens against 3.1-pro's 838, and it flagged an absent field as null rather than inventing
+# one. Uses GEMINI_API_KEY. Raise back to gemini-3.1-pro-preview if a stage ever needs deeper reasoning.
+GEMMA_FALLBACK_MODEL = "gemini-3.1-flash-lite"
+
+
 def _reliable_alt_chain(model: str) -> list[str]:
     """Ordered fallback models to retry a FAILED pipeline stage on, most-preferred first.
 
@@ -3043,9 +3051,9 @@ def _reliable_alt_chain(model: str) -> list[str]:
     if not m:
         return []
     if m.startswith("gemma-4-31b"):
-        return ["gemini-3.1-pro-preview"]
+        return [GEMMA_FALLBACK_MODEL]
     if m.startswith("gemma"):
-        return ["gemma-4-31b-it", "gemini-3.1-pro-preview"]
+        return ["gemma-4-31b-it", GEMMA_FALLBACK_MODEL]
     return []
 
 
