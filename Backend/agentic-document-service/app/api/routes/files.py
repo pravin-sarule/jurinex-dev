@@ -1159,7 +1159,7 @@ def _parse_jsonish(value: Any) -> Any:
 
 
 def _split_text_evenly_by_pages(text: str, page_count: int) -> list[str]:
-    cleaned = str(text or "").strip()
+    cleaned = (text or "").strip()
     if not cleaned or page_count <= 1:
         return [cleaned] if cleaned else []
     lines = [line for line in cleaned.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
@@ -1215,8 +1215,8 @@ def _fallback_structured_ocr_from_text(
     source: str = "processed_text",
     page_texts: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    cleaned = str(text or "").strip()
-    supplied_pages = [str(part or "").strip() for part in (page_texts or [])]
+    cleaned = (text or "").strip()
+    supplied_pages = [(part or "").strip() for part in (page_texts or [])]
     supplied_pages = supplied_pages if any(supplied_pages) else []
     if not cleaned and supplied_pages:
         cleaned = "\n\n".join(part for part in supplied_pages if part).strip()
@@ -2204,7 +2204,7 @@ async def update_draft_message(
                 session_id=request.session_id, answer=request.markdown or "",
             ),
         )
-        return {"updated": bool(updated)}
+        return {"updated": updated}
     except Exception as exc:
         logger.exception("[Route:update_draft_message] folder=%s error=%s", folder_name, exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -3006,7 +3006,7 @@ async def intelligent_chat_stream(
         if not query_text:
             yield _sse({"type": "error", "message": "Please enter a question."})
             return
-        requested_model_name = str(chat_request.llm_name or "").strip()
+        requested_model_name = (chat_request.llm_name or "").strip()
         # The UI may send a bare provider label instead of a concrete model id.
         # Map "deepseek"/"claude" to their configured model so the request actually
         # routes to that provider; "gemini"/"default"/"" fall back to the agent's
@@ -4084,7 +4084,7 @@ async def intelligent_chat_stream(
                                 # hybrid vector/full-text RRF; this second pass makes the final prompt
                                 # less redundant: 5 best relevant chunks, 2 corroborating chunks from
                                 # different documents where possible, and 1 neighbour context chunk.
-                                _limit = 8 if int(_k or 0) >= 20 else max(1, min(int(_k or 8), 12))
+                                _limit = 8 if (_k or 0) >= 20 else max(1, min(_k or 8, 12))
                                 _tokens = {
                                     t for t in re.findall(r"[A-Za-z0-9]{3,}", (_query or "").lower())
                                     if t not in {"the", "and", "for", "with", "this", "that", "section", "exact"}
@@ -4143,7 +4143,7 @@ async def intelligent_chat_stream(
                                         case_id=folder_name,
                                         query=_q,
                                         file_ids=_rag_fids,
-                                        top_k=int(_k),
+                                        top_k=_k,
                                         include_surrounding_chunks=True,
                                         # 0.30 was below the semantic similarity floor (~0.333),
                                         # so it could not filter weak semantic hits. 0.42 screens
@@ -4154,7 +4154,7 @@ async def intelligent_chat_stream(
                                 except Exception as _rex:
                                     logger.warning("[Route:intelligent_chat_stream] draft RAG retrieval error: %s", _rex)
                                     return []
-                                _raw = _draft_rerank_chunks(_q, _raw, int(_k or 8))
+                                _raw = _draft_rerank_chunks(_q, _raw, _k or 8)
                                 _norm = []
                                 for _ch in _raw:
                                     _m = _ch.get("metadata") or {}
@@ -4448,9 +4448,13 @@ async def intelligent_chat_stream(
                         # uploaded template PDF directly for full-fidelity reproduction, so attach it as
                         # a file Part alongside the grounding prompt. gemma / non-PDF templates instead
                         # carry the template as TEXT inside `prompt` (built above), so contents=prompt.
-                        _draft_contents = None
+                        # `contents` wants list[PartUnionDict]; list is invariant, so a bare list[Part]
+                        # is rejected by the type checker even though the SDK accepts it. Import hoisted so
+                        # the annotation resolves — a local annotation is never evaluated at runtime, so
+                        # this adds no cost on the non-draft path.
+                        from google.genai import types as _gtypes
+                        _draft_contents: list[_gtypes.PartUnionDict] | None = None
                         if is_draft and _draft_attach_pdf and _draft_template_bytes:
-                            from google.genai import types as _gtypes
                             _draft_contents = [
                                 _gtypes.Part.from_bytes(data=_draft_template_bytes, mime_type="application/pdf"),
                                 _gtypes.Part.from_text(text=prompt),
@@ -5200,7 +5204,7 @@ def list_folder_chats(
                 # while chat_count/last_activity aggregate the whole session so the
                 # sidebar can group and sort conversations by recency.
                 user_filter = "AND user_id::text = %s" if user_id else ""
-                params = [folder_name, str(user_id)] if user_id else [folder_name]
+                params = [folder_name, user_id] if user_id else [folder_name]
                 cur.execute(
                     f"""
                     SELECT * FROM (
