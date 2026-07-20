@@ -220,7 +220,7 @@ class TestFragmentFallback(unittest.TestCase):
     enriched (not dropped), which is what collapsed the funnel to ~8 candidates / 5 citations."""
 
     def test_failed_detects_errmsg_empty_and_missing_headline(self):
-        from services.indian_kanoon import _fragment_failed
+        from services.indiankanoon_client import _fragment_failed
         self.assertTrue(_fragment_failed(None))
         self.assertTrue(_fragment_failed({}))
         self.assertTrue(_fragment_failed({"errmsg": "Error in evaluting the fragments"}))
@@ -228,18 +228,18 @@ class TestFragmentFallback(unittest.TestCase):
         self.assertFalse(_fragment_failed({"headline": ["<p>snippet</p>"]}))
 
     def test_boolean_query_splits_into_single_operands(self):
-        from services.indian_kanoon import _fragment_fallback_queries
+        from services.indiankanoon_client import _fragment_fallback_queries
         fb = _fragment_fallback_queries('"promissory estoppel" ANDD tenancy')
         # quoted phrase tried first (most specific), then its unquoted form, then the other operand
         self.assertEqual(fb, ['"promissory estoppel"', "promissory estoppel", "tenancy"])
 
     def test_plain_single_term_has_no_fallback(self):
-        from services.indian_kanoon import _fragment_fallback_queries
+        from services.indiankanoon_client import _fragment_fallback_queries
         self.assertEqual(_fragment_fallback_queries("Laxmanrao"), [])
         self.assertEqual(_fragment_fallback_queries("forfeiture industrial"), [])
 
     def test_fallback_never_repeats_the_original_query(self):
-        from services.indian_kanoon import _fragment_fallback_queries
+        from services.indiankanoon_client import _fragment_fallback_queries
         for q in ('"a b" ORR "c d"', "tahsildar ANDD \"without jurisdiction\""):
             self.assertNotIn(q.strip().lower(), [f.lower() for f in _fragment_fallback_queries(q)])
 
