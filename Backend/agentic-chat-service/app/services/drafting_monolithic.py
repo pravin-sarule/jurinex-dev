@@ -93,6 +93,15 @@ def _section_search_markers(sec: dict[str, Any]) -> list[str]:
     return out
 
 
+_MATCH_NORM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _norm_match(s: str) -> str:
+    """Alphanumeric-normalized text for tolerant containment checks — immune
+    to case, punctuation, `**bold**` markers, line wraps and whitespace runs."""
+    return _MATCH_NORM_RE.sub(" ", (s or "").lower()).strip()
+
+
 def find_missing_template_sections(
     sections: list[dict[str, Any]],
     draft_text: str,
@@ -101,10 +110,13 @@ def find_missing_template_sections(
 
     Used to drive completeness continuations when the model stops after the
     body/prayer and skips verification, signatures, list of documents, etc.
+    Matching is alnum-normalized: a heading the model bolded, re-cased or
+    wrapped across lines is still FOUND — a false 'missing' here triggers a
+    continuation call that can duplicate already-drafted content.
     """
     if not sections:
         return []
-    text_l = (draft_text or "").lower()
+    text_l = _norm_match(draft_text or "")
     if not text_l.strip():
         return list(sections)
     n = len(sections)
@@ -115,7 +127,7 @@ def find_missing_template_sections(
         markers = _section_search_markers(sec)
         if not markers:
             continue
-        present = any(m.lower() in text_l for m in markers)
+        present = any((mn := _norm_match(m)) and mn in text_l for m in markers)
         if present:
             continue
         heading_l = (sec.get("heading") or "").lower()
@@ -128,11 +140,21 @@ def find_missing_template_sections(
 
 
 def _completeness_continuation_prompt(
-    base_prompt: str,
     partial_text: str,
     missing_sections: list[dict[str, Any]],
+    facts_digest: str = "",
+    digest_cached: bool = False,
+    verified_fields_block: str = "",
+    has_docs: bool = True,
 ) -> str:
-    """User turn that forces the model to append only the missing template tail."""
+    """APPEND-ONLY user turn for the missing template tail.
+
+    Deliberately NOT the full drafting prompt: re-sending the whole
+    'draft the COMPLETE filing-ready document' instruction is what made
+    models restart from the caption and duplicate the entire draft below
+    itself. This turn carries only the grounding context, the missing
+    skeletons and the tail of what is already drafted.
+    """
     blocks: list[str] = []
     for s in missing_sections:
         sid = s.get("section_id", "")
@@ -147,23 +169,196 @@ def _completeness_continuation_prompt(
     names = ", ".join(
         (s.get("heading") or s.get("section_id") or "?").strip() for s in missing_sections
     )
+    facts_block = ""
+    if digest_cached:
+        facts_block = (
+            "Use the FACT INVENTORY provided in the cached context — every "
+            "substantive statement comes from it.\n"
+        )
+    elif facts_digest:
+        facts_block = (
+            f"FACT INVENTORY (sole content authority):\n<<<FACTS\n{facts_digest}\nFACTS>>>\n"
+        )
+    elif has_docs:
+        # Single-call mode (no pre-extracted digest): the raw supporting
+        # documents are re-attached to this request.
+        facts_block = (
+            "The supporting documents are ATTACHED to this request. Use ONLY "
+            "what they state as your fact source — nothing invented or "
+            "inferred beyond them.\n"
+        )
+    else:
+        facts_block = (
+            "No supporting documents — keep every template blank token exactly "
+            "(____, brackets); never invent facts.\n"
+        )
+    ledger_block = ""
+    if verified_fields_block:
+        ledger_block = (
+            f"VERIFIED FIELD LEDGER:\n<<<LEDGER\n{verified_fields_block}\nLEDGER>>>\n"
+        )
     return (
-        f"{base_prompt}\n\n"
-        "═══════════════════════════════════════════════════════════\n"
-        "COMPLETENESS CONTINUATION — the draft is INCOMPLETE.\n"
-        f"These template sections are still missing and MUST be appended now: {names}.\n"
-        "Rules:\n"
-        "- Continue EXACTLY where the partial draft ends (mid-sentence if needed).\n"
-        "- Do NOT repeat any earlier content.\n"
-        "- Append EVERY missing section below, in the order listed, using each "
-        "skeleton's format.\n"
-        "- After the last missing section the document is finished — stop.\n"
-        "═══════════════════════════════════════════════════════════\n"
+        "COMPLETENESS CONTINUATION — APPEND-ONLY TASK.\n"
+        "A court-ready document has ALREADY been drafted; its final portion is "
+        "inside <<<PARTIAL … PARTIAL>>> below. The template sections listed as "
+        f"MISSING ({names}) are the ONLY thing left to write.\n"
+        "HARD RULES:\n"
+        "- Do NOT restart, re-draft, repeat or summarize ANY earlier part of the "
+        "document.\n"
+        "- Do NOT output the court caption / cause title / party blocks again.\n"
+        "- Your output starts DIRECTLY with the first MISSING section's text and "
+        "ends after the last MISSING section — nothing before it, nothing after "
+        "it, no commentary.\n"
+        "- Fill facts ONLY from the fact inventory"
+        + (" / verified ledger" if verified_fields_block else "")
+        + "; missing values keep the skeleton's blank token or "
+        "[DATA NOT PROVIDED: <what>].\n"
+        "- Continue the existing paragraph numbering and annexure marks — never "
+        "renumber or restate earlier content.\n\n"
+        f"{facts_block}{ledger_block}\n"
         + "\n\n".join(blocks)
         + "\n\n<<<PARTIAL\n"
         + (partial_text[-8000:] if partial_text else "")
         + "\nPARTIAL>>>"
     )
+
+
+def _dedupe_continuation(existing: str, continuation: str) -> str:
+    """Strip from ``continuation`` leading/trailing runs that repeat ``existing``.
+
+    Models asked to 'continue' or 'append the missing tail' sometimes restart
+    the document from the caption instead — appending that verbatim duplicates
+    the whole draft below itself (the observed defect). Leading blocks already
+    present in the existing text are dropped: exact alnum-normalized
+    containment, or ≥80 % 8-word-shingle containment for lightly reworded
+    replays. Short ambiguous blocks (VERSUS, blanks, bare headings) are held
+    and resolved by the next definitive block. From the first genuinely new
+    block through the last, content is kept; a trailing replay run after that
+    (e.g. re-emitted PRAYER/VERIFICATION past a missing section) is also
+    dropped when it contains at least one long containment-confirmed replay.
+    Returns '' when nothing new remains; when nothing is dropped the
+    continuation is returned byte-identical.
+    """
+    cont = (continuation or "").strip("\n")
+    if not cont.strip():
+        return ""
+    if not (existing or "").strip():
+        return continuation
+    exist_n = _norm_match(existing)
+
+    def _is_replay(block_n: str) -> bool:
+        if len(block_n) >= 20 and block_n in exist_n:
+            return True
+        words = block_n.split()
+        if len(words) >= 12:
+            shingles = [" ".join(words[i:i + 8]) for i in range(0, len(words) - 7, 4)]
+            if shingles:
+                hits = sum(1 for s in shingles if s in exist_n)
+                return hits / len(shingles) >= 0.8
+        return False
+
+    blocks = re.split(r"\n{2,}", cont)
+    # duplicate flags: True (replay), False (new), None (too short to decide)
+    flags: list[Optional[bool]] = []
+    for block in blocks:
+        bn = _norm_match(block)
+        if not bn:
+            flags.append(None)
+        elif len(bn) >= 20:
+            flags.append(_is_replay(bn))
+        else:
+            flags.append(True if bn in exist_n else False)
+    # First definitively-new block starts the kept tail; ambiguous/short blocks
+    # directly before it (e.g. its heading) are kept with it. A short "new"
+    # block whose following long blocks are ALL replays is treated as a
+    # lightly-reworded caption line inside a restart (e.g. filled blank /
+    # case number) — keep searching so we do not commit the whole replay.
+    keep_from: Optional[int] = None
+    for i, flag in enumerate(flags):
+        if flag is not False:
+            continue
+        if len(_norm_match(blocks[i])) < 20:
+            long_ahead = [
+                flags[j]
+                for j in range(i + 1, min(i + 6, len(flags)))
+                if flags[j] is not None and len(_norm_match(blocks[j])) >= 20
+            ]
+            if long_ahead and all(x is True for x in long_ahead):
+                continue
+        keep_from = i
+        break
+    if keep_from is None:
+        return ""
+    while keep_from > 0 and flags[keep_from - 1] is None:
+        keep_from -= 1
+    # Symmetric trailing pass: drop a trailing run of replayed blocks after the
+    # last definitive new block (model over-continues past a missing section and
+    # re-emits already-present PRAYER / VERIFICATION). Only trim when the run
+    # contains at least one long containment-confirmed replay — short Place:/
+    # Dated: lines that normalize to earlier prose must not be clipped alone.
+    last_new = max(
+        (i for i, f in enumerate(flags) if f is False and i >= keep_from),
+        default=keep_from,
+    )
+    keep_to = len(blocks)
+    j = len(flags) - 1
+    while j > last_new and flags[j] is not False:
+        if flags[j] is True or (flags[j] is None and keep_to == j + 1):
+            keep_to = j
+        j -= 1
+    if keep_to < len(blocks) and not any(
+        flags[k] is True and len(_norm_match(blocks[k])) >= 20
+        for k in range(keep_to, len(blocks))
+    ):
+        keep_to = len(blocks)
+    if keep_from == 0 and keep_to == len(blocks):
+        return continuation  # nothing dropped — preserve formatting exactly
+    return "\n\n".join(blocks[keep_from:keep_to]).strip("\n")
+
+
+def _trim_overlap(existing: str, new_part: str, max_window: int = 400) -> str:
+    """Drop a short head of ``new_part`` that verbatim-repeats the tail of
+    ``existing`` — models often re-emit the last few words before continuing
+    mid-sentence. Only a significant overlap (≥12 normalized chars AND ≥3
+    words) is trimmed, so a new sentence that merely opens with a common
+    two-word phrase ("The Plaintiff …") is never mangled."""
+    if not existing or not new_part:
+        return new_part
+    e_tail = _norm_match(existing[-2000:])
+    best = 0
+    for k in range(12, min(max_window, len(new_part)) + 1):
+        head_n = _norm_match(new_part[:k])
+        if (
+            len(head_n) >= 12
+            and head_n.count(" ") >= 2
+            and e_tail.endswith(head_n)
+        ):
+            best = k
+    return new_part[best:].lstrip(" \t") if best else new_part
+
+
+def _join_continuation(existing: str, new_part: str) -> str:
+    """Stitch a deduplicated continuation onto the draft — with a space when it
+    resumes mid-sentence, otherwise as a new paragraph."""
+    if not (existing or "").strip():
+        return new_part
+    if not (new_part or "").strip():
+        return existing
+    e = existing.rstrip()
+    n = new_part.strip("\n")
+    first = n.lstrip()
+    # Table continuation: rejoin rows with a single newline — a blank line
+    # would terminate the markdown table and orphan the remaining rows.
+    if e.endswith("|") and first.startswith("|"):
+        return e + "\n" + first
+    mid_sentence = (
+        first
+        and not re.search(r'[.:;!?|"”\)\]]\s*$', e)
+        and (first[0].islower() or first[0] in ",;)")
+    )
+    if mid_sentence:
+        return e + " " + first
+    return e + "\n\n" + n
 
 
 def split_monolithic_output(text: str, sections: list[dict[str, Any]]) -> dict[str, str]:
@@ -218,6 +413,7 @@ def build_monolithic_prompt(
     interest_pairing_table: str = "",
     field_coverage_checklist: str = "",
     source_docs_text: str = "",
+    verified_fields_block: str = "",
 ) -> str:
     """Single user turn for one-shot drafting."""
     title = structure.get("document_title") or "Draft Document"
@@ -359,6 +555,23 @@ def build_monolithic_prompt(
             "\nNo supporting documents — keep every template blank token exactly "
             "(____, brackets, underscores). Use a plain blank (____) for narrative "
             "gaps; never invent facts.\n"
+        )
+    verified_block = ""
+    if verified_fields_block:
+        verified_block = (
+            "\nVERIFIED FIELD LEDGER (Stage-2 grounded extraction — every VERIFIED "
+            "value below was programmatically matched verbatim against its cited "
+            "source document):\n"
+            f"<<<LEDGER\n{verified_fields_block}\nLEDGER>>>\n"
+            "LEDGER RULES:\n"
+            "- VERIFIED values fill their template slots character-for-character.\n"
+            "- MISSING fields: never guess — keep the skeleton blank token or "
+            "[DATA NOT PROVIDED: <field>] per the missing-value algorithm.\n"
+            "- CONFLICT fields: never silently pick one — use the value the FACT "
+            "INVENTORY confirms; if still unresolved, treat as missing.\n"
+            "- UNVERIFIED citations: treat as missing unless the FACT INVENTORY "
+            "independently states the value.\n"
+            "- Never print ledger provenance ([source: …]) into the draft.\n"
         )
     source_block = ""
     if source_docs_text:
@@ -522,7 +735,7 @@ def build_monolithic_prompt(
         f"Draft the COMPLETE filing-ready document.\n"
         f"(Internal label only — do NOT print this as a cover title: {title})\n"
         f"Document type: {doc_type or structure.get('document_type', '')}\n"
-        f"{type_block}{facts_block}{source_block}{factual_block}{coverage_block}"
+        f"{type_block}{facts_block}{verified_block}{source_block}{factual_block}{coverage_block}"
         f"{exhibit_block}{interest_block}{chrono_block}{section_coverage_block}"
         f"{blank_rules}{length_block}{extra}\n"
         "TEMPLATE SECTIONS (reproduce each section's format exactly; fill from the inventory only):\n"
@@ -701,6 +914,8 @@ class MonolithicDraftContext:
     interest_pairing_table: str = ""
     field_coverage_checklist: str = ""
     source_docs_text: str = ""
+    # Stage-2 grounded extraction ledger (verified/missing/conflict/unverified).
+    verified_fields_block: str = ""
 
 
 class MonolithicDraftingStrategy(DraftingStrategy):
@@ -719,6 +934,7 @@ class MonolithicDraftingStrategy(DraftingStrategy):
             interest_pairing_table=ctx.interest_pairing_table or "",
             field_coverage_checklist=ctx.field_coverage_checklist or "",
             source_docs_text=ctx.source_docs_text or "",
+            verified_fields_block=ctx.verified_fields_block or "",
         )
         input_hash = _sha256(prompt)
         started = time.monotonic()
@@ -757,10 +973,22 @@ class MonolithicDraftingStrategy(DraftingStrategy):
         degen_trips = 0
 
         # Continuation attempts stitch the tail when a pass hits the output
-        # ceiling OR trips the degeneracy breaker — a draft is never truncated
-        # and a runaway frame-character loop is cut instead of billed out.
-        for attempt in range(4):
-            prompt_text = prompt if attempt == 0 else (
+        # ceiling, trips the degeneracy breaker, or the stream dies mid-way —
+        # a draft is never truncated and a runaway loop is cut, not billed out.
+        #
+        # DUPLICATION GUARDS (the "document repeats itself below" defect):
+        # - continuation output is BUFFERED, deduplicated against the existing
+        #   text and only the genuinely new tail is appended/streamed — a
+        #   model that restarts from the caption contributes nothing instead
+        #   of doubling the draft;
+        # - a mid-stream failure after substantial streamed text NEVER reruns
+        #   the full prompt on the next model in the chain (the next model
+        #   would re-draft from the top on top of the partial) — it resumes
+        #   through a buffered continuation attempt instead.
+        stalls = 0
+        for attempt in range(6):
+            is_continuation = attempt > 0
+            prompt_text = prompt if not is_continuation else (
                 f"{prompt}\n\nYou already produced the beginning of the document below; "
                 "continue EXACTLY where it stops (mid-sentence if necessary), without "
                 "repeating anything:\n"
@@ -773,7 +1001,11 @@ class MonolithicDraftingStrategy(DraftingStrategy):
 
             attempt_ok = False
             degenerate = False
+            mid_stream_cut = False
+            cont_buffer = ""
             for draft_model in ctx.model_chain:
+                cont_buffer = ""            # a failed model's partial never leaks
+                attempt_base_len = len(full_text)
                 try:
                     stream = (
                         _iter_claude_chunks(
@@ -786,15 +1018,22 @@ class MonolithicDraftingStrategy(DraftingStrategy):
                     async for item in stream:
                         if item["kind"] == "chunk":
                             raw = ctx.strip_markers(item["text"])
-                            full_text += raw
-                            if _is_degenerate_tail(full_text):
-                                # Abort the stream (stops token billing) and
-                                # resume from the last good text.
-                                degenerate = True
-                                break
-                            clean = cleaner.feed(raw)
-                            if clean:
-                                yield {"type": "document_chunk", "text": clean}
+                            if is_continuation:
+                                # Buffer — appended only after deduplication.
+                                cont_buffer += raw
+                                if _is_degenerate_tail(full_text + cont_buffer):
+                                    degenerate = True
+                                    break
+                            else:
+                                full_text += raw
+                                if _is_degenerate_tail(full_text):
+                                    # Abort the stream (stops token billing) and
+                                    # resume from the last good text.
+                                    degenerate = True
+                                    break
+                                clean = cleaner.feed(raw)
+                                if clean:
+                                    yield {"type": "document_chunk", "text": clean}
                         elif item["kind"] == "done":
                             usage = item.get("usage") or {}
                             finish_reason = item.get("finish_reason")
@@ -814,26 +1053,85 @@ class MonolithicDraftingStrategy(DraftingStrategy):
                 except Exception as exc:
                     last_err = exc
                     logger.warning("Monolithic draft model %s failed: %s", draft_model, exc)
+                    if not is_continuation:
+                        if len(full_text) - attempt_base_len > 800:
+                            # Substantial text already streamed to the user:
+                            # the next model must CONTINUE it, never restart it.
+                            mid_stream_cut = True
+                            break
+                        # Tiny partial from the failed model: discard it so the
+                        # next model's fresh draft doesn't stack on top of it
+                        # (document_end carries the clean text either way).
+                        full_text = full_text[:attempt_base_len]
+
+            # Append a continuation attempt's buffer — deduplicated first.
+            progressed = not is_continuation
+            if is_continuation and cont_buffer:
+                if degenerate:
+                    cont_buffer = re.sub(r"[-_=|+.:\s]{120,}$", "\n", cont_buffer)
+                new_part = _trim_overlap(
+                    full_text, _dedupe_continuation(full_text, cont_buffer)
+                )
+                if new_part.strip():
+                    progressed = True
+                    base = full_text.rstrip()
+                    full_text = _join_continuation(full_text, new_part)
+                    emitted = full_text[len(base):]
+                    local_cleaner = _TagStreamCleaner()
+                    clean = local_cleaner.feed(emitted) + local_cleaner.flush()
+                    if clean:
+                        yield {"type": "document_chunk", "text": clean}
+                else:
+                    logger.warning(
+                        "Monolithic continuation returned only duplicate content "
+                        "(%s chars discarded)", len(cont_buffer),
+                    )
+
             if not attempt_ok:
-                if attempt == 0:
+                if mid_stream_cut and attempt < 5:
+                    yield {"type": "status",
+                           "message": "Stream interrupted mid-draft — resuming from the last good text…"}
+                    continue
+                if attempt == 0 and len(full_text.strip()) < 800:
                     yield {"type": "error", "message": f"Monolithic draft failed: {last_err}"}
                     return
                 break
             succeeded = True
             if degenerate and degen_trips < 2:
                 degen_trips += 1
-                full_text = re.sub(r"[-_=|+.:\s]{120,}$", "\n", full_text)
+                if not is_continuation:
+                    full_text = re.sub(r"[-_=|+.:\s]{120,}$", "\n", full_text)
                 yield {"type": "status",
                        "message": "Repetition detected — resuming from the last good text…"}
                 continue
-            if str(finish_reason) in ("FinishReason.MAX_TOKENS", "MAX_TOKENS") and attempt < 3:
+            if str(finish_reason) in ("FinishReason.MAX_TOKENS", "MAX_TOKENS") and attempt < 5:
+                if not progressed:
+                    stalls += 1
+                    if stalls >= 2:
+                        logger.warning("Monolithic continuations stalled twice — stopping.")
+                        break
+                else:
+                    stalls = 0
                 yield {"type": "status",
                        "message": "Output limit reached — continuing the document…"}
                 continue
             break
 
+        # A mid-stream cut on the final allowed attempt (or exhausted chain)
+        # leaves a substantial partial draft — keep it and let the
+        # completeness pass append whatever template tail is still missing.
+        if not succeeded and len(full_text.strip()) >= 800:
+            succeeded = True
+            yield {"type": "status",
+                   "message": "Draft stream ended early — keeping the drafted text and "
+                              "appending any missing template sections…"}
+
         # Completeness continuations: if the model stopped early (common after
-        # prayer/body), append the missing template tail sections.
+        # prayer/body), append the missing template tail sections. Output is
+        # BUFFERED and deduplicated — a model that re-drafts the document
+        # instead of appending the tail contributes only the new sections, and
+        # a continuation that adds nothing new stops the loop (this was the
+        # "same content repeats again and again" defect).
         for comp_attempt in range(3):
             missing = find_missing_template_sections(ctx.sections, full_text)
             if not missing:
@@ -848,14 +1146,22 @@ class MonolithicDraftingStrategy(DraftingStrategy):
                     + ("…" if len(missing) > 6 else "")
                 ),
             }
-            prompt_text = _completeness_continuation_prompt(prompt, full_text, missing)
+            prompt_text = _completeness_continuation_prompt(
+                full_text, missing,
+                facts_digest=ctx.facts_digest if (ctx.has_docs and not ctx.digest_cached) else "",
+                digest_cached=ctx.digest_cached,
+                verified_fields_block=ctx.verified_fields_block or "",
+                has_docs=ctx.has_docs,
+            )
             parts = [gt.Part(text=prompt_text)]
             if ctx.inline_parts:
                 parts = [*ctx.inline_parts, gt.Part(text=prompt_text)]
             contents = [gt.Content(role="user", parts=parts)]
             attempt_ok = False
             degenerate = False
+            cont_buffer = ""
             for draft_model in ctx.model_chain:
+                cont_buffer = ""            # a failed model's partial never leaks
                 try:
                     stream = (
                         _iter_claude_chunks(
@@ -868,13 +1174,10 @@ class MonolithicDraftingStrategy(DraftingStrategy):
                     async for item in stream:
                         if item["kind"] == "chunk":
                             raw = ctx.strip_markers(item["text"])
-                            full_text += raw
-                            if _is_degenerate_tail(full_text):
+                            cont_buffer += raw
+                            if _is_degenerate_tail(full_text + cont_buffer):
                                 degenerate = True
                                 break
-                            clean = cleaner.feed(raw)
-                            if clean:
-                                yield {"type": "document_chunk", "text": clean}
                         elif item["kind"] == "done":
                             usage = item.get("usage") or {}
                             finish_reason = item.get("finish_reason")
@@ -905,7 +1208,30 @@ class MonolithicDraftingStrategy(DraftingStrategy):
                 )
                 break
             if degenerate:
-                full_text = re.sub(r"[-_=|+.:\s]{120,}$", "\n", full_text)
+                cont_buffer = re.sub(r"[-_=|+.:\s]{120,}$", "\n", cont_buffer)
+            new_part = _trim_overlap(
+                full_text, _dedupe_continuation(full_text, cont_buffer)
+            )
+            if not new_part.strip():
+                logger.warning(
+                    "Completeness continuation returned only duplicate content "
+                    "(%s chars discarded) — stopping to avoid repeating the "
+                    "document; still missing: %s",
+                    len(cont_buffer),
+                    [s.get("heading") or s.get("section_id") for s in missing],
+                )
+                yield {"type": "status",
+                       "message": "Completeness pass returned no new content — "
+                                  "stopped to avoid duplicating the draft."}
+                break
+            base = full_text.rstrip()
+            full_text = _join_continuation(full_text, new_part)
+            emitted = full_text[len(base):]
+            local_cleaner = _TagStreamCleaner()
+            clean = local_cleaner.feed(emitted) + local_cleaner.flush()
+            if clean:
+                yield {"type": "document_chunk", "text": clean}
+            if degenerate:
                 continue
             if str(finish_reason) in ("FinishReason.MAX_TOKENS", "MAX_TOKENS"):
                 continue
@@ -948,6 +1274,21 @@ class MonolithicDraftingStrategy(DraftingStrategy):
             last_usage.get("inputTokens", 0), last_usage.get("outputTokens", 0),
             input_hash, _sha256(full_text),
         )
+
+        # FINAL DUPLICATION NET: if a full second copy of the document still
+        # slipped through (restarted stream, model ignoring append-only
+        # instructions), cut everything from the point where the document
+        # verbatim-restarts. document_end/document_replace carry this clean
+        # text, so the frontend recovers even if duplicates streamed live.
+        try:
+            from app.services.draft_repairs import _strip_restarted_document
+            full_text, _restarts = _strip_restarted_document(full_text)
+            if _restarts:
+                yield {"type": "status",
+                       "message": "Removed duplicated re-drafted content that was "
+                                  "appended after the document end."}
+        except Exception:
+            logger.debug("Restart-strip net skipped", exc_info=True)
 
         # Persisted output gets the same cleanup as the live stream: dash-flood
         # collapse plus stray tag stripping (belt-and-braces — tags are no

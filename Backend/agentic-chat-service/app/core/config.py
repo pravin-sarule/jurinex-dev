@@ -57,8 +57,10 @@ class Settings(BaseSettings):
     gcp_location: str = Field(default="us-central1", validation_alias=AliasChoices("GCP_LOCATION"))
     gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY"))
     adk_model: str = Field(default="gemini-2.5-pro", validation_alias=AliasChoices("ADK_MODEL"))
+    # Gemini explicit-cache lifetime. 5 minutes of inactivity auto-deletes the
+    # cache; the next prompt transparently rebuilds it from the ADK session.
     context_cache_ttl_seconds: int = Field(
-        default=600, validation_alias=AliasChoices("CONTEXT_CACHE_TTL_SECONDS", "GEMINI_CACHE_TTL_SECONDS")
+        default=300, validation_alias=AliasChoices("CONTEXT_CACHE_TTL_SECONDS", "GEMINI_CACHE_TTL_SECONDS")
     )
 
 

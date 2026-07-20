@@ -80,7 +80,7 @@ def _fallback_allow() -> dict[str, Any]:
     }
 
 
-def check_token_availability(
+async def check_token_availability(
     user_id: str | int,
     *,
     estimated_tokens: int = 0,
@@ -94,18 +94,19 @@ def check_token_availability(
 
     url = f"{PAYMENT_SERVICE_URL}/api/user-resources/internal/token-check"
     try:
-        resp = httpx.post(
-            url,
-            json={
-                "userId": uid,
-                "estimatedTokens": max(0, int(estimated_tokens or 0)),
-                "service": service or SERVICE_NAME,
-                "endpoint": endpoint,
-                "checkFirmCap": check_firm_cap,
-            },
-            headers={"x-internal-service": service or SERVICE_NAME},
-            timeout=8.0,
-        )
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                url,
+                json={
+                    "userId": uid,
+                    "estimatedTokens": max(0, int(estimated_tokens or 0)),
+                    "service": service or SERVICE_NAME,
+                    "endpoint": endpoint,
+                    "checkFirmCap": check_firm_cap,
+                },
+                headers={"x-internal-service": service or SERVICE_NAME},
+                timeout=8.0,
+            )
 
         if resp.status_code == 404 or resp.status_code >= 500:
             logger.warning(

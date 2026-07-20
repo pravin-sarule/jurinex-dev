@@ -33,7 +33,7 @@ class PaymentTokenGuardMiddleware(BaseHTTPMiddleware):
                 content={"success": False, "message": "Authentication required"},
             )
 
-        result = check_token_availability(
+        result = await check_token_availability(
             user_id,
             endpoint=path,
             service="agentic-chat-service",

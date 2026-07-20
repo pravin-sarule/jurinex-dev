@@ -60,6 +60,7 @@ def _build_rows(
     answer_length: int | None = None,
     chunks_received: int | None = None,
     cache_mechanism: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> list[tuple[str, str]]:
     usage = usage or {}
     resolved_model = (
@@ -94,9 +95,11 @@ def _build_rows(
         [
             ("Input Tokens", _fmt_int(input_tokens)),
             ("Output Tokens", _fmt_int(output_tokens)),
-            ("Total Tokens", _fmt_int(total_tokens)),
         ]
     )
+    if max_output_tokens is not None:
+        rows.append(("Max Output (config)", _fmt_int(max_output_tokens)))
+    rows.append(("Total Tokens", _fmt_int(total_tokens)))
 
     cached = usage.get("cachedTokens") or usage.get("cached_tokens")
     new_prompt = usage.get("newPromptTokens") or usage.get("new_prompt_tokens")
@@ -128,6 +131,7 @@ def format_token_usage_table(
     answer_length: int | None = None,
     chunks_received: int | None = None,
     cache_mechanism: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> str:
     rows = _build_rows(
         usage,
@@ -138,6 +142,7 @@ def format_token_usage_table(
         answer_length=answer_length,
         chunks_received=chunks_received,
         cache_mechanism=cache_mechanism,
+        max_output_tokens=max_output_tokens,
     )
 
     label_width = max(len(label) for label, _ in rows)
@@ -176,6 +181,7 @@ def log_token_usage_table(
     answer_length: int | None = None,
     chunks_received: int | None = None,
     cache_mechanism: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> None:
     """Log input/output/total token usage in a readable ASCII table after response completion."""
     table = format_token_usage_table(
@@ -188,5 +194,6 @@ def log_token_usage_table(
         answer_length=answer_length,
         chunks_received=chunks_received,
         cache_mechanism=cache_mechanism,
+        max_output_tokens=max_output_tokens,
     )
     logger.info(table)

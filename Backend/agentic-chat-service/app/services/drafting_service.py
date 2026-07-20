@@ -70,6 +70,15 @@ from app.services.draft_repairs import (
     _monolithic_deterministic_repairs,
     _table_mark_collisions,
 )
+from app.services.draft_grounded_extraction import (
+    extract_grounded_fields,
+    render_verified_fields_block,
+    summarize_field_review,
+    validate_extracted_fields,
+)
+from app.services.draft_ingestion import run_ingestion_check
+from app.services.draft_run_log import DraftRunLogger
+from app.services.draft_verification import run_discrepancy_review
 from app.services.drafting_strategy_base import DraftMetadata
 from app.services.gcs_service import download_object_buffer, upload_file_to_gcs
 from app.services.llm_service import build_model_list
@@ -114,6 +123,16 @@ MONO_CLAUDE_ATTACH_SOURCE_DOCS = os.environ.get(
 # Tight caps when Claude does attach source text (chars, not tokens).
 MONO_CLAUDE_SOURCE_MAX_PER_DOC = int(os.environ.get("DRAFT_MONO_CLAUDE_SOURCE_MAX_PER_DOC", "6000"))
 MONO_CLAUDE_SOURCE_MAX_TOTAL = int(os.environ.get("DRAFT_MONO_CLAUDE_SOURCE_MAX_TOTAL", "20000"))
+# ── 4-stage zero-hallucination pipeline (monolithic strategy) ──
+# Stage 1 ingestion check (fail-loud, OCR flags, batch plan) → Stage 2
+# grounded extraction (response_schema, cited, programmatically validated) →
+# Stage 3 draft from verified facts → Stage 4 adversarial verification
+# (report-only discrepancy report). The staging is a deliberate
+# anti-hallucination measure — never collapse it back into one call.
+GROUNDED_PIPELINE_ENABLED = os.environ.get(
+    "DRAFT_GROUNDED_PIPELINE", "true"
+).strip().lower() not in ("false", "0", "no")
+DISCREPANCY_TIMEOUT_S = int(os.environ.get("DRAFT_DISCREPANCY_TIMEOUT_SECONDS", "90"))
 # Fact extraction is mechanical verbatim copying — route it to a cheap fast
 # model instead of the (often expensive) session model. Biggest input of the
 # whole pipeline is the raw documents read here, ONCE.
@@ -2136,6 +2155,58 @@ async def generate_draft_loop(
 
     yield {"type": "status", "message": f"Preparing context ({len(docs)} supporting document(s))…"}
 
+    # ── 4-STAGE PIPELINE (monolithic): Stage 1 — Document Ingestion Check.
+    # Zero-LLM, fail-loud: every blob must resolve and carry an allowed MIME
+    # type; scanned/image documents are flagged OCR-derived (read visually by
+    # Gemini, higher scrutiny downstream); page/token counts are logged; and
+    # an oversized corpus is split into extraction batches, never truncated.
+    grounded_pipeline = GROUNDED_PIPELINE_ENABLED and strategy == "monolithic"
+    run_log: Optional[DraftRunLogger] = DraftRunLogger(session_id) if grounded_pipeline else None
+    ingestion_report: dict[str, Any] = {}
+    ingested_texts: dict[str, str] = {}
+    if grounded_pipeline and docs:
+        yield {"type": "status",
+               "message": "Stage 1/4 — ingestion check (storage, MIME types, text layers, token counts)…"}
+        try:
+            ingestion_report, ingested_texts = await loop.run_in_executor(
+                None, run_ingestion_check, docs,
+            )
+        except Exception as exc:
+            logger.exception("Ingestion check crashed")
+            ingestion_report = {"ok": False, "fatal": [f"ingestion check failed: {exc}"],
+                                "documents": [], "batches": [], "ocr_derived_docs": []}
+        if run_log:
+            run_log.log_stage("ingestion_check", ingestion_report)
+        yield {
+            "type": "ingestion_report",
+            "runId": run_log.run_id if run_log else None,
+            "ok": bool(ingestion_report.get("ok")),
+            "documents": ingestion_report.get("documents") or [],
+            "totalEstTokens": ingestion_report.get("total_est_tokens", 0),
+            "batches": len(ingestion_report.get("batches") or []),
+            "ocrDerivedDocs": ingestion_report.get("ocr_derived_docs") or [],
+        }
+        if not ingestion_report.get("ok", True):
+            # FAIL LOUDLY — a document the model cannot read must never be
+            # silently skipped in a legal draft.
+            msg = "; ".join(ingestion_report.get("fatal") or ["unknown ingestion failure"])
+            await _safe_update_session(session_id, status="generation_failed", error=msg)
+            yield {"type": "error",
+                   "message": f"Stage 1 ingestion check failed — {msg}. "
+                              "Fix or re-upload the affected document(s), then regenerate."}
+            return
+        _ocr_docs = ingestion_report.get("ocr_derived_docs") or []
+        if _ocr_docs:
+            yield {"type": "status",
+                   "message": "OCR-derived document(s) — no text layer, read visually, "
+                              "flagged for higher scrutiny: " + ", ".join(_ocr_docs[:6])
+                              + ("…" if len(_ocr_docs) > 6 else "")}
+        if len(ingestion_report.get("batches") or []) > 1:
+            yield {"type": "status",
+                   "message": f"Corpus ~{ingestion_report.get('total_est_tokens', 0):,} est. tokens — "
+                              f"extraction will run in {len(ingestion_report['batches'])} batches "
+                              "(no truncation)."}
+
     # Engine selection: Google ADK agent with automatic ContextCacheConfig
     # caching (default), falling back to the direct genai path with a manually
     # managed explicit cache if ADK is unavailable or fails mid-draft.
@@ -2249,6 +2320,9 @@ async def generate_draft_loop(
                 _record_call(call_ledger, "fact_extraction",
                              "Fact inventory (librarian pass over all documents)",
                              DRAFT_EXTRACT_MODEL, _usage_delta(_before_digest, total_usage))
+                if run_log:
+                    run_log.log_stage("fact_extraction",
+                                      {"chars": len(facts_digest), "digest": facts_digest})
                 yield {"type": "status",
                        "message": f"Fact inventory ready ({len(facts_digest):,} chars) — drafting…"}
         except Exception as exc:
@@ -2308,6 +2382,71 @@ async def generate_draft_loop(
         )
         yield {"type": "status",
                "message": "Applying user-confirmed facts from this session…"}
+
+    # ── Stage 2 — Grounded Extraction: one controlled-generation call per
+    # ingestion batch (response_schema makes the citation field impossible to
+    # skip), then a ZERO-LLM validation confirms every source_snippet is an
+    # actual substring of the cited document. Only verified values reach the
+    # drafter; missing / conflicting / unverified fields are withheld and
+    # surfaced in the review packet instead. ──
+    grounded_fields: list[dict[str, Any]] = []
+    verified_fields_block = ""
+    field_review: dict[str, Any] = {}
+    if grounded_pipeline and docs and not _mono_skip_extraction:
+        yield {"type": "status",
+               "message": "Stage 2/4 — grounded field extraction (schema-enforced source citations)…"}
+        _before_grounded = dict(total_usage)
+        try:
+            # Heartbeat: keep the SSE connection alive during the extraction
+            # call (same pattern as the digest pass).
+            grounded_task = asyncio.ensure_future(extract_grounded_fields(
+                docs=docs,
+                batches=ingestion_report.get("batches")
+                or [[str(d.get("doc_id") or d.get("name") or "") for d in docs]],
+                structure=structure,
+                model=DRAFT_EXTRACT_MODEL,
+                usage_sink=total_usage,
+            ))
+            _waited = 0
+            while True:
+                try:
+                    raw_fields = await asyncio.wait_for(asyncio.shield(grounded_task), timeout=12)
+                    break
+                except asyncio.TimeoutError:
+                    _waited += 12
+                    yield {"type": "status",
+                           "message": f"Stage 2/4 — extracting cited fields… ({_waited}s)"}
+            _record_call(call_ledger, "grounded_extraction",
+                         "Grounded field extraction (structured, cited)",
+                         DRAFT_EXTRACT_MODEL, _usage_delta(_before_grounded, total_usage))
+            grounded_fields = validate_extracted_fields(
+                raw_fields, docs, ingested_texts, ingestion_report,
+            )
+            verified_fields_block = render_verified_fields_block(grounded_fields)
+            field_review = summarize_field_review(grounded_fields)
+            await _safe_update_session(session_id, grounded_facts={
+                "runId": run_log.run_id if run_log else None,
+                "fields": grounded_fields,
+                "summary": {k: field_review.get(k) for k in
+                            ("total", "verified", "missing", "conflicts", "unverified")},
+            })
+            if run_log:
+                run_log.log_stage("grounded_extraction",
+                                  {"fields": grounded_fields, "summary": field_review})
+            yield {"type": "status",
+                   "message": (f"Grounded extraction: {field_review.get('verified', 0)} verified, "
+                               f"{field_review.get('missing', 0)} missing, "
+                               f"{field_review.get('conflicts', 0)} conflict(s), "
+                               f"{field_review.get('unverified', 0)} unverified citation(s).")}
+        except Exception as exc:
+            logger.warning("Grounded extraction failed: %s", exc)
+            field_review = {"error": str(exc)}
+            if run_log:
+                run_log.log_stage("grounded_extraction", {"error": str(exc)}, kind="error")
+            yield {"type": "status",
+                   "message": f"Stage 2 grounded extraction unavailable ({exc}) — "
+                              "drafting continues from the fact inventory only "
+                              "(flagged in the review packet)."}
 
     # ── ISOLATED WORKER CONTEXT (SPEC 2+3): every section call is stateless;
     # the stable global block (outline + fact inventory) is pinned at the
@@ -2466,7 +2605,19 @@ async def generate_draft_loop(
             interest_pairing_table=_interest_pairing_for_prompt(facts_digest),
             field_coverage_checklist=_field_coverage_for_prompt(facts_digest),
             source_docs_text=_mono_source_docs_text,
+            verified_fields_block=verified_fields_block,
         )
+        if grounded_pipeline:
+            yield {"type": "status",
+                   "message": "Stage 3/4 — drafting from verified facts "
+                              "(fact inventory + verified field ledger)…"}
+            if run_log:
+                run_log.log_stage("drafting", {
+                    "model": model,
+                    "digest_chars": len(facts_digest or ""),
+                    "verified_fields_block": verified_fields_block,
+                    "user_instructions": user_instructions or "",
+                }, kind="input")
         drafted_records: list[dict[str, Any]] = []
         completed = 0
         async for evt in MonolithicDraftingStrategy().draft(mono_ctx):
@@ -2478,6 +2629,12 @@ async def generate_draft_loop(
             if evt.get("type", "").startswith("_"):
                 continue
             yield evt
+        if run_log and drafted_records:
+            run_log.log_stage("drafting", {
+                "model": getattr(draft_metadata, "model", None) or model,
+                "chars": len(drafted_records[0].get("content") or ""),
+                "text": drafted_records[0].get("content") or "",
+            })
         sequential_sections: list[dict[str, Any]] = []
 
     run_section_loops = strategy == "sectionwise"
@@ -3110,6 +3267,7 @@ async def generate_draft_loop(
             fresh = await loop.run_in_executor(None, repo.get_session, session_id, user_id)
             all_secs = (fresh or {}).get("draft_sections") or []
             violations: list[Any] = []
+            mono_qa: dict[str, Any] = {}  # deterministic-repairs QA snapshot → review packet
 
             # ── Deterministic normalization: continuous paragraph numbering +
             # compact annexure series — guaranteed, not model-dependent. ──
@@ -3151,6 +3309,11 @@ async def generate_draft_loop(
                                "index": doc_rec.get("index", 0), "text": new_txt}
                         yield {"type": "document_replace", "text": new_txt}
                         msgs = []
+                        if repair_info.get("restarted_copies_removed"):
+                            msgs.append(
+                                "removed duplicated re-drafted content appended "
+                                "after the document end"
+                            )
                         if repair_info.get("cause_title_deduped"):
                             msgs.append("cause title de-duplicated")
                         if repair_info.get("option_menu_narrowed"):
@@ -3237,8 +3400,7 @@ async def generate_draft_loop(
                                             "of these marks and the List of Documents rows should "
                                             "be checked against the new register."}
                     # QA report (extends existing SSE contract — no new event type)
-                    yield {
-                        "type": "qa_report",
+                    mono_qa = {
                         "toBeConfirmed": [
                             {
                                 "label": item.get("value", "")[:80],
@@ -3260,6 +3422,7 @@ async def generate_draft_loop(
                         "annexureCount": int(annex_info.get("count") or 0),
                         "fieldSwapsFixed": list(repair_info.get("field_swaps_fixed") or []),
                     }
+                    yield {"type": "qa_report", **mono_qa}
                 except Exception as exc:
                     logger.warning("Monolithic deterministic repairs skipped: %s", exc)
 
@@ -3384,6 +3547,108 @@ async def generate_draft_loop(
                                       "(deterministic repairs applied; no extra LLM revision)."}
                 else:
                     yield {"type": "status", "message": "Draft complete."}
+
+                # ── Stage 4 — Adversarial Verification Pass (report-only).
+                # A SEPARATE model call: draft + source material → every
+                # sentence with no direct source support. It NEVER modifies
+                # the draft; the report rides the review packet for the human
+                # legal reviewer to read first. ──
+                discrepancy_items: list[dict[str, Any]] = []
+                verification_error = ""
+                if grounded_pipeline and all_secs and docs:
+                    yield {"type": "status",
+                           "message": "Stage 4/4 — adversarial verification pass "
+                                      "(discrepancy report; the draft is not modified)…"}
+                    _before_verify = dict(total_usage)
+                    try:
+                        _verify_task = asyncio.ensure_future(run_discrepancy_review(
+                            draft_text=all_secs[0].get("content") or "",
+                            facts_digest=facts_digest or "",
+                            verified_fields_block=verified_fields_block,
+                            source_docs_text=_mono_source_docs_text or "",
+                            model=DRAFT_MONO_AUDIT_MODEL,
+                            usage_sink=total_usage,
+                            timeout_s=float(DISCREPANCY_TIMEOUT_S),
+                        ))
+                        _vwaited = 0
+                        while True:
+                            try:
+                                d_report = await asyncio.wait_for(
+                                    asyncio.shield(_verify_task), timeout=12)
+                                break
+                            except asyncio.TimeoutError:
+                                _vwaited += 12
+                                yield {"type": "status",
+                                       "message": f"Stage 4/4 — verifying draft against source… ({_vwaited}s)"}
+                        _record_call(call_ledger, "verification",
+                                     "Adversarial discrepancy review (Stage 4)",
+                                     DRAFT_MONO_AUDIT_MODEL,
+                                     _usage_delta(_before_verify, total_usage))
+                        if d_report is None:
+                            verification_error = "verification model unavailable or timed out"
+                            yield {"type": "status",
+                                   "message": "Stage 4 verification unavailable — "
+                                              "flagged in the review packet."}
+                        else:
+                            discrepancy_items = [i.model_dump() for i in d_report.items]
+                            unsupported_n = sum(
+                                1 for i in discrepancy_items
+                                if i.get("verdict") == "NO_SOURCE_SUPPORT_FOUND"
+                            )
+                            yield {"type": "discrepancy_report",
+                                   "items": discrepancy_items,
+                                   "unsupportedCount": unsupported_n}
+                            yield {"type": "status",
+                                   "message": (f"Verification pass: {unsupported_n} draft "
+                                               "statement(s) with NO SOURCE SUPPORT — see "
+                                               "the review packet."
+                                               if unsupported_n else
+                                               "Verification pass: every substantive statement "
+                                               "traced to source.")}
+                            if run_log:
+                                run_log.log_stage("verification", {"items": discrepancy_items})
+                    except Exception as exc:
+                        verification_error = str(exc)
+                        logger.warning("Discrepancy review failed: %s", exc)
+                        yield {"type": "status",
+                               "message": f"Stage 4 verification failed ({exc}) — "
+                                          "flagged in the review packet."}
+
+                # ── REVIEW PACKET — the single surface the human reviewer
+                # reads FIRST: ingestion flags, missing/conflicting/unverified
+                # fields, provenance flags, QA register, grounding notes and
+                # the Stage-4 discrepancy report — never buried in logs.
+                # (Template-only drafts have no sources to verify — no packet.) ──
+                if grounded_pipeline and docs:
+                    review_packet = {
+                        "runId": run_log.run_id if run_log else None,
+                        "strategy": "monolithic",
+                        "ingestion": {
+                            "documents": ingestion_report.get("documents") or [],
+                            "ocrDerivedDocs": ingestion_report.get("ocr_derived_docs") or [],
+                            "totalEstTokens": ingestion_report.get("total_est_tokens", 0),
+                            "batches": len(ingestion_report.get("batches") or []),
+                        },
+                        "fields": {
+                            "summary": {k: field_review.get(k, 0) for k in
+                                        ("total", "verified", "missing",
+                                         "conflicts", "unverified")},
+                            "missing": field_review.get("missingFields") or [],
+                            "conflicts": field_review.get("conflictFields") or [],
+                            "unverifiedCitations": field_review.get("unverifiedCitations") or [],
+                            "extractionError": str(field_review.get("error") or ""),
+                        },
+                        "provenance": provenance_to_confirm or [],
+                        "qa": mono_qa,
+                        "groundingNotes": [v.model_dump() for v in violations],
+                        "discrepancies": discrepancy_items,
+                        "verificationError": verification_error,
+                    }
+                    yield {"type": "review_packet", **review_packet}
+                    await _safe_update_session(session_id, review_packet=review_packet)
+                    if run_log:
+                        run_log.log_stage("review_packet", review_packet)
+
                 violations = []  # skip section-wise LLM repair loop below
 
             if violations:

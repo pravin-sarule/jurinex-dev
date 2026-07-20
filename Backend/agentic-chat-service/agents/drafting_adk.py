@@ -85,7 +85,11 @@ def get_or_build_drafting_runner(
         agent = Agent(
             name=AGENT_NAME,
             model=CustomGemini(model=model_name),
-            instruction=system_instruction,
+            # static_instruction: never state-injected by ADK — literal {braces}
+            # in drafting prompts (JSON schema samples, template placeholders)
+            # must not raise "Context variable not found". Also the cacheable
+            # prefix variant for ContextCacheConfig.
+            static_instruction=system_instruction,
             # Zero-hallucination posture: deterministic decoding.
             generate_content_config=gt.GenerateContentConfig(
                 temperature=0.0,
@@ -168,6 +172,8 @@ async def run_drafting_turn(
     swap engines transparently.
     """
     from google.genai import types as gt
+    from google.adk.runners import RunConfig
+    from google.adk.agents.run_config import StreamingMode
 
     new_message = gt.Content(role="user", parts=parts)
     full = ""
@@ -175,7 +181,10 @@ async def run_drafting_turn(
     finish_reason: str | None = None
 
     async for event in runner.run_async(
-        user_id=user_id, session_id=adk_session_id, new_message=new_message,
+        user_id=user_id,
+        session_id=adk_session_id,
+        new_message=new_message,
+        run_config=RunConfig(streaming_mode=StreamingMode.SSE),
     ):
         # ADK may prefix the author with the app name; substring-match like adk_app.
         author = getattr(event, "author", None) or ""

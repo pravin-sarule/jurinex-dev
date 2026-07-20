@@ -74,6 +74,10 @@ const DraftingModal = ({ open, onClose }) => {
   // INR/USD cost breakdown streamed by the backend after all passes finish.
   const [draftCost, setDraftCost] = useState(null);
   const [showCostDetails, setShowCostDetails] = useState(false);
+  // 4-stage pipeline review packet (missing/conflicting/unverified fields,
+  // discrepancy report) — what the human reviewer reads before filing.
+  const [reviewPacket, setReviewPacket] = useState(null);
+  const [showReviewDetails, setShowReviewDetails] = useState(false);
   const [isMonolithicRun, setIsMonolithicRun] = useState(false);
   const [version, setVersion] = useState(0);
   const textStoreRef = useRef(new Map());
@@ -92,6 +96,7 @@ const DraftingModal = ({ open, onClose }) => {
     setStatusMessage(''); setInstructions(''); setDraftingStrategy('sectionwise');
     setSavedToHistory(false); setDraftCost(null);
     setShowCostDetails(false); setConfirmedFacts(''); setIsMonolithicRun(false);
+    setReviewPacket(null); setShowReviewDetails(false);
     textStoreRef.current = new Map();
     return () => abortRef.current?.abort();
   }, [open]);
@@ -179,6 +184,8 @@ const DraftingModal = ({ open, onClose }) => {
     setPhase('generating');
     const isMono = draftingStrategy === 'monolithic';
     setIsMonolithicRun(isMono);
+    setReviewPacket(null);
+    setShowReviewDetails(false);
 
     if (isMono) {
       // One streaming document — not per-section workers.
@@ -281,6 +288,13 @@ const DraftingModal = ({ open, onClose }) => {
         if (evt.checks_failed > 0) {
           setStatusMessage(`Quality scorecard: ${evt.checks_failed}/${evt.checks_run} checks flagged (see server log)`);
         }
+      },
+      onDiscrepancyReport: (evt) => {
+        const n = evt.unsupportedCount || 0;
+        if (n > 0) setStatusMessage(`Verification pass: ${n} statement(s) with no source support — see review packet.`);
+      },
+      onReviewPacket: (evt) => {
+        setReviewPacket(evt);
       },
       onChatSaved: () => {
         // Backend also stored the compiled draft as a chat-history turn.
@@ -563,6 +577,113 @@ const DraftingModal = ({ open, onClose }) => {
               structure={structure}
               isMonolithic={isMonolithicRun}
             />
+            {reviewPacket && (() => {
+              const f = reviewPacket.fields || {};
+              const s = f.summary || {};
+              const unsupported = (reviewPacket.discrepancies || [])
+                .filter((d) => d.verdict === 'NO_SOURCE_SUPPORT_FOUND');
+              const provenance = reviewPacket.provenance || [];
+              const ocrDocs = reviewPacket.ingestion?.ocrDerivedDocs || [];
+              const issueCount =
+                (s.missing || 0) + (s.conflicts || 0) + (s.unverified || 0) +
+                unsupported.length + provenance.length +
+                (f.extractionError ? 1 : 0) + (reviewPacket.verificationError ? 1 : 0);
+              const clean = issueCount === 0;
+              return (
+                <div className={`px-5 py-2 border-t flex-shrink-0 ${
+                  clean ? 'bg-green-50 border-green-100' : 'bg-amber-50 border-amber-100'
+                }`}>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+                    <span className={`font-bold text-xs ${clean ? 'text-green-800' : 'text-amber-800'}`}>
+                      {clean
+                        ? 'Review packet: all checks clear — facts verified against source.'
+                        : `Review packet — ${issueCount} item(s) to confirm before filing`}
+                    </span>
+                    <span className="text-gray-600">
+                      Fields: {s.verified ?? 0} verified · {s.missing ?? 0} missing ·{' '}
+                      {s.conflicts ?? 0} conflict{(s.conflicts ?? 0) === 1 ? '' : 's'} ·{' '}
+                      {s.unverified ?? 0} unverified
+                    </span>
+                    {unsupported.length > 0 && (
+                      <span className="font-semibold text-red-700">
+                        {unsupported.length} draft statement(s) without source support
+                      </span>
+                    )}
+                    {ocrDocs.length > 0 && (
+                      <span className="text-gray-500">OCR-derived: {ocrDocs.join(', ')}</span>
+                    )}
+                    {reviewPacket.runId && (
+                      <span className="text-gray-400">run {reviewPacket.runId}</span>
+                    )}
+                    {!clean && (
+                      <button type="button"
+                        onClick={() => setShowReviewDetails((v) => !v)}
+                        className="ml-auto px-2 py-0.5 rounded-lg border border-amber-400 text-amber-800 font-semibold hover:bg-amber-100">
+                        {showReviewDetails ? 'Hide review items' : 'Review items'}
+                      </button>
+                    )}
+                  </div>
+                  {showReviewDetails && !clean && (
+                    <div className="mt-2 border-t border-amber-100 pt-2 max-h-56 overflow-y-auto space-y-2 text-[11px] text-gray-700">
+                      {f.extractionError && (
+                        <p className="text-red-700 font-semibold">
+                          Grounded extraction failed: {f.extractionError} (draft used the fact inventory only)
+                        </p>
+                      )}
+                      {reviewPacket.verificationError && (
+                        <p className="text-red-700 font-semibold">
+                          Verification pass failed: {reviewPacket.verificationError}
+                        </p>
+                      )}
+                      {(f.missing || []).length > 0 && (
+                        <div>
+                          <p className="font-bold text-gray-600 mb-0.5">Missing fields (not in any source — left blank in the draft)</p>
+                          <p>{f.missing.map((m) => m.field).join(', ')}</p>
+                        </div>
+                      )}
+                      {(f.conflicts || []).length > 0 && (
+                        <div>
+                          <p className="font-bold text-gray-600 mb-0.5">Conflicting sources (resolve before filing)</p>
+                          {f.conflicts.map((c, i) => (
+                            <p key={i}>
+                              <span className="font-semibold">{c.field}</span>: “{c.value}” ({c.source})
+                              {' '}vs “{c.conflictingValue}” ({c.conflictingSource})
+                            </p>
+                          ))}
+                        </div>
+                      )}
+                      {(f.unverifiedCitations || []).length > 0 && (
+                        <div>
+                          <p className="font-bold text-gray-600 mb-0.5">Unverified citations (value withheld from the draft unless the inventory confirms it)</p>
+                          {f.unverifiedCitations.map((u, i) => (
+                            <p key={i}>
+                              <span className="font-semibold">{u.field}</span>: “{u.value}” — {u.source || 'source unknown'}
+                              {u.flag === 'unverifiable_ocr' ? ' (OCR document — cannot be machine-checked)' : ''}
+                            </p>
+                          ))}
+                        </div>
+                      )}
+                      {unsupported.length > 0 && (
+                        <div>
+                          <p className="font-bold text-red-700 mb-0.5">Discrepancy report — NO SOURCE SUPPORT FOUND (draft not auto-modified)</p>
+                          {unsupported.map((d, i) => (
+                            <p key={i}>“{d.draft_quote}”{d.note ? ` — ${d.note}` : ''}</p>
+                          ))}
+                        </div>
+                      )}
+                      {provenance.length > 0 && (
+                        <div>
+                          <p className="font-bold text-gray-600 mb-0.5">Inventory provenance flags</p>
+                          {provenance.map((p, i) => (
+                            <p key={i}>“{p.value || p.label}” — {p.reason}</p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             {draftCost?.inr && (
               <div className="px-5 py-2 border-t border-gray-100 bg-[#f8fffe] flex-shrink-0">
                 {(draftCost.templateCost || draftCost.draftOnlyCost) && (

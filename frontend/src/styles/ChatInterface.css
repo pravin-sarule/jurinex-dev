@@ -180,6 +180,23 @@
   will-change: contents;
 }
 
+/* Claude-style blinking caret shown at the end of live streamed text */
+.formatted-assistant-markdown.stream-active .stream-caret {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: 2px;
+  background: #21C1B6;
+  animation: stream-caret-pulse 1s ease-in-out infinite;
+}
+
+@keyframes stream-caret-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.2; }
+}
+
 .formatted-assistant-markdown strong,
 .formatted-assistant-html strong {
   font-weight: 600;

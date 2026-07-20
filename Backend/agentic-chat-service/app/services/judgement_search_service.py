@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlparse
@@ -20,12 +21,18 @@ from urllib.parse import urlparse
 from app.core.config import get_settings
 from app.services.gemini_cache_service import _parts_from_file_specs
 from app.services.llm_service import (
+    CHAT_CONTINUATION_PROMPT,
     _build_generation_config,
     _get_client,
     _get_vertex_client,
     _inline_file_parts,
+    _is_max_tokens_finish,
+    _looks_like_restart,
     _normalize_usage,
+    _trim_overlap,
     build_model_list,
+    continuation_attempts,
+    continuation_time_budget,
 )
 from app.services.llm_usage_service import log_llm_usage
 
@@ -414,35 +421,31 @@ async def stream_judgement_search(
     elif gcs_uris:
         file_parts = _inline_file_parts(gcs_uris)
 
-    gen_cfg = _build_generation_config(llm_config)
-    # Judgement search must output multiple full case blocks — ensure the token
-    # budget is generous enough to fit 5+ cases without truncation.
-    judgement_max_tokens = max(gen_cfg["max_output_tokens"], 16384)
-    config = gt.GenerateContentConfig(
-        system_instruction=system_instruction,
-        temperature=gen_cfg["temperature"],
-        max_output_tokens=judgement_max_tokens,
-        tools=[gt.Tool(google_search=gt.GoogleSearch())],
-    )
-    contents = [gt.Content(role="user", parts=[*file_parts, gt.Part(text=question)])]
     endpoint = meta.get("endpoint", "/api/chat/ask/judgement/stream")
     last_err: Exception | None = None
 
     loop = asyncio.get_event_loop()
 
-    async def _gen(model: str, parts: list[Any]):
+    # Set per model inside the fallback loop (thinking config is model-specific).
+    gen_cfg: dict[str, Any] = {}
+    config: Any = None
+
+    async def _gen(model: str, gen_contents: list[Any]):
         cfg = config
+        logger.info(
+            "Judgement search model=%s max_output_tokens=%s temperature=%.2f",
+            model,
+            gen_cfg["max_output_tokens"],
+            gen_cfg["temperature"],
+        )
         print(f"\n[DEBUG] Calling Gemini model: {model}")
         print(f"[DEBUG] System Instruction length: {len(system_instruction)}")
-        print(f"[DEBUG] User parts count: {len(parts)}")
-        for i, p in enumerate(parts):
-            if getattr(p, 'text', None) is not None:
-                print(f"[DEBUG] Part {i} text preview: {p.text[:200]}...")
+        print(f"[DEBUG] Contents count: {len(gen_contents)}")
 
         def _call():
             return client.models.generate_content(
                 model=model,
-                contents=[gt.Content(role="user", parts=parts)],
+                contents=gen_contents,
                 config=cfg,
             )
 
@@ -450,14 +453,41 @@ async def stream_judgement_search(
         print(f"[DEBUG] Gemini response received. Candidates: {len(getattr(res, 'candidates', []) or [])}")
         return res
 
-    for model in build_model_list(llm_config, model_name):
+    def _user_content(parts: list[Any]) -> Any:
+        return gt.Content(role="user", parts=parts)
+
+    grounding_models = build_model_list(llm_config, model_name)
+    if grounding_models and grounding_models[0].lower().startswith("claude"):
+        # Google Search grounding is a Gemini tool. When the admin chat model is
+        # Claude, run the citation search on the strong Gemini tier instead of
+        # whatever generic tail fallback happens to come first (flash-lite).
+        grounding_models = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+
+    for model in grounding_models:
+        if model.lower().startswith("claude"):
+            # Google Search grounding is a Gemini tool — skip Claude entries;
+            # build_model_list always appends Gemini fallbacks.
+            continue
         try:
             meta["modelName"] = model
+            # Honour Document_DB llm_chat_config.max_output_tokens exactly
+            # (no floor override); thinking runs at the model's minimum.
+            gen_cfg = _build_generation_config(llm_config, model)
+            config_kwargs: dict[str, Any] = {
+                "system_instruction": system_instruction,
+                "temperature": gen_cfg["temperature"],
+                "max_output_tokens": gen_cfg["max_output_tokens"],
+                "tools": [gt.Tool(google_search=gt.GoogleSearch())],
+            }
+            if gen_cfg.get("thinking_config") is not None:
+                config_kwargs["thinking_config"] = gen_cfg["thinking_config"]
+            config = gt.GenerateContentConfig(**config_kwargs)
 
-            response = await _gen(model, [*file_parts, gt.Part(text=question)])
+            base_content = _user_content([*file_parts, gt.Part(text=question)])
+            response = await _gen(model, [base_content])
             text = _response_text(response)
             candidate = _first_candidate(response)
-            
+
             print(f"[DEBUG] Raw response text length: {len(text)}")
             if candidate and hasattr(candidate, 'grounding_metadata'):
                 gm = candidate.grounding_metadata
@@ -471,7 +501,69 @@ async def stream_judgement_search(
                 print(f"[DEBUG] Empty text for model {model}, trying next...")
                 continue  # try next model in the fallback list
 
-            sources, queries = _extract_grounding(candidate)
+            # ── MAX_TOKENS continuation — never deliver a truncated answer ──
+            # The DB max_output_tokens stays applied per round; the partial
+            # answer is fed back as a model turn and the model continues it.
+            candidates_seen = [candidate]
+            usage_responses = [response]
+            finish = getattr(candidate, "finish_reason", None) if candidate else None
+            attempts = continuation_attempts()
+            _t_start = time.monotonic()
+            for cont_i in range(attempts):
+                if not _is_max_tokens_finish(finish) or not text.strip():
+                    break
+                budget = continuation_time_budget()
+                if budget and (time.monotonic() - _t_start) > budget:
+                    logger.info(
+                        "Judgement continuation time budget (%.0fs) exhausted — delivering partial answer",
+                        budget,
+                    )
+                    break
+                yield {
+                    "type": "status",
+                    "status": "continuing",
+                    "message": f"Completing truncated answer ({cont_i + 1}/{attempts})...",
+                }
+                logger.info(
+                    "Judgement answer hit MAX_TOKENS — continuation %s/%s model=%s chars=%s",
+                    cont_i + 1, attempts, model, len(text),
+                )
+                try:
+                    resp_more = await _gen(model, [
+                        base_content,
+                        gt.Content(role="model", parts=[gt.Part(text=text)]),
+                        _user_content([gt.Part(text=CHAT_CONTINUATION_PROMPT)]),
+                    ])
+                except Exception:
+                    logger.exception("Judgement continuation failed — delivering partial answer")
+                    break
+                more_text = _response_text(resp_more)
+                if not more_text.strip():
+                    break
+                trimmed_more = _trim_overlap(text, more_text)
+                if _looks_like_restart(text, trimmed_more):
+                    # The model restarted the answer instead of continuing —
+                    # discard the duplicate round (non-streamed, so nothing
+                    # reached the user) and deliver what we have.
+                    logger.warning("Judgement continuation restarted — discarding round")
+                    break
+                text += trimmed_more
+                candidate2 = _first_candidate(resp_more)
+                candidates_seen.append(candidate2)
+                usage_responses.append(resp_more)
+                finish = getattr(candidate2, "finish_reason", None) if candidate2 else None
+
+            sources, queries = [], []
+            seen_uris: set[str] = set()
+            for cand in candidates_seen:
+                s_r, q_r = _extract_grounding(cand)
+                for s in s_r:
+                    if s.get("uri") not in seen_uris:
+                        seen_uris.add(s.get("uri"))
+                        sources.append(s)
+                for q in q_r:
+                    if q not in queries:
+                        queries.append(q)
             print(f"[DEBUG] Extracted {len(sources)} sources and {len(queries)} queries.")
 
             # Force-search fallback: when a document was attached the model often
@@ -488,7 +580,7 @@ async def stream_judgement_search(
                         "relevant to the above matter. List each case with its official citation and rely "
                         "only on what the search returns. EXCLUDE blogs and news sites."
                     )
-                    resp2 = await _gen(model, [gt.Part(text=forced_q)])
+                    resp2 = await _gen(model, [_user_content([gt.Part(text=forced_q)])])
                     s2, q2 = _extract_grounding(_first_candidate(resp2))
                     if s2:
                         sources = s2
@@ -522,6 +614,15 @@ async def stream_judgement_search(
                 yield {"type": "sources", "sources": resolved_sources, "queries": queries}
 
             usage = _normalize_usage(response, len(text))
+            for extra in usage_responses[1:]:
+                u2 = _normalize_usage(extra, 0)
+                usage["inputTokens"] += u2["inputTokens"]
+                usage["outputTokens"] += u2["outputTokens"]
+                usage["totalTokens"] += u2["totalTokens"]
+                usage["finishReason"] = u2["finishReason"] or usage["finishReason"]
+                usage["outputTruncated"] = u2["outputTruncated"]
+            if len(usage_responses) > 1:
+                usage["continuationRounds"] = len(usage_responses) - 1
             usage["modelName"] = model
             print(f"[DEBUG] Usage: {usage}")
             if meta.get("userId"):

@@ -22,16 +22,74 @@ for extraction, drafting, and semantic validation.
 └─────────────────────────────────────────────────────────────────┘
         GENERATE TIME (every "Generate Draft" click) — SSE stream
 ┌─────────────────────────────────────────────────────────────────┐
+│ Stage G1 Ingestion Check               0 calls  (fail-loud)      │
 │ Stage 1  Verified Fact Extraction      1 call   (flash, cached)  │
+│ Stage G2 Grounded Field Extraction     1 call/batch (schema)     │
+│          + programmatic snippet validation (0 calls)             │
 │ Stage 2  Monolithic Draft Generation   1 call   (selected model) │
 │ Stage 3  Deterministic Repairs         0 calls  (pure Python)    │
 │ Stage 4  Factual-Strength Lint         0 calls  (pure Python)    │
-│ Stage 5  Grounding & Consistency Audit 1 call   (flash)          │
+│ Stage 5  Grounding & Consistency Audit 1 call   (flash, opt-in)  │
 │ Stage 6  Combined Revision             0–1 call (only if needed) │
+│ Stage G4 Adversarial Verification      1 call   (report-only)    │
+│          → REVIEW PACKET (single reviewer surface)               │
 │ Stage 7  Scorecard + QA Report + Cost  0 calls                   │
 │ Stage 8  Save to chat history                                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### 1.1 The 4-stage grounded pipeline (G-stages, `DRAFT_GROUNDED_PIPELINE`, default on)
+
+The G-stages implement the zero-hallucination pipeline spec on top of the
+existing machinery. The staging is a deliberate anti-hallucination measure —
+never collapse it back into one call.
+
+* **G1 Ingestion Check** — `app/services/draft_ingestion.py`. Zero-LLM,
+  generation-time re-check of every supporting doc: blob resolves, MIME
+  allowed (FATAL + stop on failure), text-layer probe (scanned PDFs/images →
+  `ocr_derived` flag, read visually by Gemini, higher scrutiny downstream),
+  per-doc page/token estimates logged, and a greedy batch plan when the
+  corpus exceeds `DRAFT_EXTRACT_TOKEN_BUDGET` (default 700k) — split, never
+  truncated. Emits `ingestion_report` SSE.
+* **G2 Grounded Field Extraction** — `app/services/draft_grounded_extraction.py`
+  + `GROUNDED_EXTRACTION_PROMPT`. One controlled-generation call per batch
+  (`response_schema=GroundedExtractionResult`, temp 0 / top_p 0.1): the
+  template's placeholders become the target field schema; every found value
+  carries a mandatory verbatim `source_snippet` + confidence; cross-document
+  disagreements are flagged `conflict`, never silently resolved. Then a
+  ZERO-LLM validation confirms each snippet is an actual substring
+  (whitespace/quote tolerant; token-overlap leniency for OCR docs) of the
+  cited document — fabricated citations become `unverified`. Only verified
+  values enter the drafter's VERIFIED FIELD LEDGER (missing → blank /
+  `[DATA NOT PROVIDED: <field>]`, the repo's established missing-value
+  token); the rest go to the review packet. Persisted in
+  `drafting_sessions.grounded_facts`; invalidated on doc upload.
+* **G3 = Stage 2 drafting from verified facts** — the drafter reads the fact
+  inventory + verified ledger, never raw documents (source-text extracts
+  remain an optional secondary verification aid via
+  `DRAFT_MONO_ATTACH_SOURCE_DOCS`; set it false for strict
+  vetted-facts-only drafting).
+* **G4 Adversarial Verification** — `app/services/draft_verification.py`
+  + `DISCREPANCY_REVIEW_PROMPT`. A SEPARATE call after all repairs: draft +
+  source material → every sentence with NO SOURCE SUPPORT FOUND (or the
+  supporting passage when located on closer reading). Report-only: it NEVER
+  modifies the draft. Emits `discrepancy_report` SSE.
+* **REVIEW PACKET** — one consolidated `review_packet` SSE event + jsonb
+  column: ingestion flags (incl. OCR docs), missing/conflicting/unverified
+  fields, inventory provenance flags, deterministic-repairs QA register,
+  grounding notes, and the discrepancy report. Rendered as the amber
+  "Review packet — confirm before filing" panel in DraftingModal; also in
+  `GET /{sid}` payloads.
+* **Audit trail** — `app/services/draft_run_log.py`: every run gets a run ID;
+  every stage's raw input/output is written timestamped under
+  `DRAFT_RUN_LOG_DIR` (default `logs/draft_runs/<run_id>/`).
+* **CLI entry point** — `scripts/run_draft_pipeline.py`: takes a session ID
+  (analyzed template) or template file + supporting docs (local paths or
+  `gs://` URIs), runs the full pipeline, writes `draft.md` +
+  `review_packet.json` separately.
+* Temperature: G2/G4 run at 0 (schema-bound JSON). Stage-2 drafting keeps
+  temp 0.1 / top_p 0.95 — the documented dash-attractor fix; temp-0 drafting
+  caused degenerate table loops (§4.3).
 
 Call parity: the sequence is identical for Gemini and Claude drafting models —
 Stages 1 and 5 always run on the cheap Gemini Flash model regardless.
@@ -147,8 +205,30 @@ any template category:
   billing), the junk run is cut, and generation resumes from the last good
   text (≤2 trips). `_TagStreamCleaner` additionally collapses dash/underscore
   floods and strips stray section tags live, with partial-token holdback.
-* **Continuations**: up to 3 extra passes stitch `MAX_TOKENS`/breaker cuts
-  using the last 6 k chars as the resume anchor — drafts are never truncated.
+* **Continuations**: extra passes (attempt cap 6) stitch `MAX_TOKENS`/breaker/
+  mid-stream cuts using the last 6 k chars as the resume anchor — drafts are
+  never truncated.
+* **Duplication guards** (the "document repeats itself below" defect class):
+  every continuation's output is BUFFERED, deduplicated against the existing
+  text (`_dedupe_continuation`: leading *and trailing* replay blocks dropped by
+  exact alnum-normalized containment or ≥80 % 8-word-shingle match; a short
+  "new" caption-line tweak followed only by long replays is treated as a
+  restart, not a commit point; `_trim_overlap` for re-emitted sentence heads —
+  also on the completeness path) and only the genuinely new middle is
+  appended/streamed. Table-row resumes join with a single `\n` (not `\n\n`).
+  A mid-stream model failure after >800 streamed chars NEVER reruns the full
+  prompt on the next chain model (that re-drafts from the top) — it resumes via
+  a buffered continuation; tiny failed partials are rolled back.
+  `find_missing_template_sections` matches alnum-normalized (a bolded/re-wrapped
+  heading is not "missing"), the completeness prompt is APPEND-ONLY (no longer
+  embeds the full drafting prompt), and a completeness pass that returns only
+  duplicate content stops the loop. Final net: `_strip_restarted_document`
+  (also first step of the deterministic repairs) cuts any appended re-draft
+  whose content shingle-replays (≥60 %, or ≥90 % near Memo of Parties /
+  affidavit / vakalatnama / verification — raised bar, not a hard skip) the
+  preceding text; the heading guard looks both before and after the re-match so
+  court-header-first Memo of Parties tails survive. Frontend `document_end`
+  propagates the cleaned text into the live viewer via `onSectionText`.
 * **Result**: ONE `__document__` record saved (`section_id "__document__"`,
   `heading_verbatim false`); `document_end` carries the clean full text.
 
@@ -226,10 +306,14 @@ section-wise mode.
 ## 8. SSE protocol (monolithic events)
 
 ```
-status · draft_start{mode:"monolithic"} · document_chunk · document_end{text}
+status · ingestion_report{runId, documents[], ocrDerivedDocs} ·
+draft_start{mode:"monolithic"} · document_chunk · document_end{text}
 section_replace · document_replace{text} · grounding_report · qa_report
-scorecard · usage · cost(provisional) · cost(final){templateCost,
-draftOnlyCost, grandTotal, calls[], byStage} · chat_saved · done · [DONE]
+discrepancy_report{items[], unsupportedCount} · review_packet{runId,
+ingestion, fields{missing,conflicts,unverifiedCitations}, provenance, qa,
+groundingNotes, discrepancies} · scorecard · usage · cost(provisional) ·
+cost(final){templateCost, draftOnlyCost, grandTotal, calls[], byStage} ·
+chat_saved · done · [DONE]
 ```
 
 Route: `POST /api/chat/draft/{sid}/generate/stream` with anti-buffering
@@ -268,6 +352,11 @@ headers (`Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`).
 | `ANTHROPIC_API_KEY` | — | required for Claude models (read from .env) |
 | `ANALYSIS_MODEL` | gemini-2.5-flash | template analysis |
 | `DRAFT_GROUNDING_AUDIT` | true | global audit switch |
+| `DRAFT_GROUNDED_PIPELINE` | true | 4-stage grounded pipeline (G1/G2/G4 + review packet) |
+| `DRAFT_EXTRACT_TOKEN_BUDGET` | 700000 | per-batch extraction budget (G1 batch plan) |
+| `DRAFT_GROUNDED_MAX_FIELDS` | 80 | target-field cap for G2 extraction |
+| `DRAFT_DISCREPANCY_TIMEOUT_SECONDS` | 90 | G4 verification call timeout |
+| `DRAFT_RUN_LOG_DIR` | logs/draft_runs | per-run stage audit trail |
 
 ## 11. Failure handling
 

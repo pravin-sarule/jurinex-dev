@@ -103,17 +103,17 @@ async def _read_body(request: Request) -> dict[str, Any]:
         return {}
 
 
-def _policy_check(user: dict, body: dict[str, Any] | None = None) -> tuple[dict, dict, dict]:
+async def _policy_check(user: dict, body: dict[str, Any] | None = None) -> tuple[dict, dict, dict]:
     uid = int(user["id"])
     estimated = 0
     if body:
         estimated = max(0, int(body.get("estimated_tokens") or body.get("estimatedTokens") or 0))
-    token_check = check_token_availability(uid, estimated_tokens=estimated, service="agentic-chat-service")
+    token_check = await check_token_availability(uid, estimated_tokens=estimated, service="agentic-chat-service")
     if not token_check.get("ok"):
         code = token_check.get("code")
         status = 503 if code == "TOKEN_CHECK_UNAVAILABLE" else 429
         raise HTTPException(status_code=status, detail=token_check)
-    cfg = get_llm_config(user["id"])
+    cfg = await get_llm_config(user["id"])
     check = assert_chat_allowed(uid, cfg)
     if not check.get("ok"):
         code = check.get("code")
@@ -125,7 +125,7 @@ def _policy_check(user: dict, body: dict[str, Any] | None = None) -> tuple[dict,
 
 @router.get("/limits")
 async def get_limits(user: dict = Depends(get_current_user)):
-    return chat_orchestrator.get_limits_payload(user["id"])
+    return await chat_orchestrator.get_limits_payload(user["id"])
 
 
 @router.get("/storage/usage")
@@ -265,7 +265,7 @@ async def google_drive_upload(request: Request, user: dict = Depends(get_current
 @router.post("/ask")
 async def ask(request: Request, user: dict = Depends(get_current_user)):
     body = await _read_body(request)
-    user, cfg, merged = _policy_check(user, body)
+    user, cfg, merged = await _policy_check(user, body)
     ctx = {
         "user_id": user["id"],
         "user_email": user.get("email"),
@@ -281,7 +281,7 @@ async def ask(request: Request, user: dict = Depends(get_current_user)):
 @router.post("/ask/stream")
 async def ask_stream(request: Request, user: dict = Depends(get_current_user)):
     body = await _read_body(request)
-    user, cfg, merged = _policy_check(user, body)
+    user, cfg, merged = await _policy_check(user, body)
     ctx = {
         "user_id": user["id"],
         "user_email": user.get("email"),
@@ -306,7 +306,7 @@ async def ask_stream(request: Request, user: dict = Depends(get_current_user)):
 @router.post("/ask/general/stream")
 async def ask_general_stream(request: Request, user: dict = Depends(get_current_user)):
     body = await _read_body(request)
-    user, cfg, merged = _policy_check(user, body)
+    user, cfg, merged = await _policy_check(user, body)
     ctx = {
         "user_id": user["id"],
         "user_email": user.get("email"),
@@ -338,7 +338,7 @@ async def ask_judgement_stream(request: Request, user: dict = Depends(get_curren
     """
     body = await _read_body(request)
     body["web_search"] = True  # force judgement mode for this explicit endpoint
-    user, cfg, merged = _policy_check(user, body)
+    user, cfg, merged = await _policy_check(user, body)
     ctx = {
         "user_id": user["id"],
         "user_email": user.get("email"),
@@ -480,6 +480,7 @@ async def cache_create(request: Request, user: dict = Depends(get_current_user))
     buf = download_object_buffer(get_settings().gcs_bucket_name, row["gcs_path"])
     file_specs = [{"buffer": buf, "mimetype": row.get("mimetype") or "application/pdf", "filename": row.get("originalname") or "document"}]
 
+    llm_req = merge_request_overrides(await get_llm_config(str(user["id"])), body)
     async for _ in gemini_cache_service.ask_with_context_cache(
         file_id=file_id,
         question="Acknowledge the document context.",
@@ -487,8 +488,9 @@ async def cache_create(request: Request, user: dict = Depends(get_current_user))
         file_specs=file_specs,
         system_instruction=system,
         model_name=model,
-        llm_config={},
+        llm_config=llm_req,
         chat_session_id=f"prime-{file_id}",
+        is_priming=True,
     ):
         pass
 
@@ -515,6 +517,7 @@ async def cache_ask(request: Request, user: dict = Depends(get_current_user)):
     file_specs = [{"buffer": buf, "mimetype": row.get("mimetype") or "application/pdf", "filename": row.get("originalname") or "document"}]
     prompt = f"{profile_prefix}\n\n{question}" if profile_prefix else question
 
+    llm_req = merge_request_overrides(await get_llm_config(str(user["id"])), body)
     answer = ""
     usage: dict[str, Any] = {}
     async for ev in gemini_cache_service.ask_with_context_cache(
@@ -524,7 +527,7 @@ async def cache_ask(request: Request, user: dict = Depends(get_current_user)):
         file_specs=file_specs,
         system_instruction=system,
         model_name=model,
-        llm_config={},
+        llm_config=llm_req,
         chat_session_id=body.get("sessionId"),
     ):
         if ev.get("type") == "chunk":
@@ -552,6 +555,8 @@ async def cache_ask_stream(request: Request, user: dict = Depends(get_current_us
     buf = download_object_buffer(get_settings().gcs_bucket_name, row["gcs_path"])
     file_specs = [{"buffer": buf, "mimetype": row.get("mimetype") or "application/pdf", "filename": row.get("originalname") or "document"}]
 
+    llm_req = merge_request_overrides(await get_llm_config(str(user["id"])), body)
+
     async def gen():
         token_usage: dict[str, Any] = {}
         answer_parts: list[str] = []
@@ -565,7 +570,7 @@ async def cache_ask_stream(request: Request, user: dict = Depends(get_current_us
                 file_specs=file_specs,
                 system_instruction=system,
                 model_name=model,
-                llm_config={},
+                llm_config=llm_req,
                 chat_session_id=body.get("sessionId"),
             ):
                 if ev.get("type") == "chunk":
@@ -608,7 +613,7 @@ async def cache_ask_stream(request: Request, user: dict = Depends(get_current_us
                 async for ev in stream_llm_with_gcs(
                     question=prompt,
                     gcs_uris=[gcs_uri],
-                    llm_config={},
+                    llm_config=llm_req,
                     system_instruction=system,
                     model_name=model,
                     metadata={"userId": user["id"], "fileId": file_id, "endpoint": "/api/chat/cache/ask/stream"},

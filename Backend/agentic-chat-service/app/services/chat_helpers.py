@@ -54,34 +54,41 @@ _JUDGEMENT_SEARCH_FLAGS = (
 )
 
 # Phrases that signal the user wants us to *find / search* real judgements or
-# case law online (as opposed to plain document Q&A). Kept intentionally narrow
-# so ordinary document questions are not hijacked into a web search.
+# case law online (as opposed to plain document Q&A). Applied ONLY to short,
+# query-like questions: long analysis templates routinely CONTAIN words like
+# "precedents" or "similar case" without asking for a web search — matching
+# those hijacked ordinary chat into the citation pipeline (and away from the
+# admin-configured model).
 _JUDGEMENT_INTENT_PHRASES = (
     "find judgement", "find judgment", "find judgements", "find judgments",
     "find a judgement", "find a judgment", "find me judgement", "find me judgment",
-    "relevant judgement", "relevant judgment", "relevant case", "relevant case law",
-    "similar judgement", "similar judgment", "similar case", "similar cases",
-    "related judgement", "related judgment", "related case",
+    "similar judgement", "similar judgment",
+    "related judgement", "related judgment",
     "case law on", "case laws on", "judgements on", "judgments on",
-    "precedent", "precedents", "find cases", "find case law",
+    "find cases", "find case law", "find me cases",
     "search for judgement", "search for judgment", "search judgement",
-    "find me cases", "supporting judgement", "supporting judgment",
+    "supporting judgement", "supporting judgment",
 )
+
+# Intent sniffing applies only to questions at most this long. Anything longer
+# is a prompt/template, not a "find me cases" query — the explicit Citation
+# toggle (web_search flag) is the way to force the citation pipeline.
+_JUDGEMENT_INTENT_MAX_CHARS = 240
 
 
 def wants_judgement_search(body: dict[str, Any]) -> bool:
     """True when the request asks for web-grounded judgement / case-law research.
 
-    Triggered by an explicit flag (frontend toggle) or by judgement-finding intent
-    phrases in the question.
+    Triggered by an explicit flag (frontend Citation toggle), or by
+    judgement-finding intent phrases in a SHORT query-like question.
     """
     if not isinstance(body, dict):
         return False
     for flag in _JUDGEMENT_SEARCH_FLAGS:
         if body.get(flag):
             return True
-    question = str(body.get("question") or "").lower()
-    if not question:
+    question = str(body.get("question") or "").strip().lower()
+    if not question or len(question) > _JUDGEMENT_INTENT_MAX_CHARS:
         return False
     return any(phrase in question for phrase in _JUDGEMENT_INTENT_PHRASES)
 
@@ -192,13 +199,27 @@ def build_active_gcs_uris_from_attached(attached_files: list[dict[str, Any]] | N
     return list(dict.fromkeys(uris))
 
 
+# Caps for history fed back as LLM context / stored in chat_history jsonb.
+# Uncapped, one runaway multi-MB answer poisons every later prompt in the
+# session (input token bloat) and bloats every later row's chat_history.
+_HISTORY_Q_CAP = 4000
+_HISTORY_A_CAP = 8000
+
+
+def _cap(text: str, limit: int) -> str:
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    return t[:limit] + "\n…[earlier answer truncated for context]"
+
+
 def format_conversation_history(chats: list[dict[str, Any]]) -> str:
     if not chats:
         return ""
     lines = []
     for i, c in enumerate(chats[-10:], 1):
-        q = (c.get("question") or "").strip()
-        a = (c.get("answer") or "").strip()
+        q = _cap(c.get("question") or "", _HISTORY_Q_CAP)
+        a = _cap(c.get("answer") or "", _HISTORY_A_CAP)
         if q or a:
             lines.append(f"Turn {i}:\nUser: {q}\nAssistant: {a}")
     return "\n\n".join(lines)
@@ -208,8 +229,8 @@ def simplify_history(chats: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "id": c.get("id"),
-            "question": c.get("question"),
-            "answer": c.get("answer"),
+            "question": _cap(c.get("question") or "", _HISTORY_Q_CAP),
+            "answer": _cap(c.get("answer") or "", _HISTORY_A_CAP),
             "created_at": c.get("created_at"),
         }
         for c in chats

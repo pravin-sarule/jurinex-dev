@@ -58,6 +58,7 @@ def _session_payload(session: dict[str, Any]) -> dict[str, Any]:
         "supporting_docs": session.get("supporting_docs") or [],
         "draft_sections": session.get("draft_sections") or [],
         "draft_metadata": session.get("draft_metadata"),
+        "review_packet": session.get("review_packet"),
         "error": session.get("error"),
     }
 
@@ -196,7 +197,8 @@ async def upload_supporting_documents(
         await svc.delete_context_cache(session["cache_name"])
         repo.update_session(session_id, cache_name=None)
     if added:
-        repo.update_session(session_id, facts_digest=None)
+        # Fact inventory AND the grounded field extraction are per-document-set.
+        repo.update_session(session_id, facts_digest=None, grounded_facts=None)
     # ADK runners prime the session with docs — drop them so the next draft re-primes.
     try:
         from agents.drafting_adk import invalidate_session_runners

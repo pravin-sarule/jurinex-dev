@@ -187,6 +187,74 @@ class GroundingAuditReport(BaseModel):
     )
 
 
+class ExtractedFactField(BaseModel):
+    """One target-schema field extracted with a mandatory verbatim citation.
+
+    Stage 2 of the 4-stage zero-hallucination pipeline: controlled generation
+    (``response_schema``) makes the citation field impossible to skip; Python
+    then verifies ``source_snippet`` is an actual substring of the cited
+    document before the value may reach the drafter.
+    """
+
+    field_name: str = Field(description="Target-schema key this entry answers, e.g. 'party_1_name'")
+    value: str = Field(
+        default="",
+        description="The value EXACTLY as written in the source; empty when found=false",
+    )
+    source_document: str = Field(
+        default="",
+        description="Exact file name from the '===== SUPPORTING DOCUMENT: <name> =====' marker",
+    )
+    source_snippet: str = Field(
+        default="",
+        description="VERBATIM substring of the source document that supports the value (<=200 chars)",
+    )
+    confidence: Literal["high", "medium", "low"] = Field(default="low")
+    found: bool = Field(
+        default=False,
+        description="True ONLY when the value is explicitly present in a source document",
+    )
+    conflict: bool = Field(
+        default=False,
+        description="True when two source documents state different values for this field",
+    )
+    conflicting_value: str = Field(
+        default="", description="The second value when conflict=true (exactly as written)"
+    )
+    conflicting_source: str = Field(
+        default="", description="File that states the conflicting value"
+    )
+
+
+class GroundedExtractionResult(BaseModel):
+    """Structured output of the Stage-2 grounded extraction call (one per batch)."""
+
+    fields: list[ExtractedFactField] = Field(default_factory=list)
+
+
+class DiscrepancyItem(BaseModel):
+    """One draft statement checked by the Stage-4 adversarial verification pass."""
+
+    draft_quote: str = Field(description="The exact draft sentence/clause (<=40 words)")
+    verdict: Literal["NO_SOURCE_SUPPORT_FOUND", "SUPPORTED_ON_REVIEW"] = Field(
+        description="NO_SOURCE_SUPPORT_FOUND when nothing in the source supports the quote"
+    )
+    supporting_passage: str = Field(
+        default="",
+        description="Verbatim source passage (<=200 chars) when verdict=SUPPORTED_ON_REVIEW",
+    )
+    source_document: str = Field(
+        default="", description="File containing the supporting passage, when located"
+    )
+    note: str = Field(default="", description="What exactly is unsupported / where support was found")
+
+
+class DiscrepancyReport(BaseModel):
+    """Structured output of the Stage-4 verification pass (report-only, never a fix)."""
+
+    items: list[DiscrepancyItem] = Field(default_factory=list)
+
+
 class SectionEvents(BaseModel):
     """Events from the chronological factual matrix owned by one section."""
 

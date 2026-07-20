@@ -7,6 +7,8 @@ import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../c
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
 import { useSidebar } from '../context/SidebarContext';
 import DownloadPdf from '../components/DownloadPdf/DownloadPdf';
+import BrandingDownloadModal from '../components/BrandingDownload/BrandingDownloadModal';
+import { downloadAsHtml, printResponse } from '../utils/responseExportUtils';
 import UploadProgressPanel from '../components/AnalysisPage/UploadProgressPanel';
 import ChatInputArea from '../components/AnalysisPage/ChatInputArea';
 import ChatSessionList from '../components/ChatInterface/ChatSessionList';
@@ -74,6 +76,8 @@ import {
   Settings2,
   ArrowUpRight,
   Layers,
+  Printer,
+  Code,
 } from 'lucide-react';
 import LearningBubble from '../components/LearningBubble';
 import TokenCostPopover from '../components/TokenCostPopover';
@@ -307,7 +311,49 @@ function parseMarkdown(md) {
 // IMPORTANT: Only split on \n\n (double newline) to guarantee table integrity.
 // Splitting on a single \n mid-table causes parseMarkdown to emit the separator
 // row ":---" as a real <td> cell. The live tail is bounded separately in tick().
-const LIVE_CAP = 1200; // chars — max live tail chars parsed per tick
+//
+// When the live tail grows past TAIL_PROMOTE without a \n\n (long tables have
+// none), it is force-promoted into the stable cache at a single-newline cut so
+// per-frame parsing stays bounded and the WHOLE answer stays visible — nothing
+// is ever hidden or truncated. A mid-table promote renders as two table chunks
+// during the stream; the final render re-parses the full text correctly.
+const TAIL_PROMOTE = 6000; // chars — live tail beyond this is promoted to stable
+
+// Chunked final rendering: segment size parsed per tick. Segments split only at
+// \n\n boundaries (code-fence aware), so every segment parses correctly.
+const FINAL_SEGMENT_CHARS = 24000;
+const FINAL_SYNC_LIMIT = 8000; // below this, parse synchronously (no flicker)
+
+/** Split markdown into independently-parseable segments at \n\n boundaries. */
+function splitMarkdownSegments(text, target = FINAL_SEGMENT_CHARS) {
+  const segs = [];
+  let start = 0;
+  while (start < text.length) {
+    if (text.length - start <= target * 1.5) {
+      segs.push(text.slice(start));
+      break;
+    }
+    let cut = text.lastIndexOf('\n\n', start + target);
+    if (cut <= start) cut = text.indexOf('\n\n', start + target);
+    if (cut === -1 || cut <= start) {
+      segs.push(text.slice(start));
+      break;
+    }
+    // Never split inside an open ``` fence — extend to after it closes.
+    const fences = (text.slice(start, cut).match(/^```/gm) || []).length;
+    if (fences % 2 === 1) {
+      const close = text.indexOf('\n```', cut);
+      cut = close === -1 ? -1 : text.indexOf('\n\n', close + 4);
+      if (cut === -1 || cut <= start) {
+        segs.push(text.slice(start));
+        break;
+      }
+    }
+    segs.push(text.slice(start, cut));
+    start = cut;
+  }
+  return segs;
+}
 
 function findStableSplit(text) {
   const idx = text.lastIndexOf('\n\n');
@@ -322,16 +368,26 @@ function findStableSplit(text) {
   return -1;
 }
 
+// Blinking caret appended at the end of the streamed text (Claude-style).
+// Injected inside the last inline-capable block so it sits right after the
+// last visible character instead of dropping to its own line.
+const STREAM_CARET_HTML = '<span class="stream-caret" aria-hidden="true"></span>';
+
+function injectStreamCaret(html) {
+  const m = html.match(/<\/(p|li|h[1-6]|td|blockquote)>\s*$/);
+  if (m) return html.slice(0, m.index) + STREAM_CARET_HTML + html.slice(m.index);
+  return html + STREAM_CARET_HTML;
+}
+
 const StreamingMarkdown = React.memo(
   function StreamingMarkdown({ bufferRef, scrollTargetRef }) {
     const containerRef  = useRef(null);
-    const prevLenRef    = useRef(0);
+    const revealLenRef  = useRef(0);
     const prevHtmlRef   = useRef('');
     const stableEndRef  = useRef(0);
     const stableHtmlRef = useRef('');
 
     useEffect(() => {
-      let lastFlush = 0;
       let rafId;
 
       const scheduleScroll = () => {
@@ -343,42 +399,49 @@ const StreamingMarkdown = React.memo(
         });
       };
 
-      function tick(now) {
+      function tick() {
         rafId = requestAnimationFrame(tick);
         const el = containerRef.current;
         if (!el) return;
 
-        const cur = bufferRef.current || '';
-        if (cur.length === prevLenRef.current) return;
+        const full = bufferRef.current || '';
+        const target = full.length;
+        if (revealLenRef.current >= target) return;
 
-        // Fixed 50ms throttle (~20 FPS) — fast enough to feel live, gentle on CPU
-        if (now - lastFlush < 50) return;
-        lastFlush = now;
-        prevLenRef.current = cur.length;
+        // Claude-style smooth reveal: instead of dumping each network burst
+        // into the DOM at once, drip characters out at a steady rate that
+        // adapts to the backlog — a few chars/frame when caught up, faster
+        // when chunks arrive in bursts. Runs at native rAF (~60 FPS).
+        const backlog = target - revealLenRef.current;
+        const step = Math.max(2, Math.ceil(backlog / 24));
+        revealLenRef.current = Math.min(target, revealLenRef.current + step);
+        const cur = full.substring(0, revealLenRef.current);
 
-        // Find stable split strictly at \n\n so we never split mid-table.
+        // 1) Grow the stable cache at the last \n\n boundary (never re-parse
+        //    old text; code-fence aware so a fence never splits).
         const split = findStableSplit(cur);
-
-        let html;
-        if (split <= 0) {
-          // Small buffer: parse whole thing but cap at LIVE_CAP to avoid lockup
-          const liveTail = cur.length > LIVE_CAP ? cur.substring(cur.length - LIVE_CAP) : cur;
-          html = stableHtmlRef.current + parseMarkdown(liveTail);
-        } else {
-          // Grow the stable cache incrementally (never re-parse old text)
-          if (split > stableEndRef.current) {
-            const newChunk = cur.substring(stableEndRef.current, split);
-            stableHtmlRef.current += parseMarkdown(newChunk);
-            stableEndRef.current = split;
-          }
-          // Parse only the live tail (always ≤ LIVE_CAP chars at a \n\n boundary)
-          const liveTail = cur.substring(split);
-          html = stableHtmlRef.current + parseMarkdown(liveTail);
+        if (split > stableEndRef.current) {
+          stableHtmlRef.current += parseMarkdown(cur.substring(stableEndRef.current, split));
+          stableEndRef.current = split;
         }
 
+        // 2) Bound the live tail. Long tables/paragraphs have no \n\n, so the
+        //    tail can grow without limit — promote it into the stable cache at
+        //    a single-newline cut (or a hard cut for one mega-line). Every
+        //    character stays visible; per-frame parse work stays small.
+        let tail = cur.substring(stableEndRef.current);
+        if (tail.length > TAIL_PROMOTE) {
+          let cut = tail.lastIndexOf('\n');
+          if (cut < TAIL_PROMOTE / 2) cut = tail.length - 800;
+          stableHtmlRef.current += parseMarkdown(tail.substring(0, cut));
+          stableEndRef.current += cut;
+          tail = cur.substring(stableEndRef.current);
+        }
+
+        const html = stableHtmlRef.current + parseMarkdown(tail);
         if (html === prevHtmlRef.current) return;
         prevHtmlRef.current = html;
-        el.innerHTML = html;
+        el.innerHTML = injectStreamCaret(html);
 
         scheduleScroll();
       }
@@ -386,13 +449,15 @@ const StreamingMarkdown = React.memo(
       rafId = requestAnimationFrame(tick);
       return () => {
         cancelAnimationFrame(rafId);
-        // Flush the full buffer on unmount so the last segment is never dropped
-        // when switching from StreamingMarkdown → FinalMarkdown.
+        // Flush everything not yet revealed on unmount so the last segment is
+        // never dropped when switching to the final renderer. Only the part
+        // after the stable cache is parsed here — bounded even for huge answers.
         const el = containerRef.current;
         const full = bufferRef.current || '';
         if (el && full) {
-          el.innerHTML = parseMarkdown(full);
-          prevLenRef.current = full.length;
+          el.innerHTML =
+            stableHtmlRef.current + parseMarkdown(full.substring(stableEndRef.current));
+          revealLenRef.current = full.length;
         }
       };
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -407,30 +472,48 @@ const StreamingMarkdown = React.memo(
   () => true, // never re-render from props — rAF loop owns the DOM
 );
 
-// ─── Final renderer (same parser, memoized once) ──────────────────────────────
+// ─── Final renderer (same parser, chunked + non-blocking) ─────────────────────
 // Uses parseMarkdown — byte-identical output to StreamingMarkdown, so the
-// transition at stream end is invisible (no heavy ReactMarkdown parse, no jump).
+// transition at stream end is invisible. Long answers are parsed segment by
+// segment across timeout ticks: the COMPLETE text always renders (never capped
+// or truncated) and the main thread never freezes, no matter the answer size.
 const FinalMarkdown = React.memo(
   function FinalMarkdown({ text }) {
-    const [html, setHtml] = React.useState(() => parseMarkdown(text || ''));
-    // When text changes (e.g. stream just finished), defer the expensive full
-    // re-parse to a microtask so the browser can paint "done" state first.
+    const containerRef = React.useRef(null);
     React.useEffect(() => {
-      if (!text) { setHtml(''); return; }
-      // Small responses: parse synchronously. Large: yield to browser first.
-      if (text.length < 4000) {
-        setHtml(parseMarkdown(text));
-      } else {
-        const id = setTimeout(() => setHtml(parseMarkdown(text)), 0);
-        return () => clearTimeout(id);
+      const el = containerRef.current;
+      if (!el) return undefined;
+      const t = text || '';
+      if (!t) {
+        el.innerHTML = '';
+        return undefined;
       }
+      if (t.length <= FINAL_SYNC_LIMIT) {
+        el.innerHTML = parseMarkdown(t);
+        return undefined;
+      }
+      // Chunked render: append one parsed segment per tick until the whole
+      // answer is in the DOM. Cancelled cleanly if the text changes/unmounts.
+      el.innerHTML = '';
+      const segments = splitMarkdownSegments(t);
+      let index = 0;
+      let timer = null;
+      let cancelled = false;
+      const step = () => {
+        if (cancelled) return;
+        const node = containerRef.current;
+        if (!node) return;
+        node.insertAdjacentHTML('beforeend', parseMarkdown(segments[index]));
+        index += 1;
+        if (index < segments.length) timer = setTimeout(step, 0);
+      };
+      timer = setTimeout(step, 0);
+      return () => {
+        cancelled = true;
+        if (timer) clearTimeout(timer);
+      };
     }, [text]);
-    return (
-      <div
-        className="formatted-assistant-markdown"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-    );
+    return <div ref={containerRef} className="formatted-assistant-markdown" />;
   },
   (a, b) => a.text === b.text,
 );
@@ -1131,6 +1214,11 @@ const ChatModelPage = () => {
   const styleDropdownRef = useRef(null);
   const responseRef = useRef(null);
   const markdownOutputRef = useRef(null);
+  // Per-message rendered-body DOM nodes — used by the response download/export
+  // toolbar (PDF / Word / HTML / Print), same UX as the AnalysisPage response panel.
+  const messageBodyRefs = useRef({});
+  const downloadTargetRef = useRef(null);
+  const [responseDownloadModal, setResponseDownloadModal] = useState(null); // 'pdf' | 'word' | null
   const exportContentRef = useRef(null);
   const animationFrameRef = useRef(null);
   const streamBufferRef = useRef('');
@@ -1355,7 +1443,9 @@ const ChatModelPage = () => {
     };
   }, [isResizingSplit]);
 
-  // 2-minute cache deletion timer after response completes
+  // 5-minute inactivity cache deletion — matches the backend cache TTL.
+  // Any new prompt/typing resets the timer (deps below); after deletion the
+  // next prompt transparently rebuilds the cache server-side and just works.
   useEffect(() => {
     let timeoutId;
     if (!isGeneratingInsights && !isLoading && hasResponse) {
@@ -1363,10 +1453,10 @@ const ChatModelPage = () => {
         const sid = cacheSessionData?.sessionId || sessionId;
         if (sid) {
            apiService.deleteGeminiCache(sid)
-             .then(() => console.log('Cache deleted due to 2 minutes of inactivity'))
+             .then(() => console.log('Cache deleted due to 5 minutes of inactivity'))
              .catch(e => console.error('Failed to delete cache on inactivity', e));
         }
-      }, 120000);
+      }, 300000);
     }
     
     return () => {
@@ -4755,19 +4845,64 @@ const ChatModelPage = () => {
     return '';
   };
 
-  const handleSelectStyle = (style) => {
-    if (style === 'learning' && !fileId) {
-      setError('Add a document first to use Learning Mode');
-      setShowStyleDropdown(false);
+  // ── Unified mode selection (input-box dropdown) ────────────────────────────
+  // One dropdown drives every mode explicitly: Chat, Learning, Citation Search,
+  // Drafting Mode, and the expert preset prompts. Nothing is inferred from the
+  // question text — the selected mode alone decides which pipeline runs.
+  const clearSecretPromptSelection = () => {
+    setIsSecretPromptSelected(false);
+    setActiveDropdown('Custom Query');
+    setSelectedSecretId(null);
+    setSelectedLlmName(null);
+  };
+
+  const selectChatModeOption = (mode) => {
+    setShowStyleDropdown(false);
+    if (isLoading || isGeneratingInsights) return;
+    if (mode === 'learning') {
+      if (!fileId) {
+        setError('Add a document first to use Learning Mode');
+        return;
+      }
+      setChatMode('chat');
+      setLearningModeActive(true);
+      setTurnCount(0);
+      setShowDraftingModal(false);
+      clearSecretPromptSelection();
       return;
     }
-    setLearningModeActive(style === 'learning');
-    setTurnCount(0);
-    setShowStyleDropdown(false);
-    if (style !== 'learning') {
+    if (mode === 'citation') {
+      setChatMode('citation');
+      setLearningModeActive(false);
+      setTurnCount(0);
       setShowDraftingModal(false);
+      clearSecretPromptSelection();
+      return;
     }
+    if (mode === 'drafting') {
+      openDraftingMode();
+      return;
+    }
+    // 'chat' — plain conversation with the admin-configured model
+    setChatMode('chat');
+    setLearningModeActive(false);
+    setTurnCount(0);
+    setShowDraftingModal(false);
+    clearSecretPromptSelection();
   };
+
+  const currentModeLabel = showDraftingModal
+    ? 'Drafting'
+    : chatMode === 'citation'
+      ? 'Citation'
+      : learningModeActive
+        ? 'Learning'
+        : isSecretPromptSelected && activeDropdown && activeDropdown !== 'Custom Query'
+          ? activeDropdown
+          : 'Chat';
+
+  // Expert preset prompts shown in the mode dropdown (built-ins get their own rows)
+  const expertModePrompts = promptChips.filter((s) => !s.isCitation && !s.isDrafting);
 
   const handleLearningOptionSelect = async (optionText) => {
     const text = String(optionText || '').trim();
@@ -4984,46 +5119,82 @@ const ChatModelPage = () => {
                 accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff,.mp3,.wav,.m4a,.flac,.ogg,.webm,.aac,.mp4"
                 onChange={handleFileUpload} disabled={isUploading || isChatUploading} multiple />
 
-              {/* Mode selector */}
+              {/* Mode selector — ALL modes in one dropdown; the selection alone
+                  decides the pipeline (chat / learning / citation / drafting /
+                  expert preset). No keyword-based mode guessing. */}
               <div className="relative flex-shrink-0" ref={styleDropdownRef}>
                 <button
                   type="button"
                   onClick={() => setShowStyleDropdown((s) => !s)}
                   disabled={isLoading || isGeneratingInsights}
                   className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-gray-500 bg-gray-50 border border-gray-200 rounded-xl hover:border-[#21C1B6] hover:text-[#21C1B6] transition-colors disabled:opacity-40"
-                  title="Response mode"
+                  title="Chat mode"
                 >
                   <Settings2 className="h-3.5 w-3.5" />
-                  {learningModeActive
-                    ? <Sparkles className="h-3.5 w-3.5 text-[#21C1B6]" />
-                    : <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                  <span className="max-w-[110px] truncate text-[#0f766e]">{currentModeLabel}</span>
                 </button>
                 {showStyleDropdown && (
-                  <div className="absolute bottom-full left-0 mb-2 w-52 bg-white border border-gray-100 rounded-2xl shadow-2xl z-30 overflow-hidden py-1">
-                    <button type="button" onClick={() => handleSelectStyle('normal')}
+                  <div className="absolute bottom-full left-0 mb-2 w-60 bg-white border border-gray-100 rounded-2xl shadow-2xl z-30 overflow-hidden py-1 max-h-80 overflow-y-auto">
+                    <div className="px-3 pt-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                      Modes
+                    </div>
+                    <button type="button" onClick={() => selectChatModeOption('chat')}
                       className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50">
                       <span className="flex items-center gap-2">
-                        <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" /> Normal
+                        <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" /> Chat
                       </span>
-                      {!learningModeActive && !showDraftingModal && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                      {currentModeLabel === 'Chat' && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
                     </button>
-                    <button type="button" onClick={() => handleSelectStyle('learning')} disabled={!fileId}
+                    <button type="button" onClick={() => selectChatModeOption('learning')} disabled={!fileId}
                       className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-40">
                       <span className="flex items-center gap-2">
                         <Sparkles className="h-3.5 w-3.5 text-[#21C1B6]" /> Learning
                       </span>
                       {learningModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
                     </button>
+                    <button type="button" onClick={() => selectChatModeOption('citation')}
+                      className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50">
+                      <span className="flex items-center gap-2">
+                        <Search className="h-3.5 w-3.5 text-[#21C1B6]" /> Citation Search
+                      </span>
+                      {chatMode === 'citation' && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                    </button>
                     <button
                       type="button"
-                      onClick={openDraftingMode}
-                      className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50 border-t border-gray-50"
+                      onClick={() => selectChatModeOption('drafting')}
+                      className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50"
                     >
                       <span className="flex items-center gap-2">
                         <Layers className="h-3.5 w-3.5 text-[#21C1B6]" /> Drafting Mode
                       </span>
                       {showDraftingModal && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
                     </button>
+                    {expertModePrompts.length > 0 && (
+                      <>
+                        <div className="px-3 pt-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-gray-400 border-t border-gray-50 mt-1">
+                          Expert Prompts
+                        </div>
+                        {expertModePrompts.map((s) => (
+                          <button
+                            key={s.id}
+                            type="button"
+                            onClick={() => {
+                              setShowStyleDropdown(false);
+                              setChatMode('chat');
+                              setLearningModeActive(false);
+                              handleDropdownSelect(s.name, s.id, s.llm_name);
+                            }}
+                            className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50"
+                          >
+                            <span className="flex items-center gap-2 min-w-0">
+                              <FileText className="h-3.5 w-3.5 flex-shrink-0 text-[#21C1B6]" />
+                              <span className="truncate">{s.name}</span>
+                            </span>
+                            {selectedSecretId === s.id && <Check className="h-3.5 w-3.5 flex-shrink-0 text-[#21C1B6]" />}
+                          </button>
+                        ))}
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -5543,7 +5714,12 @@ const ChatModelPage = () => {
                                   </div>
                                 ) : (
                                   <>
-                                    <div className="chat-thread-card__body analysis-page-ai-response">
+                                    <div
+                                      className="chat-thread-card__body analysis-page-ai-response"
+                                      ref={(el) => {
+                                        if (el && msg.id != null) messageBodyRefs.current[msg.id] = el;
+                                      }}
+                                    >
                                       {msg.isStreaming && msg.id === selectedMessageId ? (
                                         <>
                                           <StreamingMarkdown key={`stream-${selectedMessageId}-${streamResetKey}`} bufferRef={streamBufferRef} scrollTargetRef={chatThreadRef} />
@@ -5560,7 +5736,7 @@ const ChatModelPage = () => {
                                       )}
                                     </div>
                                     {assistantContent && (
-                                      <div className="chat-thread-card__footer">
+                                      <div className="chat-thread-card__footer flex flex-wrap items-center gap-1.5">
                                         <button
                                           type="button"
                                           onClick={(e) => {
@@ -5569,9 +5745,63 @@ const ChatModelPage = () => {
                                             handleCopyResponse();
                                           }}
                                           className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50"
+                                          title="Copy AI Response"
                                         >
                                           <Copy className="h-3 w-3" />
                                           Copy
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            downloadTargetRef.current = messageBodyRefs.current[msg.id] || null;
+                                            setResponseDownloadModal('pdf');
+                                          }}
+                                          className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50"
+                                          title="Download AI Response as PDF"
+                                        >
+                                          <Download className="h-3 w-3" />
+                                          PDF
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            downloadTargetRef.current = messageBodyRefs.current[msg.id] || null;
+                                            setResponseDownloadModal('word');
+                                          }}
+                                          className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50"
+                                          title="Download AI Response as Word document"
+                                        >
+                                          <FileText className="h-3 w-3" />
+                                          Word
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            downloadAsHtml(
+                                              messageBodyRefs.current[msg.id],
+                                              `AI_Response_${new Date().toISOString().slice(0, 10)}.html`
+                                            );
+                                          }}
+                                          className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50"
+                                          title="Download AI Response as HTML file"
+                                        >
+                                          <Code className="h-3 w-3" />
+                                          HTML
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            printResponse(messageBodyRefs.current[msg.id]);
+                                          }}
+                                          className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50"
+                                          title="Print AI Response"
+                                        >
+                                          <Printer className="h-3 w-3" />
+                                          Print
                                         </button>
                                       </div>
                                     )}
@@ -5645,6 +5875,23 @@ const ChatModelPage = () => {
           </div>
         </div>
       )}
+
+      <BrandingDownloadModal
+        isOpen={responseDownloadModal === 'pdf'}
+        onClose={() => setResponseDownloadModal(null)}
+        contentRef={downloadTargetRef}
+        filename={`AI_Response_${new Date().toISOString().slice(0, 10)}.pdf`}
+        format="pdf"
+        module="chatmodel-response"
+      />
+      <BrandingDownloadModal
+        isOpen={responseDownloadModal === 'word'}
+        onClose={() => setResponseDownloadModal(null)}
+        contentRef={downloadTargetRef}
+        filename={`AI_Response_${new Date().toISOString().slice(0, 10)}.docx`}
+        format="word"
+        module="chatmodel-response"
+      />
     </div>
   );
 };

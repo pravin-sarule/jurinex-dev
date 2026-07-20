@@ -97,7 +97,7 @@ async def list_secret_prompts(user_id: str, authorization: str | None, fetch_val
         uid = int(user_id)
         from app.services.llm_config_service import get_llm_config
 
-        cfg = get_llm_config(user_id)
+        cfg = await get_llm_config(user_id)
         plan_id = cfg.get("_plan_id")
     except Exception:
         uid = None

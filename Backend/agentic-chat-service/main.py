@@ -21,6 +21,13 @@ from app.core.config import get_settings
 from app.middleware.payment_token_guard import PaymentTokenGuardMiddleware
 from app.services.db import close_pools
 
+# App loggers (app.services.*, agents.*) need a handler to show up in the
+# uvicorn console — uvicorn only configures its own loggers.
+logging.basicConfig(
+    level=getattr(logging, get_settings().log_level.upper(), logging.INFO),
+    format="%(levelname)s:     [%(name)s] %(message)s",
+)
+
 logger = logging.getLogger(__name__)
 
 

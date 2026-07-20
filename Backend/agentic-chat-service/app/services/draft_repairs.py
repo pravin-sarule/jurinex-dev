@@ -163,6 +163,89 @@ def _norm_caption_line(ln: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[*_#>|]|\.{3,}|\u2026", " ", ln)).strip().lower()
 
 
+def _shingle_containment(sample: str, corpus: str, size: int = 8, step: int = 4) -> float:
+    """Fraction of `sample`'s normalized `size`-word shingles present in `corpus`."""
+    s_words = re.sub(r"[^a-z0-9]+", " ", (sample or "").lower()).split()
+    c_norm = " ".join(re.sub(r"[^a-z0-9]+", " ", (corpus or "").lower()).split())
+    if not s_words:
+        return 0.0
+    if len(s_words) < size:
+        return 1.0 if " ".join(s_words) in c_norm else 0.0
+    shingles = [" ".join(s_words[i:i + size]) for i in range(0, len(s_words) - size + 1, step)]
+    return sum(1 for s in shingles if s in c_norm) / len(shingles)
+
+
+def _strip_restarted_document(text: str) -> tuple[str, int]:
+    """Cut appended re-drafts of the WHOLE document (returns (text, removed)).
+
+    A continuation call that restarts from the caption instead of appending
+    produces: [complete draft][same draft again]…. `_dedupe_cause_title` only
+    guards the caption area (first ~15k chars); this net finds a later
+    re-match of the document's opening line and, when the following content is
+    substantially a replay of everything before it (8-word-shingle containment
+    ≥60 % over a ≥500-char sample), truncates there. Near Memo of Parties /
+    affidavit / vakalatnama / verification the bar rises to 90 % so a
+    court-header-first annexed filing is preserved while a verbatim whole-
+    document restart after VERIFICATION (containment ≈1.0) is still cut. The
+    heading guard looks BOTH before and after the re-match (standard Indian
+    layout puts the instrument title under the court header). Repeats until
+    no restart remains; single-copy documents are returned untouched.
+    """
+    _HEAD_RE = r"(?i)memo\s+of\s+parties|affidavit|vakalatnama|verification"
+    removed = 0
+    if not text or len(text) < 400:
+        return text, 0
+    while True:
+        anchor_words: list[str] = []
+        for line in text.splitlines():
+            words = re.findall(r"[A-Za-z0-9]+", line)
+            if len(words) >= 4:
+                anchor_words = words[:8]
+                break
+        if not anchor_words:
+            break
+        pattern = r"[\W_]*".join(re.escape(w) for w in anchor_words)
+        matches = list(re.finditer(pattern, text, re.IGNORECASE))
+        if len(matches) < 2:
+            break
+        opening_has_head = bool(re.search(_HEAD_RE, text[:400]))
+        cut_at = None
+        for m in matches[1:]:
+            pos = m.start()
+            if pos < len(text) * 0.3:
+                continue  # caption area — _dedupe_cause_title's territory
+            # Guard window: 250 chars BEFORE + 400 AFTER. After-pos only when
+            # the opening is not itself a memo/affidavit (else every true
+            # restart of such a document would look "guarded").
+            pre = text[max(0, pos - 250):pos]
+            post = text[pos:pos + 400]
+            guarded = bool(
+                re.search(_HEAD_RE, pre)
+                or (re.search(_HEAD_RE, post) and not opening_has_head)
+            )
+            sample = text[pos:pos + 4000]
+            if len(sample) < 500:
+                continue
+            # Near a protected heading demand near-verbatim replay; elsewhere
+            # the looser 0.6 bar catches lightly reworded restarts.
+            bar = 0.9 if guarded else 0.6
+            if _shingle_containment(sample, text[:pos]) >= bar:
+                cut_at = pos
+                break
+        if cut_at is None:
+            break
+        line_start = text.rfind("\n", 0, cut_at) + 1
+        # Only cut at the line boundary when nothing substantive precedes the
+        # anchor on its own line (e.g. '**' bold markers).
+        prefix = text[line_start:cut_at]
+        if re.sub(r"[\W_]+", "", prefix):
+            line_start = cut_at
+        text = text[:line_start].rstrip() + "\n"
+        removed += 1
+        logger.info("Stripped a restarted duplicate document copy at char %s", line_start)
+    return text, removed
+
+
 def _dedupe_cause_title(text: str) -> tuple[str, bool]:
     """Delete caption blocks that REPLAY the first one (court header + party
     blocks), anywhere before the body boundary. Markdown-, case- and
@@ -1531,6 +1614,13 @@ def _monolithic_deterministic_repairs(
     if cleaned != text:
         info["markdown_artifacts_stripped"] = True
     text = cleaned
+
+    # Whole-document restart dedup FIRST — every later repair (numbering,
+    # annexures, LoD) must operate on a single copy of the document.
+    new_txt, restarts = _strip_restarted_document(text)
+    if restarts:
+        info["restarted_copies_removed"] = restarts
+    text = new_txt
 
     new_txt, removed_notes = _remove_internal_note_paragraphs(text)
     if removed_notes:

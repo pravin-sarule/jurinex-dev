@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import tempfile
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
@@ -20,18 +22,33 @@ from app.services.gemini_pricing import (
 )
 from app.services.gcs_service import download_object_buffer, mime_from_path, parse_gcs_uri
 from app.services.llm_service import (
+    CHAT_CONTINUATION_PROMPT,
+    _CONTINUATION_TRIM_WINDOW,
+    _RepetitionGuard,
+    _STALL_LIMIT,
     _aggregate_candidate_text,
     _append_stream_piece,
     _build_generation_config,
     _extract_stream_payload,
+    _is_max_tokens_finish,
+    _looks_like_restart,
+    _normalize_usage,
+    _stream_round,
     _stream_tail_delta,
+    _trim_overlap,
     build_model_list,
+    build_recovery_prompt,
+    continuation_attempts,
+    continuation_time_budget,
 )
 
 logger = logging.getLogger(__name__)
 
 MAX_HISTORY_TURNS = 10
-DEFAULT_TTL_SECONDS = 600
+DEFAULT_TTL_SECONDS = 300  # 5 minutes — cache auto-deletes after 5 min without a prompt
+# When Gemini hits max_output_tokens mid-answer (e.g. incomplete SUMMARY table),
+# ask the same ADK session to continue. Attempts come from CHAT_CONTINUATION_ATTEMPTS
+# (default 3) so every chat path uses the same continuation policy.
 
 
 def _now() -> datetime:
@@ -44,6 +61,61 @@ def _ttl_seconds(ttl_seconds: int | None = None) -> int:
 
 def _ttl_string(ttl_seconds: int | None = None) -> str:
     return f"{_ttl_seconds(ttl_seconds)}s"
+
+
+def _slide_cache_expiry(
+    svc: Any,
+    *,
+    user_id: str,
+    adk_session_id: str,
+    cache_name: str,
+    ttl_seconds: int,
+) -> float | None:
+    """Sliding inactivity window: reset the cache lifetime to now + TTL.
+
+    Called after every answered prompt so the cache only dies after TTL seconds
+    WITHOUT a prompt, not TTL seconds after creation. Two things must move:
+
+    1. The real Gemini cached-content TTL (caches.update) — Google deletes the
+       cache at this time.
+    2. CacheMetadata.expire_time on the stored in-memory ADK session event —
+       ADK's own validity check uses this, so without the rewrite ADK would
+       discard and rebuild the cache at the original expiry. CacheMetadata is
+       frozen, so it is replaced via model_copy.
+
+    Returns the new expire_time (unix seconds), or None if the cache is
+    already gone (next prompt will rebuild it automatically).
+    """
+    import time as _time
+    from google.genai import types as gt
+    from agents.adk_app import APP_NAME
+
+    try:
+        _get_client().caches.update(
+            name=cache_name,
+            config=gt.UpdateCachedContentConfig(ttl=f"{int(ttl_seconds)}s"),
+        )
+    except Exception as exc:
+        logger.info("Cache TTL slide skipped (cache gone?) %s: %s", cache_name, exc)
+        return None
+
+    new_expire = _time.time() + int(ttl_seconds)
+    try:
+        stored = (
+            getattr(svc, "sessions", {})
+            .get(APP_NAME, {})
+            .get(user_id, {})
+            .get(adk_session_id)
+        )
+        if stored is not None:
+            for event in reversed(stored.events or []):
+                md = getattr(event, "cache_metadata", None)
+                if md is not None and md.cache_name == cache_name:
+                    event.cache_metadata = md.model_copy(update={"expire_time": new_expire})
+                    break
+    except Exception:
+        logger.exception("Failed to update in-memory ADK cache metadata %s", cache_name)
+    return new_expire
 
 
 def _system_hash(system_instruction: str) -> str:
@@ -232,6 +304,38 @@ async def get_session_row(session_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def _db_adk_cache_name(file_id: str) -> str | None:
+    """Latest still-valid explicit cache name for this file.
+
+    A generation round that aborts early (degenerate repetition) can end before
+    ADK emits its cache-metadata event, leaving ``adk_cache_name`` unset even
+    though the Gemini cache exists. The DB record from cache priming still has
+    the name — recovering it lets the changed-sampling direct recovery run
+    instead of the fixed-sampling ADK runner (which re-loops deterministically).
+    """
+    try:
+        with doc_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT adk_cache_name
+                    FROM gemini_cache_sessions
+                    WHERE file_id=%s::uuid AND status='active' AND expires_at > NOW()
+                      AND adk_cache_name IS NOT NULL AND adk_cache_name <> ''
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (file_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        if isinstance(row, dict):
+            return row.get("adk_cache_name") or None
+        return row[0] or None
+    except Exception:
+        return None
+
+
 async def ask_with_context_cache(
     *,
     file_id: str,
@@ -242,6 +346,7 @@ async def ask_with_context_cache(
     model_name: str,
     llm_config: dict[str, Any] | None = None,
     chat_session_id: str | None = None,
+    is_priming: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream document Q&A using ADK App + ContextCacheConfig (explicit Gemini caching).
 
@@ -251,6 +356,8 @@ async def ask_with_context_cache(
     queries re-use the cached context automatically.
     """
     from google.genai import types as gt
+    from google.adk.runners import RunConfig
+    from google.adk.agents.run_config import StreamingMode
     from agents.adk_app import (
         get_or_build_document_runner,
         get_or_create_adk_session,
@@ -263,10 +370,24 @@ async def ask_with_context_cache(
     from app.services.gemini_pricing import normalize_model_name
     model = normalize_model_name(model_name or get_settings().adk_model or DEFAULT_CACHE_MODEL)
 
+    # Apply Document_DB llm_chat_config.max_output_tokens to ADK generation.
+    # Passing the model keeps chat thinking at the model family's minimum.
+    gen_cfg = _build_generation_config(llm_config or {}, model)
+    logger.info(
+        "ADK document chat model=%s max_output_tokens=%s temperature=%.2f file=%s",
+        model,
+        gen_cfg["max_output_tokens"],
+        gen_cfg["temperature"],
+        file_id,
+    )
+
     runner, svc, runner_key = get_or_build_document_runner(
         file_id=file_id,
         model_name=model,
         system_instruction=system_instruction,
+        max_output_tokens=gen_cfg["max_output_tokens"],
+        temperature=gen_cfg["temperature"],
+        thinking_config=gen_cfg.get("thinking_config"),
         ttl_seconds=int(get_settings().context_cache_ttl_seconds or DEFAULT_TTL_SECONDS),
         cache_intervals=10,
         min_tokens=2048,
@@ -288,7 +409,7 @@ async def ask_with_context_cache(
     # is still valid — that way ADK can reference the persistent cache without needing
     # the document bytes in the current (new, empty) in-memory session.
     if not primed:
-        try:
+        def _check_primed():
             with doc_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -301,10 +422,13 @@ async def ask_with_context_cache(
                         """,
                         (file_id,),
                     )
-                    row = cur.fetchone()
-                    if row and int(row.get("questions_asked") or 0) > 0:
-                        mark_session_primed(runner_key, session_key)
-                        primed = True
+                    return cur.fetchone()
+
+        try:
+            row = await _run_blocking(_check_primed)
+            if row:
+                mark_session_primed(runner_key, session_key)
+                primed = True
         except Exception:
             pass  # Ignore DB errors; fall back to full document send
     if not primed:
@@ -314,6 +438,16 @@ async def ask_with_context_cache(
             mime = spec.get("mimetype") or "application/octet-stream"
             if buf:
                 doc_parts.append(gt.Part.from_bytes(data=buf, mime_type=mime))
+        if not doc_parts:
+            # Caller skipped the document bytes because has_active_cache() was
+            # True, but the cache expired in between. Asking without the
+            # document would produce an ungrounded answer — return empty so the
+            # orchestrator's GCS fallback (which fetches the bytes) takes over.
+            logger.warning(
+                "Cache expired between check and generation file=%s — yielding to GCS fallback",
+                file_id,
+            )
+            return
         parts = [*doc_parts, gt.Part(text=question)]
     else:
         parts = [gt.Part(text=question)]
@@ -328,94 +462,111 @@ async def ask_with_context_cache(
     adk_cache_name: str | None = None
     adk_expire_time: float | None = None
     finish_reason: str | None = None
+    _t_start = time.monotonic()
+    guard = _RepetitionGuard()
+    stalls = 0  # consecutive non-empty pieces fully eaten by the dedupe
+    degen_abort = False  # a round was cut for repetition → try a recovery round
 
+    # Round-trip metrics
+    prompt = cached = output = total = 0
+    curr_round_output = 0
+
+    # ── 1. First round ──────────────────────────────────────────────────────
     try:
         async for event in runner.run_async(
             user_id=user_id,
             session_id=adk_session_id,
             new_message=new_message,
+            run_config=RunConfig(streaming_mode=StreamingMode.SSE),
         ):
             # Accept events from the document agent OR events with no author (framework events).
-            # ADK may prefix the author with the app name (e.g. "document_cache_app/document_cache_agent")
-            # so use a substring check rather than exact equality.
             author = getattr(event, "author", None) or ""
             if author and "document_cache_agent" not in author:
                 continue
 
-            # Extract cache metadata (available on events where ADK created/used a cache)
             if event.cache_metadata and event.cache_metadata.cache_name:
                 adk_cache_name = event.cache_metadata.cache_name
                 adk_expire_time = event.cache_metadata.expire_time
+                # If ADK gave us a cache name, this session is definitely primed
+                mark_session_primed(runner_key, session_key)
 
-            # Extract usage from final event
             if event.usage_metadata:
                 um = event.usage_metadata
-                prompt = int(getattr(um, "prompt_token_count", 0) or 0)
-                cached = int(getattr(um, "cached_content_token_count", 0) or 0)
-                output = int(getattr(um, "candidates_token_count", 0) or 0)
-                total = int(getattr(um, "total_token_count", 0) or (prompt + output))
+                # Usage metadata in streaming events is CUMULATIVE for the current round.
+                # Take latest (max) value seen in this round.
+                prompt = max(prompt, int(getattr(um, "prompt_token_count", 0) or 0))
+                cached = max(cached, int(getattr(um, "cached_content_token_count", 0) or 0))
+                curr_round_output = max(curr_round_output, int(getattr(um, "candidates_token_count", 0) or 0))
+                total = prompt + output + curr_round_output
 
-            # Yield streaming text from content events (partial OR non-partial).
-            # Some ADK/Gemini versions deliver text in non-partial events before turn_complete.
             if event.content:
                 for part in getattr(event.content, "parts", []) or []:
                     text = getattr(part, "text", "") or ""
                     if not text:
                         continue
                     if getattr(part, "thought", False):
-                        # Always forward thinking tokens so the frontend can show progress;
-                        # do NOT add them to `full` (they are not part of the visible answer).
                         yield {"type": "thought", "text": text}
                     else:
-                        # Append only the new delta to avoid duplicating text that ADK
-                        # re-delivers in a final non-partial event.
-                        if not full.endswith(text):
-                            full += text
-                            yield {"type": "chunk", "text": text}
+                        full, delta = _append_stream_piece(full, text)
+                        if delta:
+                            yield {"type": "chunk", "text": delta}
+                            guard.feed(delta)
+                            stalls = 0
+                        elif len(text) >= 8:
+                            stalls += 1
+                if guard.tripped or stalls >= _STALL_LIMIT:
+                    logger.warning("Degenerate repetition in ADK initial stream file=%s", file_id)
+                    finish_reason = None
+                    degen_abort = True
+                    break
 
-            # Final turn — flush any text not yet streamed (covers non-streaming delivery)
             if event.turn_complete:
-                # Fallback: if full is STILL empty but event.output has text, use it
                 if not full.strip() and hasattr(event, "output") and event.output:
                     out_text = str(event.output) if not isinstance(event.output, list) else "".join(str(o) for o in event.output)
                     if out_text.strip():
-                        full += out_text
-                        yield {"type": "chunk", "text": out_text}
+                        full, delta = _append_stream_piece(full, out_text)
+                        if delta:
+                            yield {"type": "chunk", "text": delta}
 
             if hasattr(event, "finish_reason") and event.finish_reason:
                 finish_reason = str(event.finish_reason)
+            else:
+                cands = getattr(event, "candidates", None) or []
+                if cands:
+                    cfr = getattr(cands[0], "finish_reason", None)
+                    if cfr:
+                        finish_reason = str(cfr)
 
-    except Exception as exc:
-        logger.exception("ADK runner failed file=%s session=%s", file_id, session_key)
-        yield {"type": "error", "message": str(exc), "code": "ADK_STREAM_FAILED"}
+    except (Exception, BaseException) as exc:
+        if isinstance(exc, GeneratorExit):
+            pass
+        else:
+            logger.exception("ADK runner failed file=%s", file_id)
+            yield {"type": "error", "message": str(exc), "code": "ADK_STREAM_FAILED"}
         return
 
-    # Track whether the ADK produced real user-facing content before any fallback.
-    had_real_content = bool(full.strip())
+    # Accumulate round output into session total
+    output += curr_round_output
+    curr_round_output = 0
 
+    # ── 2. Fallback / Retry if empty ────────────────────────────────────────
+    had_real_content = bool(full.strip())
     if not had_real_content:
-        logger.warning("ADK runner returned empty response file=%s model=%s primed=%s finish=%s", file_id, model, primed, finish_reason)
+        logger.warning("ADK runner returned empty response file=%s primed=%s", file_id, primed)
         is_normal_stop = finish_reason and any(x in finish_reason for x in ("STOP", "FINISH_REASON_UNSPECIFIED", "None", "1"))
 
         if not is_normal_stop:
-            yield {
-                "type": "error",
-                "message": f"Gemini blocked the response ({finish_reason}). Try rephrasing.",
-                "code": "EMPTY_RESPONSE",
-            }
+            yield {"type": "error", "message": f"Gemini blocked the response ({finish_reason}).", "code": "EMPTY_RESPONSE"}
             return
 
         if not primed:
-            # First document load — ADK acknowledged context but didn't answer the
-            # question.  Mark as primed and immediately re-ask with the question only
-            # so the user gets a real answer on their first click (no placeholder shown).
             mark_session_primed(runner_key, session_key)
             primed = True
-            logger.info("ADK primed session without answering — auto-retrying question file=%s", file_id)
+            logger.info("ADK primed session without answering — auto-retrying file=%s", file_id)
 
-            retry_parts = [gt.Part(text=question)]
-            retry_message = gt.Content(role="user", parts=retry_parts)
-            prompt = cached = output = total = 0
+            retry_message = gt.Content(role="user", parts=[gt.Part(text=question)])
+            # Reset round metrics for retry (but output total persists)
+            curr_round_output = 0
             finish_reason = None
 
             try:
@@ -423,21 +574,18 @@ async def ask_with_context_cache(
                     user_id=user_id,
                     session_id=adk_session_id,
                     new_message=retry_message,
+                    run_config=RunConfig(streaming_mode=StreamingMode.SSE),
                 ):
                     author = getattr(event, "author", None) or ""
                     if author and "document_cache_agent" not in author:
                         continue
 
-                    if event.cache_metadata and event.cache_metadata.cache_name:
-                        adk_cache_name = event.cache_metadata.cache_name
-                        adk_expire_time = event.cache_metadata.expire_time
-
                     if event.usage_metadata:
                         um = event.usage_metadata
-                        prompt = int(getattr(um, "prompt_token_count", 0) or 0)
-                        cached = int(getattr(um, "cached_content_token_count", 0) or 0)
-                        output = int(getattr(um, "candidates_token_count", 0) or 0)
-                        total = int(getattr(um, "total_token_count", 0) or (prompt + output))
+                        prompt = max(prompt, int(getattr(um, "prompt_token_count", 0) or 0))
+                        cached = max(cached, int(getattr(um, "cached_content_token_count", 0) or 0))
+                        curr_round_output = max(curr_round_output, int(getattr(um, "candidates_token_count", 0) or 0))
+                        total = prompt + output + curr_round_output
 
                     if event.content:
                         for part in getattr(event.content, "parts", []) or []:
@@ -447,39 +595,358 @@ async def ask_with_context_cache(
                             if getattr(part, "thought", False):
                                 yield {"type": "thought", "text": text}
                             else:
-                                if not full.endswith(text):
-                                    full += text
-                                    yield {"type": "chunk", "text": text}
+                                full, delta = _append_stream_piece(full, text)
+                                if delta:
+                                    yield {"type": "chunk", "text": delta}
 
                     if event.turn_complete:
                         if not full.strip() and hasattr(event, "output") and event.output:
                             out_text = str(event.output) if not isinstance(event.output, list) else "".join(str(o) for o in event.output)
                             if out_text.strip():
-                                full += out_text
-                                yield {"type": "chunk", "text": out_text}
+                                full, delta = _append_stream_piece(full, out_text)
+                                if delta:
+                                    yield {"type": "chunk", "text": delta}
 
                     if hasattr(event, "finish_reason") and event.finish_reason:
                         finish_reason = str(event.finish_reason)
 
             except Exception as exc:
-                logger.exception("ADK retry failed file=%s session=%s", file_id, session_key)
+                logger.exception("ADK retry failed file=%s", file_id)
                 yield {"type": "error", "message": str(exc), "code": "ADK_RETRY_FAILED"}
                 return
 
-            had_real_content = bool(full.strip())
-            if not had_real_content:
-                # Retry also returned nothing — let GCS fallback handle it.
-                logger.info("ADK retry also empty for file=%s — yielding nothing for GCS fallback", file_id)
+            if not full.strip():
+                logger.info("ADK retry also empty for file=%s — falling back to GCS path", file_id)
                 return
+            
+            # Accumulate retry output
+            output += curr_round_output
+            curr_round_output = 0
         else:
-            # Primed session: the model should have answered. Return empty so the
-            # orchestrator's GCS fallback path takes over and produces a real response.
             logger.info("ADK returned empty for primed session — falling back to GCS path")
             return
 
-    # Session is now primed (document was sent and ADK has it in session history)
     if not primed:
         mark_session_primed(runner_key, session_key)
+
+    # Admin max_output_tokens is already applied; when the model still hits the
+    # budget mid-answer (e.g. unfinished SUMMARY table), continue up to N times.
+    # We only auto-continue if the budget is reasonably large (> 1000 tokens);
+    # small budgets imply the user explicitly wants a short/truncated response.
+    cont_attempts = continuation_attempts()
+    if gen_cfg.get("max_output_tokens", 0) < 1000:
+        cont_attempts = 0
+
+    consec_degen = 1 if degen_abort else 0
+    for cont_i in range(cont_attempts):
+        if not (_is_max_tokens_finish(finish_reason) or degen_abort) or not full.strip():
+            break
+        budget = continuation_time_budget()
+        if budget and (time.monotonic() - _t_start) > budget:
+            logger.info(
+                "Continuation time budget (%.0fs) exhausted — delivering partial answer file=%s",
+                budget,
+                file_id,
+            )
+            break
+        recovery = degen_abort
+        degen_abort = False
+        logger.info(
+            "ADK continuation %s/%s (recovery=%s) file=%s answer_chars=%s",
+            cont_i + 1,
+            cont_attempts,
+            recovery,
+            file_id,
+            len(full),
+        )
+        yield {
+            "type": "status",
+            "status": "continuing",
+            "message": (
+                f"Recovering answer after repetition ({cont_i + 1}/{cont_attempts})..."
+                if recovery
+                else f"Completing truncated answer ({cont_i + 1}/{cont_attempts})..."
+            ),
+        }
+        finish_reason = None
+        full_before = full
+        cont_guard = _RepetitionGuard()
+        cont_stalls = 0
+
+        if recovery and not adk_cache_name:
+            # The aborted round may have died before ADK emitted cache metadata;
+            # the explicit cache usually still exists — recover its name so the
+            # changed-sampling direct recovery below can actually run.
+            adk_cache_name = await _run_blocking(lambda: _db_adk_cache_name(file_id))
+
+        rec_doc_parts: list[Any] = []
+        if recovery and not adk_cache_name:
+            # First question in a session: the cache row is only persisted at
+            # the END of this request, so there is no cache name to recover yet.
+            # Ground the direct recovery by re-sending the document bytes inline
+            # instead of falling back to the fixed-sampling ADK runner (which
+            # deterministically recreates the same loop).
+            for spec in file_specs:
+                buf = spec.get("buffer") or b""
+                mime = spec.get("mimetype") or "application/octet-stream"
+                if buf:
+                    rec_doc_parts.append(gt.Part.from_bytes(data=buf, mime_type=mime))
+
+        if recovery and (adk_cache_name or rec_doc_parts):
+            # Recover via a DIRECT generation against the explicit cache (or the
+            # inline document) with changed sampling (higher temperature +
+            # frequency penalty). The ADK runner's fixed low temperature would
+            # deterministically recreate the exact same repetition loop.
+            state: dict[str, Any] = {"streamed": "", "last_chunk": None}
+            direct_ok = False
+            try:
+                rec_kwargs: dict[str, Any] = {
+                    "temperature": max(0.7, float(gen_cfg["temperature"] or 0)),
+                    "frequency_penalty": 0.4,
+                    "max_output_tokens": gen_cfg["max_output_tokens"],
+                }
+                if adk_cache_name:
+                    # The system instruction lives inside the explicit cache;
+                    # the API rejects passing both.
+                    rec_kwargs["cached_content"] = adk_cache_name
+                else:
+                    rec_kwargs["system_instruction"] = system_instruction
+                rec_cfg = gt.GenerateContentConfig(**rec_kwargs)
+                # Collapse degenerate punctuation floods (e.g. a table separator
+                # of 1000 dashes) before echoing the answer back as a model turn
+                # — quoting the flood verbatim invites the model to resume it.
+                model_turn = re.sub(
+                    r"([\s|\-:=+_~*#.])\1{9,}", lambda m: m.group(1) * 3, full.rstrip()
+                )
+                rec_contents = [
+                    gt.Content(role="user", parts=[*rec_doc_parts, gt.Part(text=question)]),
+                    gt.Content(role="model", parts=[gt.Part(text=model_turn)]),
+                    gt.Content(role="user", parts=[gt.Part(text=build_recovery_prompt(full))]),
+                ]
+                _direct = _get_client()
+                sync_iter = await _run_blocking(
+                    lambda: _direct.models.generate_content_stream(
+                        model=model, contents=rec_contents, config=rec_cfg
+                    )
+                )
+                async for ev in _stream_round(iter(sync_iter), state, prior_text=full):
+                    yield ev
+                direct_ok = True
+            except Exception as exc:
+                logger.warning(
+                    "Direct cache recovery failed (%s) — falling back to ADK session recovery", exc
+                )
+            if direct_ok:
+                added = state["streamed"]
+                full += added
+                if state["last_chunk"] is not None:
+                    u = _normalize_usage(state["last_chunk"], len(added))
+                    # Output is additive; Input/Cached are latest/max.
+                    prompt = max(prompt, u["inputTokens"])
+                    output += u["outputTokens"]
+                    total = prompt + output
+                    finish_reason = u["finishReason"]
+                if state.get("degenerate") or state.get("restarted") or not added.strip():
+                    consec_degen += 1
+                    if consec_degen >= 3:
+                        logger.warning(
+                            "Recovery also degenerated — delivering partial answer file=%s", file_id
+                        )
+                        break
+                    degen_abort = True
+                    continue
+                consec_degen = 0
+                continue
+
+        cont_message = gt.Content(
+            role="user",
+            parts=[gt.Part(text=build_recovery_prompt(full) if recovery else CHAT_CONTINUATION_PROMPT)],
+        )
+        # Reset per-round state
+        round_raw = ""
+        head_emitted = False
+        trim_offset = 0
+        round_degenerate = False
+        round_restarted = False
+        round_error = False
+
+        try:
+            async for event in runner.run_async(
+                user_id=user_id,
+                session_id=adk_session_id,
+                new_message=cont_message,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+            ):
+                author = getattr(event, "author", None) or ""
+                if author and "document_cache_agent" not in author:
+                    continue
+
+                if event.cache_metadata and event.cache_metadata.cache_name:
+                    adk_cache_name = event.cache_metadata.cache_name
+                    adk_expire_time = event.cache_metadata.expire_time
+
+                if event.usage_metadata:
+                    um = event.usage_metadata
+                    # Round-trip maximums within the current stream
+                    prompt = max(prompt, int(getattr(um, "prompt_token_count", 0) or 0))
+                    cached = max(cached, int(getattr(um, "cached_content_token_count", 0) or 0))
+                    curr_round_output = max(curr_round_output, int(getattr(um, "candidates_token_count", 0) or 0))
+                    total = prompt + output + curr_round_output
+
+                if event.content:
+                    for part in getattr(event.content, "parts", []) or []:
+                        text = getattr(part, "text", "") or ""
+                        if not text:
+                            continue
+                        if getattr(part, "thought", False):
+                            yield {"type": "thought", "text": text}
+                        else:
+                            # Use round_raw for snapshot deduplication within this round
+                            round_raw, delta = _append_stream_piece(round_raw, text)
+                            if not delta:
+                                # Stalls are ONLY significant after we've seen some output
+                                # or if they are long fragments.
+                                if len(text) >= 15:
+                                    cont_stalls += 1
+                                continue
+                            
+                            cont_stalls = 0
+                            
+                            # Handle overlap with previous rounds
+                            if not head_emitted:
+                                # Repetition guard on the raw stream to catch loops early
+                                if cont_guard.feed(delta):
+                                    round_degenerate = True
+                                    break
+                                
+                                # Buffer the head until we have enough to detect overlap
+                                if len(round_raw) < _CONTINUATION_TRIM_WINDOW:
+                                    continue 
+                                
+                                head = _trim_overlap(full, round_raw)
+                                if _looks_like_restart(full, head):
+                                    round_restarted = True
+                                    break
+                                
+                                trim_offset = len(round_raw) - len(head)
+                                head_emitted = True
+                                if head:
+                                    yield {"type": "chunk", "text": head}
+                                    cont_guard.feed(head)
+                                continue
+
+                            # Standard stream delivery
+                            yield {"type": "chunk", "text": delta}
+                            if cont_guard.feed(delta):
+                                round_degenerate = True
+                                break
+
+                    if round_degenerate or round_restarted or cont_stalls >= _STALL_LIMIT:
+                        if round_degenerate or cont_stalls >= _STALL_LIMIT:
+                            logger.warning(
+                                "Degenerate repetition in ADK continuation (tripped=%s stalls=%s) — aborting file=%s",
+                                round_degenerate,
+                                cont_stalls,
+                                file_id,
+                            )
+                        else:
+                            logger.warning("Continuation restarted from the beginning — discarding round.")
+                        finish_reason = None
+                        break
+
+                if event.turn_complete:
+                    if hasattr(event, "output") and event.output and not round_raw.strip():
+                        out_text = (
+                            str(event.output)
+                            if not isinstance(event.output, list)
+                            else "".join(str(o) for o in event.output)
+                        )
+                        if out_text.strip():
+                            round_raw, delta = _append_stream_piece(round_raw, out_text)
+                            if delta:
+                                if not head_emitted:
+                                    head = _trim_overlap(full, round_raw)
+                                    if not _looks_like_restart(full, head):
+                                        yield {"type": "chunk", "text": head}
+                                        head_emitted = True
+                                        trim_offset = len(round_raw) - len(head)
+                                else:
+                                    yield {"type": "chunk", "text": delta}
+
+                if hasattr(event, "finish_reason") and event.finish_reason:
+                    finish_reason = str(event.finish_reason)
+        except (Exception, BaseException) as exc:
+            round_error = True
+            if isinstance(exc, GeneratorExit):
+                # Client disconnected; stop everything immediately.
+                return
+            logger.exception("ADK continuation error file=%s", file_id)
+            yield {"type": "status", "status": "continuing", "message": f"Continuation error ({exc})"}
+            break
+
+        # Post-round finalization: flush remaining buffered head if round was too short
+        if not head_emitted and not round_restarted and not round_degenerate and not round_error:
+            head = _trim_overlap(full, round_raw)
+            if _looks_like_restart(full, head):
+                round_restarted = True
+            else:
+                if head:
+                    yield {"type": "chunk", "text": head}
+                head_emitted = True
+                trim_offset = len(round_raw) - len(head)
+
+        # ── CRITICAL: Only append to the answer if the round was VALID ──
+        if round_restarted or round_degenerate or round_error:
+            if round_degenerate or (cont_stalls >= _STALL_LIMIT):
+                # Recovery loop state
+                consec_degen += 1
+                if consec_degen >= 3:
+                    logger.warning("Repetition persisted across ADK rounds — delivering partial answer file=%s", file_id)
+                    break
+                degen_abort = True
+            elif round_restarted:
+                logger.warning("ADK continuation restarted — stopping further rounds file=%s", file_id)
+                break
+            else:
+                # Other error
+                break
+            continue
+
+        # Round was successful!
+        added = round_raw[trim_offset:]
+        if not added.strip():
+            logger.info("ADK continuation added nothing new — delivering existing answer file=%s", file_id)
+            break
+            
+        full += added
+        consec_degen = 0
+        degen_abort = False
+
+        # Accumulate round output into session total
+        output += curr_round_output
+        curr_round_output = 0
+    # Every answered prompt resets the cache lifetime to a fresh TTL, so the
+    # cache is deleted only after 5 minutes WITHOUT a prompt. If the user was
+    # idle past expiry, the slide is skipped and the next prompt rebuilds the
+    # cache automatically.
+    if adk_cache_name:
+        _ttl = _ttl_seconds()
+        slid = await _run_blocking(
+            lambda: _slide_cache_expiry(
+                svc,
+                user_id=user_id,
+                adk_session_id=adk_session_id,
+                cache_name=adk_cache_name,
+                ttl_seconds=_ttl,
+            )
+        )
+        if slid:
+            adk_expire_time = slid
+            logger.info(
+                "Cache window reset: %s expires %ds from now (prompt received)",
+                adk_cache_name,
+                _ttl,
+            )
 
     # ── Persist usage + update / create DB cache session record ─────────────
     db_document_tokens = cached if cached > 0 else prompt
@@ -491,6 +958,7 @@ async def ask_with_context_cache(
         adk_expire_time=adk_expire_time,
         system_instruction=system_instruction,
         document_tokens=db_document_tokens,
+        chat_session_id=session_key,
     )
 
     costs = compute_usage_cost(
@@ -501,11 +969,12 @@ async def ask_with_context_cache(
         document_tokens=cached,
     )
 
-    # Only log a query entry when the ADK produced a real answer.
-    # For the initial cache-priming response ("Document context acknowledged."),
-    # the token cost is already captured in setup_cost — logging it again as a
-    # query would create a phantom entry and double-count the document tokens.
-    is_priming_only = not primed and not had_real_content
+    # Only log a query entry when a real user question produced a real answer.
+    # The cache-priming call ("Acknowledge the document context." from
+    # /cache/create, is_priming=True) always answers with SOME text, but its
+    # token cost is already captured in setup_cost — logging it as a query
+    # would show output tokens and a query cost before the user asked anything.
+    is_priming_only = is_priming or (not primed and not had_real_content)
     if db_session_id and not is_priming_only:
         await persist_query_usage(
             session_id=db_session_id,
@@ -516,7 +985,9 @@ async def ask_with_context_cache(
             costs=costs,
         )
 
-    status = await get_status_for_file(file_id)
+    # ── Final Usage Report ──────────────────────────────────────────────────
+    total = prompt + output
+    status = await get_status_for_file(file_id, session_id=db_session_id)
     yield {
         "type": "usage",
         "inputTokens": prompt,
@@ -533,6 +1004,8 @@ async def ask_with_context_cache(
         "pricing": get_pricing(model, context_token_count=cached),
         "cacheMechanism": "gemini_explicit_adk",
         "sessionMetrics": status,
+        "finishReason": finish_reason,
+        "outputTruncated": _is_max_tokens_finish(finish_reason),
     }
     yield {"type": "done", "answer": full}
 
@@ -546,6 +1019,7 @@ async def _upsert_adk_cache_session(
     adk_expire_time: float | None,
     system_instruction: str,
     document_tokens: int,
+    chat_session_id: str | None = None,
 ) -> str | None:
     """Create or refresh the gemini_cache_sessions DB record from ADK event metadata.
 
@@ -556,21 +1030,35 @@ async def _upsert_adk_cache_session(
     files = _file_fingerprint([file_id])
     model = model_name or DEFAULT_CACHE_MODEL
 
-    # Look for existing active session for this file
+    # Look for existing active session for this specific chat
     session_id = None
     with doc_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT session_id FROM gemini_cache_sessions 
-                WHERE file_id=%s::uuid AND status='active' AND expires_at > NOW()
-                ORDER BY created_at DESC LIMIT 1
-                """,
-                (file_id,)
-            )
-            row = cur.fetchone()
-            if row:
-                session_id = row["session_id"]
+            if chat_session_id:
+                cur.execute(
+                    """
+                    SELECT session_id FROM gemini_cache_sessions 
+                    WHERE session_id=%s::uuid AND status='active' AND expires_at > NOW()
+                    """,
+                    (chat_session_id,)
+                )
+                row = cur.fetchone()
+                if row:
+                    session_id = row["session_id"]
+
+            if not session_id:
+                # Fallback: find any recent active session for this file
+                cur.execute(
+                    """
+                    SELECT session_id FROM gemini_cache_sessions 
+                    WHERE file_id=%s::uuid AND status='active' AND expires_at > NOW()
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (file_id,)
+                )
+                row = cur.fetchone()
+                if row:
+                    session_id = row["session_id"]
 
     if session_id:
         # Update cache name / expiry if ADK gave us fresher info
@@ -598,7 +1086,7 @@ async def _upsert_adk_cache_session(
         return session_id
 
     # No active session — create one using ADK-provided metadata
-    new_session_id = str(uuid.uuid4())
+    new_session_id = chat_session_id or str(uuid.uuid4())
     created_at = _now()
     expires_at: datetime | None = None
     if adk_expire_time:
@@ -897,8 +1385,63 @@ async def get_status(session_id: str, user_id: str | None = None) -> dict[str, A
     return payload
 
 
-async def get_status_for_file(file_id: str) -> dict[str, Any]:
+async def has_active_cache(file_id: str) -> bool:
+    """True when a valid Gemini named cache exists for this file.
+    
+    Mirrors the primed-recovery check in ``ask_with_context_cache``: when this
+    returns True, the ADK path answers question-only against the named cache and
+    never needs the document bytes — so callers can skip downloading them.
+    """
+    def _check() -> bool:
+        with doc_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM gemini_cache_sessions
+                    WHERE file_id=%s::uuid AND status='active' AND expires_at > NOW()
+                      AND adk_cache_name IS NOT NULL AND adk_cache_name <> ''
+                    LIMIT 1
+                    """,
+                    (file_id,),
+                )
+                return cur.fetchone() is not None
+
+    try:
+        return await _run_blocking(_check)
+    except Exception:
+        return False
+
+
+async def get_status_for_session(session_id: str) -> dict[str, Any] | None:
+    """Detailed lifecycle + query history for one specific cache session."""
+    _ensure_schema()
+    with doc_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM gemini_cache_sessions WHERE session_id=%s::uuid", (session_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            session = dict(row)
+            cur.execute(
+                """
+                SELECT * FROM query_logs 
+                WHERE session_id = %s::uuid 
+                ORDER BY created_at ASC
+                """,
+                (session_id,),
+            )
+            logs = [dict(x) for x in cur.fetchall()]
+    return _status_payload(session, logs)
+
+
+async def get_status_for_file(file_id: str, session_id: str | None = None) -> dict[str, Any]:
     """Latest session lifecycle + query history aggregated across all cache sessions for this file."""
+    if session_id:
+        s = await get_status_for_session(session_id)
+        if s:
+            return s
+
     _ensure_schema()
     with doc_conn() as conn:
         with conn.cursor() as cur:
@@ -915,14 +1458,15 @@ async def get_status_for_file(file_id: str) -> dict[str, Any]:
             if not row:
                 return {"fileId": file_id, "status": "NO_SESSION", "queryHistory": [], "totalQueries": 0}
             session = dict(row)
+            # Use the specific session's ID for logs to avoid file-level crosstalk
+            sid = session["session_id"]
             cur.execute(
                 """
-                SELECT ql.* FROM query_logs ql
-                INNER JOIN gemini_cache_sessions gcs ON ql.session_id = gcs.session_id
-                WHERE gcs.file_id = %s::uuid
-                ORDER BY ql.created_at ASC
+                SELECT * FROM query_logs 
+                WHERE session_id = %s::uuid 
+                ORDER BY created_at ASC
                 """,
-                (file_id,),
+                (sid,),
             )
             all_logs = [dict(x) for x in cur.fetchall()]
             cur.execute(

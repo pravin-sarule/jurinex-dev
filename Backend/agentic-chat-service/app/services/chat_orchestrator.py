@@ -41,7 +41,12 @@ from app.services.llm_config_service import (
 )
 from app.services.llm_policy_service import assert_chat_allowed, assert_stored_file_meets_limits, assert_upload_allowed
 from app.services.storage_policy import assert_storage_allowed
-from app.services.llm_service import count_tokens_from_gcs, stream_llm_general, stream_llm_with_gcs
+from app.services.llm_service import (
+    _is_claude_model,
+    count_tokens_from_gcs,
+    stream_llm_general,
+    stream_llm_with_gcs,
+)
 from app.services.judgement_search_service import JUDGEMENT_SEARCH_SECTION, stream_judgement_search
 from app.services.secret_prompt_service import resolve_secret_prompt
 from app.services.system_prompt_service import build_system_instruction, build_profile_query_prefix
@@ -62,6 +67,21 @@ class _JsonEncoder(json.JSONEncoder):
         if isinstance(o, (datetime, date)):
             return o.isoformat()
         return super().default(o)
+
+
+def _sse_line(obj: Any) -> str:
+    """Format one SSE event line and live-render the streamed answer in the console."""
+    if isinstance(obj, dict):
+        etype = obj.get("type")
+        if etype == "chunk":
+            text = obj.get("text") or ""
+            if text:
+                print(text, end="", flush=True)
+        elif etype in ("done", "error"):
+            print(flush=True)
+    if isinstance(obj, str):
+        return f"data: {obj}\n\n"
+    return f"data: {json.dumps(obj, cls=_JsonEncoder)}\n\n"
 
 def _jwt_secret() -> str:
     s = get_settings().jwt_secret
@@ -156,8 +176,8 @@ def _build_profile_lookup_answer(profile: dict[str, Any] | None) -> str:
     )
 
 
-def get_limits_payload(user_id: str | None) -> dict[str, Any]:
-    cfg = get_llm_config(user_id)
+async def get_limits_payload(user_id: str | None) -> dict[str, Any]:
+    cfg = await get_llm_config(user_id)
     upload_mb = get_multer_upload_ceiling_mb(cfg)
     return {
         "success": True,
@@ -194,7 +214,7 @@ async def initiate_upload(user_id: str, filename: str, mimetype: str, size: int)
         raise ValueError("filename is required")
     if size <= 0:
         raise ValueError("size must be a positive number")
-    cfg = get_llm_config(user_id)
+    cfg = await get_llm_config(user_id)
 
     # Per-file limits (size, daily count, PDF pages)
     policy = await assert_upload_allowed(user_id, cfg, size_bytes=size, mimetype=mimetype, originalname=filename)
@@ -257,7 +277,7 @@ async def complete_upload(user_id: str, upload_token: str, filename: str, mimety
 
     final_name = filename or payload.get("filename") or gcs_path.split("/")[-1]
     final_mime = mimetype or meta.get("content_type") or payload.get("mimetype") or "application/octet-stream"
-    cfg = get_llm_config(user_id)
+    cfg = await get_llm_config(user_id)
     buf = None
     if int(cfg.get("max_document_pages") or 0) > 0 and (
         final_mime == "application/pdf" or final_name.lower().endswith(".pdf")
@@ -309,7 +329,7 @@ async def upload_from_google_drive(user_id: str, file_id: str, access_token: str
     buf = downloaded["buffer"]
     filename = downloaded["filename"]
     mime_type = downloaded["mimeType"]
-    cfg = get_llm_config(user_id)
+    cfg = await get_llm_config(user_id)
     policy = await assert_upload_allowed(
         user_id, cfg, size_bytes=len(buf), buffer=buf, mimetype=mime_type, originalname=filename
     )
@@ -364,14 +384,11 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
     body = ctx.get("request_body") or {}
     user_id = str(ctx["user_id"])
     authorization = ctx.get("authorization")
-    llm_cfg = ctx.get("llm_config") or get_llm_config(user_id)
+    llm_cfg = ctx.get("llm_config") or await get_llm_config(user_id)
     llm_req = ctx.get("llm_config_for_request") or merge_request_overrides(llm_cfg, body)
     delay_ms = get_streaming_delay_ms(llm_cfg)
 
-    def sse(obj: Any) -> str:
-        if isinstance(obj, str):
-            return f"data: {obj}\n\n"
-        return f"data: {json.dumps(obj, cls=_JsonEncoder)}\n\n"
+    sse = _sse_line
 
     yield sse({"type": "status", "status": "initializing", "message": "Starting chat request..."})
 
@@ -430,9 +447,9 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
         final_label = body.get("prompt_label")
         secret_id_save = None
         used_secret_prompt = used_secret
-        # Always resolve from the plan/admin DB model so cache is consistent.
-        # An explicit body override (llm_name) is the only exception.
-        resolved_model = body.get("llm_name") or llm_req.get("llm_model") or llm_cfg.get("llm_model")
+        # The admin-configured Chat Model (llm_chat_config.llm_model) is
+        # authoritative — client llm_name never overrides it.
+        resolved_model = llm_req.get("llm_model") or llm_cfg.get("llm_model")
 
         if used_secret:
             secret = await resolve_secret_prompt(str(body["secret_id"]), body.get("additional_input") or "")
@@ -473,24 +490,36 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
             yield sse("[DONE]")
             return
 
-        yield sse({"type": "status", "status": "cache_check", "message": "Checking Gemini explicit cache..."})
+        # Claude chat models run WITHOUT Gemini explicit caching — the document
+        # is sent directly to the Anthropic API by stream_llm_with_gcs below.
+        use_claude = _is_claude_model(resolved_model)
+        if not use_claude:
+            yield sse({"type": "status", "status": "cache_check", "message": "Checking Gemini explicit cache..."})
 
         # Use the plan/admin-configured model; fall back to ADK default
         from app.core.config import get_settings as _get_settings
         cache_model = resolved_model or _get_settings().adk_model or "gemini-2.5-pro"
 
-        # Download file buffers once — used for both cache creation and GCS fallback
+        # Download file buffers only when the ADK path still needs the document
+        # bytes (cache creation). Once a valid Gemini cache exists, questions are
+        # answered against the named cache — re-downloading a large PDF from GCS
+        # on every message only adds seconds of latency. If the cache expires
+        # between this check and generation, the ADK path yields nothing and the
+        # GCS fallback below fetches the bytes itself.
         file_specs = []
-        for f in files:
-            file_specs.append(
-                {
-                    "buffer": await asyncio.get_event_loop().run_in_executor(
-                        None, lambda path=f["gcs_path"]: download_object_buffer(bucket, path)
-                    ),
-                    "mimetype": f.get("mimetype") or "application/octet-stream",
-                    "filename": f.get("originalname") or "document",
-                }
-            )
+        if not use_claude:
+            cache_is_active = await gemini_cache_service.has_active_cache(primary_file)
+            if not cache_is_active:
+                for f in files:
+                    file_specs.append(
+                        {
+                            "buffer": await asyncio.get_event_loop().run_in_executor(
+                                None, lambda path=f["gcs_path"]: download_object_buffer(bucket, path)
+                            ),
+                            "mimetype": f.get("mimetype") or "application/octet-stream",
+                            "filename": f.get("originalname") or "document",
+                        }
+                    )
 
         full_answer = ""
         chunk_count = 0
@@ -505,6 +534,14 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
             async for ev in events:
                 if ev.get("type") == "thought":
                     yield sse({"type": "thought", "text": ev.get("text", "")})
+                elif ev.get("type") == "status":
+                    yield sse(
+                        {
+                            "type": "status",
+                            "status": ev.get("status") or "continuing",
+                            "message": ev.get("message") or "Continuing...",
+                        }
+                    )
                 elif ev.get("type") == "chunk":
                     full_answer += ev.get("text", "")
                     chunk_count += 1
@@ -522,56 +559,69 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
                     yield sse({"type": "error", "message": ev.get("message", "LLM stream error"), "code": ev.get("code", "LLM_STREAM_ERROR")})
                     break
 
-        # ── ADK ContextCacheConfig path ───────────────────────────────────────
+        # ── ADK ContextCacheConfig path (Gemini only — Claude runs uncached) ──
         # ADK manages the Gemini explicit cache lifecycle automatically:
         # creation, TTL extension, refresh after N uses. No validate_cache_exists needed.
-        try:
-            yield sse({"type": "status", "status": "generating", "message": "Generating response..."})
-            async for line in _pipe_llm_events(
-                gemini_cache_service.ask_with_context_cache(
-                    file_id=primary_file,
-                    question=cache_question,
-                    user_id=user_id,
-                    file_specs=file_specs,
-                    system_instruction=system,
-                    model_name=cache_model,
-                    llm_config=llm_req,
-                    chat_session_id=final_session,
-                )
-            ):
-                yield line
+        if not use_claude:
+            try:
+                yield sse({"type": "status", "status": "cache_check", "message": "Checking Gemini explicit cache..."})
+                async for line in _pipe_llm_events(
+                    gemini_cache_service.ask_with_context_cache(
+                        file_id=primary_file,
+                        question=cache_question,
+                        user_id=user_id,
+                        file_specs=file_specs,
+                        system_instruction=system,
+                        model_name=cache_model,
+                        llm_config=llm_req,
+                        chat_session_id=final_session,
+                    )
+                ):
+                    yield line
 
-            if full_answer.strip():
-                used_gemini_cache = True
-        except Exception as cache_exc:
-            logger.warning("ADK cache path failed (%s); falling back to GCS", cache_exc)
+                if full_answer.strip():
+                    used_gemini_cache = True
+            except (Exception, BaseException) as cache_exc:
+                if isinstance(cache_exc, GeneratorExit):
+                    pass
+                else:
+                    logger.warning("ADK cache path failed (%s); falling back to GCS", cache_exc)
+                    # If ADK failed, we might want to clear the priming status to force re-upload
+                    # but let's see if GCS fallback works first.
 
-        # ── GCS fallback if ADK path produced nothing ─────────────────────────
+        # ── Direct GCS streaming: primary path for Claude, fallback for Gemini ──
         if not full_answer.strip():
-            logger.warning("Falling back to direct GCS streaming")
+            if not use_claude:
+                logger.warning("Falling back to direct GCS streaming")
             yield sse(
                 {
                     "type": "status",
                     "status": "generating",
-                    "message": "Processing document...",
+                    "message": "Generating response..." if use_claude else "Processing document...",
                 }
             )
-            async for line in _pipe_llm_events(
-                stream_llm_with_gcs(
-                    question=cache_question,
-                    gcs_uris=active_uris,
-                    llm_config=llm_req,
-                    system_instruction=system,
-                    model_name=resolved_model,
-                    metadata={
-                        "userId": user_id,
-                        "fileId": primary_file,
-                        "sessionId": final_session,
-                        "endpoint": "/api/chat/ask/stream",
-                    },
-                )
-            ):
-                yield line
+            try:
+                async for line in _pipe_llm_events(
+                    stream_llm_with_gcs(
+                        question=cache_question,
+                        gcs_uris=active_uris,
+                        llm_config=llm_req,
+                        system_instruction=system,
+                        model_name=resolved_model,
+                        metadata={
+                            "userId": user_id,
+                            "fileId": primary_file,
+                            "sessionId": final_session,
+                            "endpoint": "/api/chat/ask/stream",
+                        },
+                    )
+                ):
+                    yield line
+            except (Exception, BaseException) as gcs_exc:
+                if isinstance(gcs_exc, GeneratorExit):
+                    pass
+                else:
+                    logger.warning("GCS path failed: %s", gcs_exc)
 
         if not full_answer.strip():
             yield sse({"type": "error", "message": "Received empty response from LLM"})
@@ -584,7 +634,7 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
         # GCS fallback path — no explicit cache was used, so we don't log cache metrics here.
 
         try:
-            cache_metrics = await gemini_cache_service.get_status_for_file(primary_file)
+            cache_metrics = await gemini_cache_service.get_status_for_file(primary_file, session_id=final_session)
         except Exception:
             cache_metrics = None
         yield sse({"type": "cache_session", "cache_session_metrics": cache_metrics})
@@ -636,6 +686,7 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
             answer_length=len(full_answer),
             chunks_received=chunk_count,
             cache_mechanism="gemini_explicit_adk" if used_gemini_cache else "gcs_fallback",
+            max_output_tokens=llm_req.get("max_output_tokens"),
         )
         yield sse(
             {
@@ -670,14 +721,11 @@ async def stream_general_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
     body = ctx.get("request_body") or {}
     user_id = str(ctx["user_id"])
     authorization = ctx.get("authorization")
-    llm_cfg = ctx.get("llm_config") or get_llm_config(user_id)
+    llm_cfg = ctx.get("llm_config") or await get_llm_config(user_id)
     llm_req = ctx.get("llm_config_for_request") or merge_request_overrides(llm_cfg, body)
     delay_ms = get_streaming_delay_ms(llm_cfg)
 
-    def sse(obj: Any) -> str:
-        if isinstance(obj, str):
-            return f"data: {obj}\n\n"
-        return f"data: {json.dumps(obj, cls=_JsonEncoder)}\n\n"
+    sse = _sse_line
 
     yield sse({"type": "status", "status": "initializing", "message": "Starting legal chat..."})
     question = (body.get("question") or "").strip()
@@ -735,8 +783,9 @@ async def stream_general_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
         full_answer = ""
         chunk_count = 0
         captured_usage = None
-        # Use explicit request override if provided, otherwise fall back to admin DB model
-        resolved_model = body.get("llm_name") or llm_req.get("llm_model") or llm_cfg.get("llm_model")
+        # The admin-configured Chat Model (llm_chat_config.llm_model) is
+        # authoritative — client llm_name never overrides it.
+        resolved_model = llm_req.get("llm_model") or llm_cfg.get("llm_model")
 
         async for ev in stream_llm_general(
             prompt_text=prompt,
@@ -751,6 +800,14 @@ async def stream_general_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
         ):
             if ev.get("type") == "thought":
                 yield sse({"type": "thought", "text": ev.get("text", "")})
+            elif ev.get("type") == "status":
+                yield sse(
+                    {
+                        "type": "status",
+                        "status": ev.get("status") or "continuing",
+                        "message": ev.get("message") or "Continuing...",
+                    }
+                )
             elif ev.get("type") == "chunk":
                 full_answer += ev.get("text", "")
                 chunk_count += 1
@@ -795,6 +852,7 @@ async def stream_general_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
             user_id=user_id,
             answer_length=len(full_answer),
             chunks_received=chunk_count,
+            max_output_tokens=llm_req.get("max_output_tokens"),
         )
         yield sse(
             {
@@ -831,14 +889,11 @@ async def stream_judgement_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
     body = ctx.get("request_body") or {}
     user_id = str(ctx["user_id"])
     authorization = ctx.get("authorization")
-    llm_cfg = ctx.get("llm_config") or get_llm_config(user_id)
+    llm_cfg = ctx.get("llm_config") or await get_llm_config(user_id)
     llm_req = ctx.get("llm_config_for_request") or merge_request_overrides(llm_cfg, body)
     delay_ms = get_streaming_delay_ms(llm_cfg)
 
-    def sse(obj: Any) -> str:
-        if isinstance(obj, str):
-            return f"data: {obj}\n\n"
-        return f"data: {json.dumps(obj, cls=_JsonEncoder)}\n\n"
+    sse = _sse_line
 
     # ── Background step trace (logged to console as an ASCII table at the end) ──
     _t0 = time.monotonic()
@@ -885,8 +940,13 @@ async def stream_judgement_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
     final_session = body["session_id"] if has_session else str(uuid.uuid4())
     primary_file = file_ids[0] if file_ids else None
     
-    # Prioritize Gemini 2.5 Pro for citation search as requested by user
-    resolved_model = body.get("llm_name") or "gemini-2.5-pro"
+    # The admin-configured Chat Model (llm_chat_config.llm_model) is
+    # authoritative — client llm_name never overrides it.
+    resolved_model = (
+        llm_req.get("llm_model")
+        or llm_cfg.get("llm_model")
+        or "gemini-2.5-pro"
+    )
     
     try:
         file_specs: list[dict[str, Any]] = []
@@ -1003,6 +1063,14 @@ async def stream_judgement_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
             etype = ev.get("type")
             if etype == "thought":
                 yield sse({"type": "thought", "text": ev.get("text", "")})
+            elif etype == "status":
+                yield sse(
+                    {
+                        "type": "status",
+                        "status": ev.get("status") or "continuing",
+                        "message": ev.get("message") or "Continuing...",
+                    }
+                )
             elif etype == "chunk":
                 full_answer += ev.get("text", "")
                 chunk_count += 1
@@ -1056,6 +1124,14 @@ async def stream_judgement_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
             ):
                 if ev.get("type") == "thought":
                     yield sse({"type": "thought", "text": ev.get("text", "")})
+                elif ev.get("type") == "status":
+                    yield sse(
+                        {
+                            "type": "status",
+                            "status": ev.get("status") or "continuing",
+                            "message": ev.get("message") or "Continuing...",
+                        }
+                    )
                 elif ev.get("type") == "chunk":
                     full_answer += ev.get("text", "")
                     chunk_count += 1
@@ -1129,6 +1205,7 @@ async def stream_judgement_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
             answer_length=len(full_answer),
             chunks_received=chunk_count,
             cache_mechanism="web_search_grounding",
+            max_output_tokens=llm_req.get("max_output_tokens"),
         )
         flush_trace()
         yield sse(

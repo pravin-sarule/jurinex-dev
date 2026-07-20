@@ -43,7 +43,14 @@ export class DraftStreamParser {
         this._append(MONOLITHIC_DOCUMENT_ID, (evt.text || '').replace(ANY_MARKER_RE, ''));
         break;
       case 'document_end':
-        if (evt.text) this.buffers.set(MONOLITHIC_DOCUMENT_ID, evt.text);
+        // Propagate the final cleaned text the same way document_replace does —
+        // the strategy's restart-strip net lands here, and without notifying
+        // onSectionText the live UI keeps any duplicated stream that landed
+        // via document_chunk (only the saved record would be clean).
+        if (evt.text) {
+          this.buffers.set(MONOLITHIC_DOCUMENT_ID, evt.text);
+          this.h.onSectionText?.(MONOLITHIC_DOCUMENT_ID, evt.text);
+        }
         this.h.onDocumentEnd?.(evt);
         break;
       case 'document_replace':
@@ -97,6 +104,18 @@ export class DraftStreamParser {
         break;
       case 'grounding_report':
         this.h.onGroundingReport?.(evt);
+        break;
+      case 'ingestion_report':
+        this.h.onIngestionReport?.(evt);
+        break;
+      case 'qa_report':
+        this.h.onQaReport?.(evt);
+        break;
+      case 'discrepancy_report':
+        this.h.onDiscrepancyReport?.(evt);
+        break;
+      case 'review_packet':
+        this.h.onReviewPacket?.(evt);
         break;
       case 'cost':
         this.h.onCost?.(evt);

@@ -44,6 +44,10 @@ ALTER TABLE drafting_sessions ADD COLUMN IF NOT EXISTS facts_digest text;
 ALTER TABLE drafting_sessions ADD COLUMN IF NOT EXISTS facts_addendum text;
 -- Stage-2 strategy traceability (monolithic vs section-wise, per-section stats).
 ALTER TABLE drafting_sessions ADD COLUMN IF NOT EXISTS draft_metadata jsonb;
+-- 4-stage grounded pipeline: cited field extraction (Stage 2) + review packet
+-- (ingestion report, missing/conflict/unverified fields, discrepancy report).
+ALTER TABLE drafting_sessions ADD COLUMN IF NOT EXISTS grounded_facts jsonb;
+ALTER TABLE drafting_sessions ADD COLUMN IF NOT EXISTS review_packet jsonb;
 """
 
 # status lifecycle:
@@ -96,9 +100,11 @@ def update_session(session_id: str, **fields: Any) -> None:
     allowed = {
         "status", "model", "template_file", "template_structure",
         "supporting_docs", "cache_name", "draft_sections", "facts_digest",
-        "facts_addendum", "draft_metadata", "error",
+        "facts_addendum", "draft_metadata", "grounded_facts", "review_packet",
+        "error",
     }
-    jsonb_cols = {"template_file", "template_structure", "supporting_docs", "draft_sections", "draft_metadata"}
+    jsonb_cols = {"template_file", "template_structure", "supporting_docs",
+                  "draft_sections", "draft_metadata", "grounded_facts", "review_packet"}
     sets, params = [], []
     for key, value in fields.items():
         if key not in allowed:

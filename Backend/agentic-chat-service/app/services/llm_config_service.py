@@ -9,8 +9,24 @@ from app.services.db import doc_conn, payment_conn
 
 logger = logging.getLogger(__name__)
 
+# Values below 1 are treated as unconfigured/defaults.
+_CHAT_MIN_OUTPUT_TOKENS = 1
+_CHAT_DEFAULT_OUTPUT_TOKENS = 20000
+
 _config_cache: dict[str, tuple[dict[str, Any], float]] = {}
-_CACHE_TTL = 60.0
+_CACHE_TTL = 1.0  # Reduced to 1s to ensure DB changes are picked up immediately while debugging
+
+
+def invalidate_llm_config_cache(user_id: str | None = None) -> None:
+    """Drop cached admin LLM settings so the next chat request re-reads Document_DB.
+
+    Call after an admin updates `llm_chat_config` (or pass nothing to clear all).
+    """
+    if user_id is None:
+        _config_cache.clear()
+        return
+    _config_cache.pop(str(user_id), None)
+    _config_cache.pop("global", None)
 
 
 def _finite_number(value: Any, fallback: float = 0.0) -> float:
@@ -38,8 +54,16 @@ def _map_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if not row:
         return None
     alias = _parse_alias_map(row.get("model_alias_map"))
+    # Document_DB `llm_chat_config.max_output_tokens` is the generation budget.
+    # When `max_output_tokens_cap` is absent, that same value is also the hard ceiling
+    # for client overrides (30k configured → max 30k output; 5k → max 5k).
+    max_out = max(_CHAT_MIN_OUTPUT_TOKENS, int(_finite_number(row.get("max_output_tokens"), _CHAT_DEFAULT_OUTPUT_TOKENS)))
+    if row.get("max_output_tokens_cap") is None:
+        max_cap = max_out
+    else:
+        max_cap = max(max_out, int(_finite_number(row.get("max_output_tokens_cap"), max_out)))
     return {
-        "max_output_tokens": int(_finite_number(row.get("max_output_tokens"), 65536)),
+        "max_output_tokens": max_out,
         "total_tokens_per_day": int(_finite_number(row.get("total_tokens_per_day"), 100000)),
         "llm_model": str(row.get("llm_model") or "gemini-2.5-flash-lite"),
         "llm_provider": str(row.get("llm_provider") or "google").strip().lower(),
@@ -55,7 +79,7 @@ def _map_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "vertex_model_id": (row.get("vertex_model_id") or "").strip() or None,
         "model_alias_map": alias,
         "min_output_tokens": int(_finite_number(row.get("min_output_tokens"), 1)),
-        "max_output_tokens_cap": int(_finite_number(row.get("max_output_tokens_cap"), 65536)),
+        "max_output_tokens_cap": max_cap,
         "temperature_min": _finite_number(row.get("temperature_min"), 0),
         "temperature_max": _finite_number(row.get("temperature_max"), 2),
         "multer_upload_ceiling_mb": int(_finite_number(row.get("multer_upload_ceiling_mb"), 100)),
@@ -98,7 +122,8 @@ def get_next_utc_midnight_iso() -> str:
     return nxt.isoformat().replace("+00:00", "Z")
 
 
-def get_llm_config(user_id: str | None = None) -> dict[str, Any]:
+async def get_llm_config(user_id: str | None = None) -> dict[str, Any]:
+    import asyncio
     import time
 
     cache_key = str(user_id or "global")
@@ -109,20 +134,22 @@ def get_llm_config(user_id: str | None = None) -> dict[str, Any]:
 
     import psycopg
 
-    for attempt in range(3):
-        try:
-            with doc_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT * FROM llm_chat_config ORDER BY updated_at DESC NULLS LAST, id DESC LIMIT 1"
-                    )
-                    row = cur.fetchone()
-            break
-        except psycopg.OperationalError as exc:
-            if attempt == 2:
-                raise
-            logger.warning("DB connection failed (attempt %d/3), retrying: %s", attempt + 1, exc)
+    def _fetch():
+        for attempt in range(3):
+            try:
+                with doc_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT * FROM llm_chat_config ORDER BY updated_at DESC NULLS LAST, id DESC LIMIT 1"
+                        )
+                        return cur.fetchone()
+            except psycopg.OperationalError as exc:
+                if attempt == 2:
+                    raise
+                logger.warning("DB connection failed (attempt %d/3), retrying: %s", attempt + 1, exc)
+        return None
 
+    row = await asyncio.get_event_loop().run_in_executor(None, _fetch)
     cfg = _map_row(dict(row) if row else None) or _map_row({})
 
     uid = None
@@ -132,33 +159,37 @@ def get_llm_config(user_id: str | None = None) -> dict[str, Any]:
         uid = None
 
     if uid and uid > 0:
-        try:
-            with payment_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT
-                            COALESCE(mp.id, sp.id) AS id,
-                            COALESCE(mp.name, sp.name) AS name
-                        FROM user_subscriptions us
-                        LEFT JOIN monthly_plans mp ON mp.id = us.monthly_plan_id AND mp.is_active = true
-                        LEFT JOIN subscription_plans sp ON sp.id = us.plan_id
-                        WHERE us.user_id = %s
-                          AND LOWER(COALESCE(us.status, 'active')) = 'active'
-                          AND (us.end_date IS NULL OR us.end_date >= CURRENT_DATE)
-                          AND (mp.id IS NOT NULL OR sp.id IS NOT NULL)
-                        ORDER BY us.activated_at DESC NULLS LAST
-                        LIMIT 1
-                        """,
-                        (uid,),
-                    )
-                    plan = cur.fetchone()
-            if plan:
-                plan = dict(plan)
-                cfg["_plan_id"] = plan.get("id")
-                cfg["_plan_name"] = plan.get("name")
-        except Exception as exc:
-            logger.warning("Plan lookup failed: %s", exc)
+        def _fetch_plan():
+            try:
+                with payment_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT
+                                COALESCE(mp.id, sp.id) AS id,
+                                COALESCE(mp.name, sp.name) AS name
+                            FROM user_subscriptions us
+                            LEFT JOIN monthly_plans mp ON mp.id = us.monthly_plan_id AND mp.is_active = true
+                            LEFT JOIN subscription_plans sp ON sp.id = us.plan_id
+                            WHERE us.user_id = %s
+                              AND LOWER(COALESCE(us.status, 'active')) = 'active'
+                              AND (us.end_date IS NULL OR us.end_date >= CURRENT_DATE)
+                              AND (mp.id IS NOT NULL OR sp.id IS NOT NULL)
+                            ORDER BY us.activated_at DESC NULLS LAST
+                            LIMIT 1
+                            """,
+                            (uid,),
+                        )
+                        return cur.fetchone()
+            except Exception as exc:
+                logger.warning("Plan lookup failed: %s", exc)
+                return None
+
+        plan = await asyncio.get_event_loop().run_in_executor(None, _fetch_plan)
+        if plan:
+            plan = dict(plan)
+            cfg["_plan_id"] = plan.get("id")
+            cfg["_plan_name"] = plan.get("name")
 
     _config_cache[cache_key] = (cfg, now)
     return cfg
@@ -166,8 +197,13 @@ def get_llm_config(user_id: str | None = None) -> dict[str, Any]:
 
 def merge_request_overrides(cfg: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
     out = dict(cfg)
-    cap = int(out.get("max_output_tokens_cap") or 65536)
-    min_out = int(out.get("min_output_tokens") or 1)
+    # After _map_row, max_output_tokens_cap equals configured max when the DB
+    # column is missing — so a 30k row cannot be overridden above 30k.
+    ceiling = max(
+        1,
+        int(out.get("max_output_tokens_cap") or out.get("max_output_tokens") or _CHAT_DEFAULT_OUTPUT_TOKENS),
+    )
+    min_out = 1
     tmin = float(out.get("temperature_min") or 0)
     tmax = float(out.get("temperature_max") or 2)
 
@@ -175,7 +211,7 @@ def merge_request_overrides(cfg: dict[str, Any], body: dict[str, Any]) -> dict[s
     if mot is not None:
         try:
             n = int(float(mot))
-            out["max_output_tokens"] = max(min_out, min(cap, n))
+            out["max_output_tokens"] = max(min_out, min(ceiling, n))
         except (TypeError, ValueError):
             pass
 
@@ -187,6 +223,8 @@ def merge_request_overrides(cfg: dict[str, Any], body: dict[str, Any]) -> dict[s
         except (TypeError, ValueError):
             pass
 
-    if body.get("llm_name"):
-        out["llm_model"] = str(body["llm_name"]).strip()
+    # Client llm_name is intentionally IGNORED — the admin-configured Chat Model
+    # (Document_DB llm_chat_config.llm_model) is authoritative for generation.
+    # Frontends that send hardcoded names (e.g. "gemini-pro-2.5" from secret
+    # prompts) must not silently switch the model away from the admin config.
     return out

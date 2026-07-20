@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import date, datetime
 from typing import Any
@@ -9,6 +10,23 @@ from app.services.db import doc_conn
 from app.services.chat_helpers import is_valid_uuid, parse_attached_files_cell
 
 MAX_HISTORY = 20
+
+# Degenerate model output can contain megabytes of spaces/newlines; storing it
+# makes the session unloadable (the frontend freezes rendering it).
+_WS_RUN_RE = re.compile(r"[ \t ]{40,}")
+_NL_RUN_RE = re.compile(r"\n{6,}")
+_ANSWER_HARD_CAP = 400_000
+
+
+def sanitize_answer_for_storage(text: str) -> str:
+    """Collapse pathological whitespace floods and cap extreme answer sizes."""
+    t = text or ""
+    if len(t) > 20_000:
+        t = _WS_RUN_RE.sub("  ", t)
+        t = _NL_RUN_RE.sub("\n\n\n", t)
+    if len(t) > _ANSWER_HARD_CAP:
+        t = t[:_ANSWER_HARD_CAP] + "\n\n…[answer truncated for storage — output exceeded the storage cap]"
+    return t
 
 
 class _SafeEncoder(json.JSONEncoder):
@@ -89,6 +107,7 @@ class FileChatRepository:
         sid = session_id if is_valid_uuid(session_id) else str(uuid.uuid4())
         fid = file_id if is_valid_uuid(file_id) else None
         sec = secret_id if is_valid_uuid(secret_id) else None
+        answer = sanitize_answer_for_storage(answer)
         hist = json.dumps((chat_history or [])[-MAX_HISTORY:], cls=_SafeEncoder)
         attached = json.dumps(attached_files, cls=_SafeEncoder) if attached_files is not None else None
 
