@@ -622,6 +622,45 @@ class FolderWorkflowService:
                 exc,
             )
 
+    def _insert_case_row(self, cur: Any, insert_payload: dict[str, Any]) -> dict[str, Any]:
+        """Insert one row into `cases`, guarding against a legacy CHECK constraint on
+        `category_type` (which historically restricted it to Civil/Criminal/Commercial).
+
+        The canonical schema drops that constraint so the free-text classifier value
+        (e.g. "Revenue") persists like its sibling columns. This retry is defence-in-depth:
+        if the constraint is still present on a given database, we roll back to a savepoint
+        and retry once with `category_type` nulled, so case creation can never hard-fail on it.
+        """
+        def _execute(payload: dict[str, Any]) -> dict[str, Any]:
+            columns = list(payload.keys())
+            placeholders = ", ".join(["%s"] * len(columns))
+            cur.execute(
+                f"""
+                INSERT INTO cases ({", ".join(columns)})
+                VALUES ({placeholders})
+                RETURNING *
+                """,
+                [payload[column] for column in columns],
+            )
+            return cur.fetchone()
+
+        cur.execute("SAVEPOINT before_case_insert")
+        try:
+            row = _execute(insert_payload)
+        except Exception as exc:
+            constraint = getattr(getattr(exc, "diag", None), "constraint_name", None)
+            if constraint != "cases_category_type_check":
+                raise
+            cur.execute("ROLLBACK TO SAVEPOINT before_case_insert")
+            logger.warning(
+                "[FolderService] cases.category_type=%r rejected by legacy CHECK %s; "
+                "retrying with category_type=NULL (drop this constraint to persist the value)",
+                insert_payload.get("category_type"), constraint,
+            )
+            row = _execute({**insert_payload, "category_type": None})
+        cur.execute("RELEASE SAVEPOINT before_case_insert")
+        return row
+
     def create_case(self, user_id: str, case_data: dict[str, Any]) -> dict[str, Any]:
         """Create a case record + linked user_files folder using document-service-compatible storage."""
         int_user_id: int | None = None
@@ -647,17 +686,7 @@ class FolderWorkflowService:
             case_columns = self._get_table_columns(cur, "cases")
             insert_payload = {"user_id": int_user_id}
             insert_payload.update({key: value for key, value in case_payload.items() if key in case_columns})
-            insert_columns = list(insert_payload.keys())
-            placeholders = ", ".join(["%s"] * len(insert_columns))
-            cur.execute(
-                f"""
-                INSERT INTO cases ({", ".join(insert_columns)})
-                VALUES ({placeholders})
-                RETURNING *
-                """,
-                [insert_payload[column] for column in insert_columns],
-            )
-            new_case = cur.fetchone()
+            new_case = self._insert_case_row(cur, insert_payload)
             case_id = str(new_case["id"])
 
             safe_case_name = re.sub(r"[^a-zA-Z0-9._-]", "_", (case_title or "Untitled_Case").strip())
@@ -1551,40 +1580,30 @@ class FolderWorkflowService:
     ) -> list[dict[str, Any]]:
         if max_history <= 0:
             return []
+        # A new chat sends no session_id, and it must start from a CLEAN slate. This used to fall back
+        # to the folder's most recent Q/A pairs across ALL sessions for "case-wise continuity", which
+        # made a new chat inherit up to max_history (default 25) turns of unrelated conversations:
+        # typing "hi" replayed an earlier "summary in text as well as in tabular format" ask, so the
+        # model answered that OLD question and opened with a full case summary. History is
+        # session-scoped only; continuity across chats comes from the case documents, not stale turns.
+        if not session_id:
+            return []
         history: list[dict[str, Any]] = []
         if is_db_available():
             try:
                 with get_db_connection() as conn, conn.cursor() as cur:
-                    # If the UI did not send a session_id (or a new chat was started),
-                    # we still want *case-wise* conversational continuity. Fetch the most
-                    # recent Q/A pairs for this folder (case) and user.
-                    #
-                    # When session_id is provided we prefer session-scoped history.
-                    if session_id:
-                        cur.execute(
-                            """
-                            SELECT question, answer, created_at
-                            FROM folder_chats
-                            WHERE folder_name = %s
-                              AND user_id::text = %s
-                              AND session_id::text = %s
-                            ORDER BY created_at DESC
-                            LIMIT %s
-                            """,
-                            [folder_name, str(user_id), str(session_id), max_history],
-                        )
-                    else:
-                        cur.execute(
-                            """
-                            SELECT question, answer, created_at
-                            FROM folder_chats
-                            WHERE folder_name = %s
-                              AND user_id::text = %s
-                            ORDER BY created_at DESC
-                            LIMIT %s
-                            """,
-                            [folder_name, str(user_id), max_history],
-                        )
+                    cur.execute(
+                        """
+                        SELECT question, answer, created_at
+                        FROM folder_chats
+                        WHERE folder_name = %s
+                          AND user_id::text = %s
+                          AND session_id::text = %s
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                        """,
+                        [folder_name, str(user_id), str(session_id), max_history],
+                    )
                     rows = list(cur.fetchall())
                 history = [{"question": row.get("question"), "answer": row.get("answer")} for row in reversed(rows)]
             except Exception as exc:
@@ -2763,6 +2782,45 @@ class FolderWorkflowService:
                 session_id,
                 exc,
             )
+
+    def update_latest_chat_answer(
+        self,
+        *,
+        user_id: str,
+        folder_name: str,
+        session_id: str,
+        answer: str,
+    ) -> bool:
+        """Overwrite the `answer` of the most-recent chat row for this session — used to
+        persist edits made in Draft Studio's editor (saved as MARKDOWN). Targets the newest
+        row for (user_id, folder_name, session_id) since the client has no row id. Returns
+        True when a row was updated."""
+        if not is_db_available():
+            return False
+        try:
+            with get_db_connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE folder_chats
+                       SET answer = %s
+                     WHERE id = (
+                         SELECT id FROM folder_chats
+                          WHERE user_id = %s AND folder_name = %s AND session_id = %s::uuid
+                          ORDER BY created_at DESC
+                          LIMIT 1
+                     )
+                    """,
+                    (answer, str(user_id), folder_name, normalize_folder_chat_session_uuid(session_id)),
+                )
+                updated = cur.rowcount > 0
+                conn.commit()
+                return updated
+        except Exception as exc:
+            logger.exception(
+                "[FolderService] task=update_chat_answer status=error folder=%s session_id=%s error=%s",
+                folder_name, session_id, exc,
+            )
+            return False
 
     def _append_message(self, session: ChatSessionRecord, role: str, content: str) -> None:
         with self._lock:

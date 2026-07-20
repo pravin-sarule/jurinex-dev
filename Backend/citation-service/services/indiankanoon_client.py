@@ -64,31 +64,43 @@ def _get_token() -> Optional[str]:
     )
 
 
-def _ik_request(path: str, params: Optional[Dict[str, Any]] = None, method: str = "POST") -> Optional[Any]:
+def _ik_request(path: str, params: Optional[Dict[str, Any]] = None, method: str = "POST",
+                read_timeout: int = 30, max_retries: Optional[int] = None) -> Optional[Any]:
     """
     Make an authenticated request to the IK API.
     Always POSTs (IK API requires POST for all endpoints).
     Returns parsed JSON dict/list, or None on failure.
+
+    read_timeout / max_retries are per-endpoint (B1): /search, /docfragment, /docmeta use a
+    short 12s timeout (p95 ~8s) so one stalled connection fails fast and retries instead of
+    blocking a whole concurrent stage for ~60s; /doc keeps the longer default for big payloads.
     """
     token = _get_token()
     if not token:
         logger.warning("[IK] Token not configured — skipping request to %s", path)
         return None
 
+    retries = max_retries if max_retries is not None else _IK_MAX_RETRIES
     url = _IK_BASE + path
     if params:
         qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         if qs:
             url = url + ("&" if "?" in url else "?") + qs
 
-    for attempt in range(1, _IK_MAX_RETRIES + 1):
+    for attempt in range(1, retries + 1):
         try:
             req = urllib.request.Request(url, method=method)
             req.add_header("Authorization", f"Token {token}")
             req.add_header("Accept", "application/json")
             req.add_header("User-Agent", "Mozilla/5.0 (compatible; JurinexCitation/1.0)")
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode("utf-8", errors="replace"))
+            with urllib.request.urlopen(req, timeout=read_timeout) as resp:
+                status = getattr(resp, "status", None) or resp.getcode()
+                body = resp.read().decode("utf-8", errors="replace")
+                logger.info(
+                    "[IK] %s %s -> HTTP %s (%d bytes); body[:300]=%s",
+                    method, url, status, len(body), body[:300],
+                )
+                return json.loads(body)
         except urllib.error.HTTPError as e:
             body = ""
             try:
@@ -98,11 +110,11 @@ def _ik_request(path: str, params: Optional[Dict[str, Any]] = None, method: str 
             logger.warning("[IK] HTTP %s for %s: %s", getattr(e, "code", "?"), path, body)
             return None
         except Exception as exc:
-            if attempt < _IK_MAX_RETRIES and _is_retryable_ik_error(exc):
+            if attempt < retries and _is_retryable_ik_error(exc):
                 delay = 0.6 * attempt
                 logger.warning(
                     "[IK] Request failed for %s on attempt %d/%d: %s — retrying in %.1fs",
-                    path, attempt, _IK_MAX_RETRIES, exc, delay,
+                    path, attempt, retries, exc, delay,
                 )
                 time.sleep(delay)
                 continue
@@ -110,11 +122,11 @@ def _ik_request(path: str, params: Optional[Dict[str, Any]] = None, method: str 
             return None
 
 
-def _ik_request_raw(path: str) -> Optional[bytes]:
+def _ik_request_raw(path: str) -> tuple[Optional[bytes], str]:
     """Same as _ik_request but returns raw bytes (for origdoc PDF download)."""
     token = _get_token()
     if not token:
-        return None
+        return None, ""
     url = _IK_BASE + path
     for attempt in range(1, _IK_MAX_RETRIES + 1):
         try:
@@ -136,6 +148,7 @@ def _ik_request_raw(path: str) -> Optional[bytes]:
                 continue
             logger.warning("[IK] Raw request failed for %s: %s", path, exc)
             return None, ""
+    return None, ""
 
 
 def _clean_case_name(case_name: str) -> str:
@@ -214,7 +227,21 @@ def ik_search(
     if maxcites:
         params["maxcites"] = maxcites
 
-    return _ik_request("/search/", params=params)
+    # 90s read timeout (was 12s x2): a slow IK search (e.g. a wide ORR) should be WAITED ON,
+    # not clipped at ~25s and returned as 0. One retry only, so a hung connection can't 3x it.
+    result = _ik_request("/search/", params=params, read_timeout=90, max_retries=1)
+    if isinstance(result, dict):
+        docs = result.get("docs") or []
+        logger.info(
+            "[IK] search formInput=%r doctypes=%r -> found=%r docs=%d keys=%s",
+            effective_query, doctypes, result.get("found"), len(docs), sorted(result.keys()),
+        )
+    else:
+        logger.warning(
+            "[IK] search returned NO results dict for formInput=%r doctypes=%r (result=%r)",
+            effective_query, doctypes, result,
+        )
+    return result
 
 
 # ─── 2. Document API ──────────────────────────────────────────────────────────
@@ -299,8 +326,8 @@ def _upload_origdoc_to_gcs(doc_id: str, data: bytes, content_type: str) -> tuple
     Subfolder: 'ik_origdocs/'.
     """
     try:
-        from google.cloud import storage as gcs_storage
-        from google.oauth2 import service_account
+        from google.cloud import storage as gcs_storage  # pyrefly: ignore[missing-import]
+        from google.oauth2 import service_account  # pyrefly: ignore[missing-import]
 
         bucket_name = os.environ.get("GCS_BUCKET_NAME", "draft_templates")
         gcs_key_b64 = os.environ.get("GCS_KEY_BASE64")
@@ -346,15 +373,74 @@ def _upload_origdoc_to_gcs(doc_id: str, data: bytes, content_type: str) -> tuple
 
 # ─── 4. Document Fragments ────────────────────────────────────────────────────
 
+_FRAGMENT_OP_SPLIT = re.compile(r"\s+(?:ANDD|ORR|NOTT)\s+", re.IGNORECASE)
+
+
+def _fragment_failed(result: Optional[Dict[str, Any]]) -> bool:
+    """A docfragment response is unusable if it's empty, carries an errmsg, or has no headline."""
+    if not result:
+        return True
+    if result.get("errmsg"):
+        return True
+    return not result.get("headline")
+
+
+def _fragment_fallback_queries(query: str) -> List[str]:
+    """Single-operand fallbacks for a boolean docfragment query.
+
+    IK's /docfragment/ evaluator returns {"errmsg": "Error in evaluting the fragments"} for docs
+    that ranked into the search but don't strictly satisfy the boolean/quoted query (e.g.
+    '"promissory estoppel" ANDD tenancy'), even though each operand alone evaluates fine. The doc
+    IS relevant (search returned it), so we retry with each operand individually — most specific
+    first (quoted phrases, then longer tokens) — and also an unquoted variant. Verbatim repeats of
+    the original query are dropped so a single-term query doesn't pointlessly retry itself.
+    """
+    operands = [p.strip() for p in _FRAGMENT_OP_SPLIT.split(query) if p.strip()]
+    if len(operands) <= 1 and '"' not in query:
+        return []  # nothing to simplify (plain single-term query)
+    original = query.strip().lower()
+    out: List[str] = []
+    seen = set()
+    for op in sorted(operands, key=lambda s: (0 if s.startswith('"') else 1, -len(s))):
+        for variant in (op, op.replace('"', "")):
+            v = variant.strip()
+            if v and v.lower() != original and v.lower() not in seen:
+                seen.add(v.lower())
+                out.append(v)
+    return out
+
+
 def ik_fetch_docfragment(doc_id: str, query: str) -> Optional[Dict[str, Any]]:
     """
     Fetch document fragments (relevant excerpts) for a doc matching the query.
 
     Returns dict with:
       - tid, title, formInput, headline (HTML fragment with relevant snippets)
+
+    If the strict (boolean/quoted) query errors on IK's fragment evaluator, retry with single
+    operands so a relevant doc is still enriched instead of dropped (see _fragment_fallback_queries).
+    The returned dict carries a private "_ik_http_calls" count so the caller can bill every real
+    docfragment HTTP call (retries included), keeping cost tracking honest.
     """
     params = {"formInput": query}
-    return _ik_request(f"/docfragment/{doc_id}/", params=params)
+    http_calls = 1
+    result = _ik_request(f"/docfragment/{doc_id}/", params=params, read_timeout=12, max_retries=2)
+    if _fragment_failed(result):
+        for fallback in _fragment_fallback_queries(query):
+            http_calls += 1
+            retry = _ik_request(
+                f"/docfragment/{doc_id}/", params={"formInput": fallback}, read_timeout=12, max_retries=1
+            )
+            if not _fragment_failed(retry):
+                logger.info(
+                    "[IK] docfragment recovered doc_id=%s via fallback %r (strict query %r errored)",
+                    doc_id, fallback, query,
+                )
+                result = retry
+                break
+    if isinstance(result, dict):
+        result["_ik_http_calls"] = http_calls
+    return result
 
 
 # ─── 5. Document Metadata ─────────────────────────────────────────────────────
@@ -365,7 +451,7 @@ def ik_fetch_docmeta(doc_id: str) -> Optional[Dict[str, Any]]:
 
     Returns dict with: tid, title, docsource, publishdate, numcites, etc.
     """
-    return _ik_request(f"/docmeta/{doc_id}/")
+    return _ik_request(f"/docmeta/{doc_id}/", read_timeout=12, max_retries=2)
 
 
 # ─── Composite: enrich one IK candidate fully ─────────────────────────────────

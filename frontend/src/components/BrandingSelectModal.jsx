@@ -72,7 +72,7 @@ export default function BrandingSelectModal({ open, onClose, onSelect, format = 
             </div>
             <div className="flex-1 min-w-0">
               <div className="text-sm font-medium text-gray-800">No Branding</div>
-              <div className="text-xs text-gray-500">Standard JuriNex header</div>
+              <div className="text-xs text-gray-500">Content only — no header</div>
             </div>
             {selected === 'none' && <CheckCircle className="w-4 h-4 text-teal-600 flex-shrink-0" />}
           </label>

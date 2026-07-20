@@ -133,6 +133,165 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("EMBEDDING_MODEL"),
     )
     gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY"))
+    # Dedicated key for Gemma models (gemma-*). Falls back to GEMINI_API_KEY when blank.
+    gemma_api_key: str = Field(default="", validation_alias=AliasChoices("GEMMA_API_KEY"))
+    # Dedicated model for draft-from-template mode. A stronger model (e.g. gemini-3.1-pro-preview)
+    # reads the uploaded template PDF directly and reproduces all pages with clean formatting — gemma
+    # cannot (PDF Parts 500 and it truncates long templates). Uses GEMINI_API_KEY. Blank -> reuse the
+    # admin-selected chat model (template injected as text).
+    draft_model_name: str = Field(
+        default="gemini-3.1-pro-preview",
+        validation_alias=AliasChoices("DRAFT_MODEL_NAME"),
+    )
+    # Output-token ceiling for drafts (full-length templates need room; clamped to the model's real max).
+    draft_max_output_tokens: int = Field(
+        default=65536,
+        validation_alias=AliasChoices("DRAFT_MAX_OUTPUT_TOKENS"),
+    )
+    # Max DRAFTING units per template page. Each unit = one model call, so this is the biggest
+    # lever on draft wall-clock and cost. 3 => a 12-page pleading drafts in ~36 calls, not 80.
+    # Raise for more granular sections (slower, pricier); lower for fewer, larger sections.
+    draft_units_per_page: float = Field(
+        default=3.0,
+        validation_alias=AliasChoices("DRAFT_UNITS_PER_PAGE"),
+    )
+    # GUARDIAN model for the draft audit passes (Stage D grounding + format audit, section repair;
+    # Stage E slot recovery). This is the model that CHECKS and REWRITES what the draft engine
+    # produced, so it is billed on every draft — Opus is the strongest backstop but the most
+    # expensive. Blank -> auto (claude-opus-4-8 when ANTHROPIC_API_KEY is set, else
+    # gemini-3.1-pro-preview). The frontend guardian dropdown overrides this per draft.
+    draft_guardian_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("DRAFT_GUARDIAN_MODEL"),
+    )
+    # Master switch for the draft GUARDIAN (Stage D/E audit + repair). Default False = guardian is
+    # OFF: drafts skip the grounding/format audit, section repair and slot recovery entirely, saving
+    # the guardian model's tokens on every draft. Set True to re-enable it (then draft_guardian_model
+    # / the frontend dropdown pick which model runs the audit). The dropdown can also force it off
+    # per-draft with a "disabled"/"none"/"off" value even when this is True.
+    draft_guardian_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("DRAFT_GUARDIAN_ENABLED"),
+    )
+    # Minimum seconds between successive Gemma API requests (GLOBAL across threads, retries
+    # included). Free Google AI Studio keys allow only 15 requests/min on gemma models, and
+    # the gemma endpoint 500s far more under rapid-fire calls — 9s spacing ≈ 6-7 RPM keeps
+    # well under the cap and gives the flaky endpoint room to recover. 0 disables pacing.
+    gemma_min_call_interval_s: float = Field(
+        default=9.0,
+        validation_alias=AliasChoices("GEMMA_MIN_CALL_INTERVAL_S"),
+    )
+    # Free Google AI Studio keys cap Gemma at 16,000 INPUT tokens per minute per model
+    # (generate_content_free_tier_input_token_count). A comprehensive/deep chat that dumps the
+    # whole case (60K–130K tokens) is 4–8x over that ceiling and 429s forever. A single Gemma
+    # chat call is budgeted as ~11K input + ~4.5K answer so it fits the per-minute quota AND the
+    # answer is never cut short:
+    #   • gemma_max_context_chars  — budget for the DOCUMENT context (chunks) fed to a Gemma chat
+    #     (~36K chars ≈ 9K tokens). With gemma_history_system_max_chars (~5K tok) this fixes the
+    #     per-call input at ~9K chunks + ~5K history/system = ~14K total. Feeds ~30-35 chunks
+    #     (chunks average ~1,040 chars, not the 750-token target). Raise once billing lifts the
+    #     ceiling. A dynamic clamp still trims further if needed to stay under the TPM budget.
+    #   • gemma_free_tier_input_tpm — the per-minute input-token budget the client-side pacer
+    #     spreads requests under (a rolling 60s window). Set to your tier's real limit; 0 disables
+    #     token pacing (RPM pacing via gemma_min_call_interval_s still applies).
+    #   • gemma_thinking_level — Gemma-4 is a THINKING model whose thinking + answer SHARE the
+    #     output budget, and it rejects numeric thinking_budget — only "minimal" | "high" (400
+    #     otherwise, verified live). "minimal" emits ZERO thinking tokens, so the entire output
+    #     budget becomes the answer (no thinking cutting it) AND responses are ~2x faster. Use
+    #     "high" only when a task genuinely needs step-by-step reasoning over speed + length.
+    #   • gemma_chat_max_output_tokens — output-token budget for a Gemma chat call. Output does
+    #     NOT count against the 16K INPUT/min quota, so this can be large. With thinking_level=
+    #     minimal it is entirely answer (20K tokens ≈ 28 pages; Gemma's hard ceiling is 32768). A
+    #     genuinely long answer streams for several minutes at ~35 tok/s — it's a ceiling, not a
+    #     target, so short answers still finish fast.
+    # Raise context/TPM once billing is enabled — paid tiers lift the 16K ceiling.
+    gemma_max_context_chars: int = Field(
+        default=36000,
+        validation_alias=AliasChoices("GEMMA_MAX_CONTEXT_CHARS"),
+    )
+    # Fixed number of document chunks to feed a Gemma chat (predictable, NO dynamic char sizing).
+    # Chunks average ~1,040 chars ≈ 260 tokens, so 27 ≈ 7K context tokens; with the ~5K history/
+    # system cap that is ~12-13K total input, comfortably under the 16K/min wall. When > 0 this
+    # takes precedence over gemma_max_context_chars and the dynamic clamp is skipped. 0 = fall back
+    # to the char-budget + dynamic-clamp behavior.
+    gemma_chat_chunk_count: int = Field(
+        default=27,
+        validation_alias=AliasChoices("GEMMA_CHAT_CHUNK_COUNT"),
+    )
+    # Skip the STREAMING attempt for Gemma chat and go straight to one non-stream call. On the free
+    # tier a ~13K-token request is ~85% of the 16K/min input budget, and the stream attempt + the
+    # non-stream fallback each send it — ~26K/min → guaranteed 429 on the fallback. Sending once
+    # (non-stream only) halves the per-request input and makes large prompts actually succeed. The
+    # trade-off is no token-by-token streaming (the full answer arrives at once). Set false once
+    # billing lifts the 16K ceiling and streaming is reliable again.
+    gemma_disable_streaming: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("GEMMA_DISABLE_STREAMING"),
+    )
+    # Cap on the system prompt + conversation history + question portion of a Gemma chat input
+    # (~20K chars ≈ 5K tokens). With gemma_max_context_chars (~9K tok for chunks) this fixes the
+    # per-call budget at ~9K chunks + ~5K history/system = ~14K total input. When the history grows
+    # past this, the OLDEST turns are dropped (the current question is always kept) so document
+    # chunks never get starved.
+    gemma_history_system_max_chars: int = Field(
+        default=20000,
+        validation_alias=AliasChoices("GEMMA_HISTORY_SYSTEM_MAX_CHARS"),
+    )
+    # Hard cap (seconds) on how long the client-side input-TPM pacer will BLOCK a single Gemma
+    # call. When the rolling window is saturated (heavy back-to-back use), waiting the full ~50s
+    # inside a request just blows the step timeout — so cap the wait and let the request proceed to
+    # a fast 429 + clean "rate limited, try again" message instead of a long hang. 0 = no cap.
+    gemma_max_pace_wait_s: float = Field(
+        default=15.0,
+        validation_alias=AliasChoices("GEMMA_MAX_PACE_WAIT_S"),
+    )
+    gemma_free_tier_input_tpm: int = Field(
+        default=16000,
+        validation_alias=AliasChoices("GEMMA_FREE_TIER_INPUT_TPM"),
+    )
+    gemma_thinking_level: str = Field(
+        default="minimal",
+        validation_alias=AliasChoices("GEMMA_THINKING_LEVEL"),
+    )
+    gemma_chat_max_output_tokens: int = Field(
+        default=20000,
+        validation_alias=AliasChoices("GEMMA_CHAT_MAX_OUTPUT_TOKENS"),
+    )
+    # How long (seconds) to cache the per-model output-token registry (public.llm_max_tokens, edited
+    # via LLM Management → LLM Max Tokens). 0 = check the DB on EVERY request (fully live — an admin's
+    # limit change takes effect on the very next chat, no restart). Raise it (e.g. 10) to trade a
+    # little staleness for fewer DB reads under high traffic.
+    max_tokens_registry_cache_seconds: int = Field(
+        default=0,
+        validation_alias=AliasChoices("MAX_TOKENS_REGISTRY_CACHE_SECONDS"),
+    )
+    # HARDCODED temperature for a Gemma CHAT/Q&A call. Gemma runs on the free tier as a managed
+    # model, so its temperature is FIXED here rather than read from the admin agent_prompts row —
+    # admin-configured temperature applies only to paid Gemini models. 0.3 keeps grounded factual
+    # Q&A faithful to the documents. (Does NOT affect draft mode, which sets its own temperature.)
+    gemma_chat_temperature: float = Field(
+        default=0.3,
+        validation_alias=AliasChoices("GEMMA_CHAT_TEMPERATURE"),
+    )
+    # When True, comprehensive/deep asks force the generation temperature up to 1.0 (for fuller,
+    # less terse long-form output) EVEN IF the admin set a lower temperature on the agent row. When
+    # False (default), the admin-configured temperature from agent_prompts is honored verbatim for
+    # ALL asks — matching the contract "model + temperature come from admin config; only thinking is
+    # hardcoded". Flip to True only if you want the code to override the admin temp for long answers.
+    comprehensive_temp_nudge: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("COMPREHENSIVE_TEMP_NUDGE"),
+    )
+    # Per-call timeout (seconds) for a Gemma NON-STREAM chat/deep call. The generic timeout formula
+    # scales with the output-token budget (~88s for a 10K budget), but free-tier gemma is a slow,
+    # throttled thinking model whose single call measured 51-88s just to return 200 OK — 88s killed
+    # a call that would have succeeded, then a second call was stacked on top (tripling input-token
+    # usage against the 16K/min wall). This floor gives ONE honest call room to finish. Lower it once
+    # billing is enabled (calls return faster and you no longer pay the free-tier throttle).
+    gemma_non_stream_timeout_s: float = Field(
+        default=220.0,
+        validation_alias=AliasChoices("GEMMA_NON_STREAM_TIMEOUT_S"),
+    )
     anthropic_api_key: str = Field(default="", validation_alias=AliasChoices("ANTHROPIC_API_KEY"))
     deepseek_api_key: str = Field(
         default="",

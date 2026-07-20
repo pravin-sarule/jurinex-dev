@@ -96,9 +96,6 @@ const EXPORT_STYLES_BASE = `
   hr { border: none; border-top: 1pt solid #e5e7eb; margin: 14pt 0; }
   img { max-width: 100%; height: auto; page-break-inside: avoid; }
   .html2pdf__page-break { page-break-before: always; }
-  .jurinex-hdr { display: flex; justify-content: space-between; align-items: center; padding-bottom: 8pt; margin-bottom: 16pt; border-bottom: 2pt solid #21C1B6; }
-  .jurinex-logo { font-size: 17pt; font-weight: 800; color: #21C1B6; letter-spacing: -0.02em; }
-  .jurinex-date { font-size: 9pt; color: #9ca3af; }
 `;
 
 // Table styles shared by both PDF and non-PDF exports
@@ -141,9 +138,11 @@ function cloneForExport(element, forPdf = false) {
       while (wrapper.firstChild) parent.insertBefore(wrapper.firstChild, wrapper);
       wrapper.remove();
     });
-    // Also remove any inline min-width / width: max-content that would push table beyond page
+    // Also remove inline styles that would push the layout beyond the A4 page:
+    // table width/max-content AND th/td white-space:nowrap (inline styles override the
+    // PDF stylesheet's white-space:normal, widening the layout and shifting the canvas).
+    cloned.querySelectorAll('table, th, td').forEach(el => el.removeAttribute('style'));
     cloned.querySelectorAll('table').forEach(tbl => {
-      tbl.removeAttribute('style');
       tbl.style.width = '100%';
     });
   }
@@ -162,9 +161,11 @@ function cloneForExport(element, forPdf = false) {
 }
 
 function buildExportHtmlString(cloned, forPdf = false) {
-  const dateStr = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
   const bodyStyle = forPdf
-    ? 'font-family:"DM Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:12pt;line-height:1.75;color:#1f1f1f;background:#fff;text-rendering:optimizeLegibility;padding:0;max-width:100%;overflow:hidden;'
+    // Explicit A4 pixel width (not max-width:100% + overflow:hidden): the string source
+    // renders in a container sized to the REAL browser window, so percentage widths +
+    // windowWidth:794 disagree and html2canvas captures a shifted/clipped strip.
+    ? `font-family:"DM Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:12pt;line-height:1.75;color:#1f1f1f;background:#fff;text-rendering:optimizeLegibility;padding:0;margin:0;width:${A4_WIDTH_PX}px;`
     : 'font-family:"DM Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:12pt;line-height:1.75;color:#1f1f1f;background:#fff;text-rendering:optimizeLegibility;padding:24pt 32pt;';
   const tableStyles = forPdf ? TABLE_STYLES_PDF : TABLE_STYLES_HTML;
   return `<!DOCTYPE html>
@@ -180,10 +181,6 @@ ${tableStyles}
 </style>
 </head>
 <body>
-<div class="jurinex-hdr">
-  <span class="jurinex-logo">JuriNex</span>
-  <span class="jurinex-date">${dateStr}</span>
-</div>
 ${cloned.innerHTML}
 </body>
 </html>`;
@@ -335,6 +332,11 @@ export async function downloadAsPdf(element, filename = 'AI_Response.pdf') {
       backgroundColor: '#ffffff',
       logging: false,
       windowWidth: A4_WIDTH_PX,   // render at A4 width so tables lay out correctly
+      width: A4_WIDTH_PX,         // capture exactly the A4-wide layout, not the real window
+      x: 0,
+      y: 0,
+      scrollX: 0,                 // ignore the host page's scroll offsets — a scrolled
+      scrollY: 0,                 // parent shifts the capture and clips the content
     },
     jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
     pagebreak: { mode: ['css', 'legacy'], avoid: ['h1', 'h2', 'h3', 'h4', 'tr', 'li', 'blockquote', 'pre'] },
@@ -350,7 +352,6 @@ export async function downloadAsPdf(element, filename = 'AI_Response.pdf') {
 export function downloadAsWord(element, filename = 'AI_Response.doc') {
   if (!element) throw new Error('No content to export.');
   const cloned = cloneForExport(element, false);
-  const dateStr = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
   const wordDoc = `<!DOCTYPE html>
 <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
 <head>
@@ -373,11 +374,9 @@ strong { font-weight: 700; }
 em { font-style: italic; }
 code { font-family: 'Courier New', monospace; font-size: 9pt; background: #f3f4f6; padding: 1pt 3pt; }
 pre { background: #1f2937; color: #f9fafb; padding: 10pt; font-family: 'Courier New', monospace; font-size: 9pt; white-space: pre-wrap; }
-.jurinex-hdr { font-size: 9pt; color: #6b7280; margin-bottom: 14pt; border-bottom: 1pt solid #e5e7eb; padding-bottom: 6pt; display: flex; justify-content: space-between; }
 </style>
 </head>
 <body>
-<div class="jurinex-hdr"><span>JuriNex</span><span>${dateStr}</span></div>
 ${cloned.innerHTML}
 </body>
 </html>`;

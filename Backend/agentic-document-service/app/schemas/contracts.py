@@ -249,6 +249,26 @@ class FolderChatRequest(BaseModel):
     secret_id: str | None = None
     learning_mode: bool = False
     adversarial_mode: bool = False
+    # Draft-from-template mode: fill an uploaded template (attached to the model as a file) from the
+    # case's supporting documents. template_gcs_path is the gs:// object the browser PUT via the
+    # existing signed-upload flow; the template is NOT ingested into RAG.
+    draft_mode: bool = False
+    template_gcs_path: str | None = None
+    template_mimetype: str | None = None
+    # Per-draft engine selector (frontend dropdown, shown only when a template is attached).
+    # Allowed: gemini-3.1-pro-preview (default), claude-opus-4-8, claude-sonnet-5. Anything else
+    # falls back to the .env default. Only affects the DRAFT task.
+    draft_model: str | None = None
+    # Per-draft STRUCTURE model selector (Stage A: template layout analysis). Allowed:
+    # gemini-3.1-pro-preview (default), gemini-2.5-flash, claude-opus-4-8, claude-sonnet-5,
+    # gemma-4-31b-it, gemma-4-26b-a4b-it. Anything else falls back to gemini-3.1-pro-preview.
+    analysis_model: str | None = None
+    # Per-draft GUARDIAN model selector (Stage D/E: grounding audit, format audit, section
+    # repair, slot recovery). Same allowlist as the structure model. Empty → DRAFT_GUARDIAN_MODEL
+    # from .env → the auto default (Opus when an Anthropic key is set, else gemini-3.1-pro).
+    # This is the model that CHECKS the draft, so it is worth being able to A/B it against the
+    # engine that WROTE the draft.
+    guardian_model: str | None = None
     document_context: str | None = None
     context_page: int | None = None
     context_selection: str | None = None

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -186,18 +188,58 @@ def _deepseek_model_id(model_name: str) -> str:
 
 # ── API clients ───────────────────────────────────────────────────────────────
 
-def _gemini_client():
-    """Return a configured google.genai Client, or None if unavailable."""
+def _is_gemma_model(model_name: str | None) -> bool:
+    """True when the model id (after any vendor/ prefix) is a Gemma model."""
+    return _model_tail_lower(model_name or "").startswith("gemma")
+
+
+def _gemini_api_key_for_model(model_name: str | None) -> str:
+    """
+    Pick the API key for a google.genai call.
+
+    Gemma models use the dedicated GEMMA_API_KEY when configured; everything else
+    (Gemini) uses GEMINI_API_KEY. Gemma falls back to GEMINI_API_KEY when its own
+    key is blank, so a single key can still serve both.
+    """
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    if _is_gemma_model(model_name):
+        gemma_key = str(getattr(settings, "gemma_api_key", "") or "").strip()
+        if gemma_key:
+            return gemma_key
+    return str(settings.gemini_api_key or "").strip()
+
+
+def _gemini_client(model_name: str | None = None):
+    """Return a configured google.genai Client, or None if unavailable.
+
+    For Gemma models, authenticates with GEMMA_API_KEY when set (falls back to
+    GEMINI_API_KEY). Provider selection itself stays driven by the DB model name.
+    """
     try:
         from google import genai  # type: ignore
-        from app.core.config import get_settings
 
-        api_key = get_settings().gemini_api_key
+        api_key = _gemini_api_key_for_model(model_name)
         if not api_key:
             return None
         return genai.Client(api_key=api_key)
     except Exception:
         return None
+
+
+def _api_key_label_for_model(model_name: str | None, provider: str) -> str:
+    """Human-readable label of which credential a call uses (for logs/debugging)."""
+    if provider == "claude":
+        return "ANTHROPIC_API_KEY"
+    if provider == "deepseek":
+        return "DEEPSEEK_API_KEY"
+    if _is_gemma_model(model_name):
+        from app.core.config import get_settings
+
+        has_gemma = bool(str(getattr(get_settings(), "gemma_api_key", "") or "").strip())
+        return "GEMMA_API_KEY" if has_gemma else "GEMINI_API_KEY (gemma fallback)"
+    return "GEMINI_API_KEY"
 
 
 def _anthropic_client():
@@ -1344,6 +1386,84 @@ def _gemini_model_supports_thinking_config(model_name: str | None) -> bool:
     return False
 
 
+# In-memory cache of the admin-editable per-model output-token registry
+# (public.llm_max_tokens, edited via LLM Management → LLM Max Tokens). Refreshed lazily every
+# _MAX_TOKENS_REGISTRY_TTL seconds so a config build isn't a DB hit on every request.
+_MAX_TOKENS_REGISTRY: dict[str, int] = {}
+_MAX_TOKENS_REGISTRY_TS: float = 0.0
+_MAX_TOKENS_REGISTRY_TTL_DEFAULT: float = 10.0
+
+
+def _load_max_tokens_registry() -> dict[str, int]:
+    """Return {model_name_lower: max_output_tokens} from public.llm_max_tokens.
+
+    Admin-editable (LLM Management → LLM Max Tokens) and synced to this service's DB. Cached for
+    settings.max_tokens_registry_cache_seconds (default 10s) so edits propagate almost immediately;
+    set that knob to 0 to read the DB on every call (no cache). On any error / DB-unavailable, returns
+    the last good cache (possibly empty) so the caller falls back to the hardcoded ceilings — a
+    registry read must never break generation."""
+    global _MAX_TOKENS_REGISTRY, _MAX_TOKENS_REGISTRY_TS
+    now = time.time()
+    try:
+        from app.core.config import get_settings as _gs
+        ttl = float(getattr(_gs(), "max_tokens_registry_cache_seconds", _MAX_TOKENS_REGISTRY_TTL_DEFAULT))
+    except Exception:
+        ttl = _MAX_TOKENS_REGISTRY_TTL_DEFAULT
+    if ttl > 0 and _MAX_TOKENS_REGISTRY_TS and (now - _MAX_TOKENS_REGISTRY_TS) < ttl:
+        return _MAX_TOKENS_REGISTRY
+    try:
+        from app.services.db import get_db_connection, is_db_available
+        if not is_db_available():
+            return _MAX_TOKENS_REGISTRY
+        reg: dict[str, int] = {}
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT model_name, max_output_tokens FROM public.llm_max_tokens")
+            for row in cur.fetchall():
+                d = dict(row) if hasattr(row, "keys") else {"model_name": row[0], "max_output_tokens": row[1]}
+                mn = str(d.get("model_name") or "").strip().lower()
+                mt = d.get("max_output_tokens")
+                if mn and mt:
+                    try:
+                        reg[mn] = int(mt)
+                    except (TypeError, ValueError):
+                        continue
+        _MAX_TOKENS_REGISTRY = reg
+        _MAX_TOKENS_REGISTRY_TS = now
+        return reg
+    except Exception as exc:  # noqa: BLE001 — never let a registry read break generation
+        logger.info("[DocumentAI] llm_max_tokens registry load failed (%s); using hardcoded ceilings", exc)
+        return _MAX_TOKENS_REGISTRY
+
+
+def _model_max_output_tokens(model_name: str | None) -> int | None:
+    """Per-model output-token ceiling used to clamp the requested max_output_tokens.
+
+    Source of truth (per admin directive):
+      • GEMMA → HARDCODED 32768 (free-tier managed model; NOT admin-editable via the registry).
+      • Every other model → the admin DB registry public.llm_max_tokens (LLM Management →
+        LLM Max Tokens), matched by exact model_name. Models NOT in the registry fall back to the
+        known hardcoded ceilings (gemini-2.5/3 → 65536, gemini-2.0/1.5 → 8192, else None/no clamp)
+        so nothing breaks for an unlisted model.
+
+    Requesting MORE than a model's real limit is invalid: the Gemini API may silently fall back to a
+    low default (≈8192) and truncate answers — so we always clamp the request to this ceiling."""
+    m = (model_name or "").strip().lower().rsplit("/", 1)[-1]
+    if not m:
+        return None
+    if m.startswith("gemma"):
+        return 32768
+    # Admin registry wins for all non-gemma models.
+    reg = _load_max_tokens_registry()
+    if m in reg:
+        return reg[m]
+    # Fallback for a model not present in the registry.
+    if "2.5" in m or "2-5" in m or "gemini-3" in m:
+        return 65536
+    if "gemini-2.0" in m or "gemini-1.5" in m or "gemini-1-5" in m:
+        return 8192
+    return None
+
+
 # ── Gemini config builder ─────────────────────────────────────────────────────
 
 def _build_gemini_config(
@@ -1351,6 +1471,7 @@ def _build_gemini_config(
     llm_params: dict,
     *,
     model_name: str | None = None,
+    gemma_chat_budget: bool = False,
 ):
     """
     Build a GenerateContentConfig from gen_kwargs + every flag in llm_parameters.
@@ -1377,6 +1498,54 @@ def _build_gemini_config(
         config_kwargs = dict(gen_kwargs)
         tools: list = []
         active_flags: list[str] = []
+
+        # ── Clamp max_output_tokens to the model's real ceiling ──────────────
+        # Requesting above a model's limit (e.g. 65536 on gemma-4, whose limit is 32768) is
+        # invalid and can make the API fall back to a low default. Always ask for the real max.
+        _mot = config_kwargs.get("max_output_tokens")
+        _lim = _model_max_output_tokens(model_name)
+        if _mot and _lim and int(_mot) > _lim:
+            config_kwargs["max_output_tokens"] = _lim
+            active_flags.append(f"max_output_tokens_clamped({_mot}->{_lim})")
+
+        # ── Gemma: thinking level (ALL calls) + chat output budget (CHAT only) ───
+        # Gemma-4 is a thinking model whose thinking + answer SHARE max_output_tokens, and it
+        # REJECTS numeric thinking_budget — only thinking_level "minimal" | "high" (400 otherwise,
+        # verified live). "minimal" emits ZERO thinking tokens so the whole output budget becomes
+        # the answer (never cut by thinking) AND it is ~2x faster.
+        # thinking_level is applied to EVERY Gemma call (chat, non-stream fallback, draft) so nothing
+        # silently reverts to Gemma's slower default thinking — driven by GEMMA_THINKING_LEVEL.
+        # The output-token CAP stays CHAT-only (gemma_chat_budget): the draft pipeline passes a large
+        # explicit budget and must keep it so sections aren't truncated.
+        if _is_gemma_model(model_name):
+            from app.core.config import get_settings as _gemma_settings
+            _gs = _gemma_settings()
+            _lvl = str(getattr(_gs, "gemma_thinking_level", "minimal") or "minimal").strip().lower()
+            if _lvl in ("minimal", "high"):
+                try:
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=_lvl)
+                    active_flags.append(f"gemma_thinking_level={_lvl}")
+                except Exception as _tl_exc:
+                    logger.info("[DocumentAI] gemma thinking_level=%s not applied: %s", _lvl, _tl_exc)
+            # Gemma (free tier) uses a FIXED, hardcoded temperature on EVERY Gemma call — the admin
+            # agent_prompts temperature is honored only for paid Gemini models. Applied to ALL gemma
+            # calls (NOT just gemma_chat_budget), so it also covers the narrow-question path
+            # (_generate_text / _call_gemini_for_qa at line ~1536, gemma_chat_budget=False) — that was
+            # the gap: narrow chats used the admin temp while only comprehensive got the override. A
+            # low temp also suits grounded drafting. The main chat-draft path builds its OWN config in
+            # files.py (temp 0.2, bypassing this function), so it's unaffected; Gemini models never
+            # enter this `if _is_gemma_model(...)` block, so they keep the admin temperature.
+            _gemma_temp = getattr(_gs, "gemma_chat_temperature", None)
+            if _gemma_temp is not None:
+                config_kwargs["temperature"] = float(_gemma_temp)
+                active_flags.append(f"gemma_temperature={float(_gemma_temp):.2f}")
+            if gemma_chat_budget:
+                _gemma_out = int(getattr(_gs, "gemma_chat_max_output_tokens", 0) or 0)
+                if _gemma_out > 0:
+                    _cur = int(config_kwargs.get("max_output_tokens") or 0)
+                    if _cur <= 0 or _gemma_out < _cur:
+                        config_kwargs["max_output_tokens"] = _gemma_out
+                        active_flags.append(f"gemma_output_budget={_gemma_out}")
 
         # ── Tools ────────────────────────────────────────────────────────────
         if llm_params.get("url_context"):
@@ -1489,7 +1658,9 @@ def gemini_stream_config_for_folder_chat(
     )
     if _detect_provider(model_name) != "gemini":
         return None
-    return model_name, _build_gemini_config(gen_kwargs, llm_params, model_name=model_name)
+    return model_name, _build_gemini_config(
+        gen_kwargs, llm_params, model_name=model_name, gemma_chat_budget=True
+    )
 
 
 def stream_config_for_folder_chat(
@@ -1524,7 +1695,9 @@ def stream_config_for_folder_chat(
         return "claude", model_name, (gen_kwargs, llm_params)
     if provider == "deepseek":
         return "deepseek", model_name, (gen_kwargs, llm_params)
-    return "gemini", model_name, _build_gemini_config(gen_kwargs, llm_params, model_name=model_name)
+    return "gemini", model_name, _build_gemini_config(
+        gen_kwargs, llm_params, model_name=model_name, gemma_chat_budget=True
+    )
 
 
 def claude_stream_generator(
@@ -1564,16 +1737,21 @@ def claude_stream_generator(
     if sys_instr:
         create_kwargs["system"] = sys_instr
 
-    if llm_params.get("thinking_mode"):
-        budget = _resolve_thinking_budget(llm_params, "claude")
-        create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+    thinking_on = bool(llm_params.get("thinking_mode"))
+    if thinking_on:
+        create_kwargs["thinking"] = _claude_thinking_config(api_model, llm_params)
         temperature = 1.0
 
-    create_kwargs["temperature"] = temperature
+    # Only send `temperature` where the model accepts it AND thinking is off. Opus 4.6+,
+    # Sonnet 5 and Fable 5 REJECT `temperature` outright (400) — sending it unconditionally
+    # here 400'd every Opus/Sonnet-5 draft and silently dropped it to the gemma fallback.
+    if not thinking_on and _claude_accepts_temperature(api_model):
+        create_kwargs["temperature"] = temperature
 
     logger.info(
-        "[DocumentAI] ▶ Claude stream  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d",
-        api_model, model_name, temperature, max_tokens,
+        "[DocumentAI] ▶ Claude stream  model_id=%s (raw=%s)  temperature=%s  max_tokens=%d  thinking=%s",
+        api_model, model_name, create_kwargs.get("temperature", "unset"), max_tokens,
+        (create_kwargs.get("thinking") or {}).get("type", "off"),
     )
 
     with client.messages.stream(**create_kwargs) as stream:
@@ -1597,7 +1775,102 @@ def claude_stream_generator(
         )
 
 
+def claude_draft_stream_generator(
+    prompt: str,
+    *,
+    model_name: str,
+    pdf_bytes: bytes | None = None,
+    pdf_mime: str = "application/pdf",
+    max_tokens: int = 32000,
+):
+    """Stream a court-ready draft from Claude, attaching the uploaded template as a PDF
+    document block (Claude reads PDFs natively — verified live).
+
+    Used for draft-from-template when the selected draft engine is a Claude model
+    (claude-opus-4-8 / claude-sonnet-5). Enables ADAPTIVE THINKING ({"type":"adaptive"},
+    the modern 4.6+ form — the deprecated budget_tokens form 400s on these models): the
+    model reasons about document type, structure, clause selection and grounding before
+    it writes, which is exactly the drafting "self-intelligence" this feature needs.
+    `text_stream` yields only the answer text (not thinking deltas), so the streamed draft
+    stays clean; thinking trades a little first-token latency for a much better draft
+    (aligned with "relevance/quality over cost"). temperature is left unset (required when
+    thinking is on; setting it 400s anyway).
+    """
+    import base64 as _b64
+
+    client = _anthropic_client()
+    if client is None:
+        logger.warning("[DocumentAI] Claude draft stream skipped — Anthropic client unavailable")
+        return
+
+    api_model = _anthropic_messages_model_id(model_name)
+    content: list = []
+    if pdf_bytes:
+        content.append({
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": pdf_mime or "application/pdf",
+                "data": _b64.standard_b64encode(pdf_bytes).decode("ascii"),
+            },
+        })
+    content.append({"type": "text", "text": prompt})
+
+    create_kwargs = {
+        "model": api_model,
+        "max_tokens": max(1024, min(int(max_tokens or 32000), 64000)),
+        "messages": [{"role": "user", "content": content}],
+        "thinking": {"type": "adaptive"},
+    }
+    logger.info(
+        "[DocumentAI] ▶ Claude DRAFT stream  model_id=%s (raw=%s)  max_tokens=%d  pdf_bytes=%d",
+        api_model, model_name, create_kwargs["max_tokens"], len(pdf_bytes or b""),
+    )
+    with client.messages.stream(**create_kwargs) as stream:
+        for text_chunk in stream.text_stream:
+            yield text_chunk
+        final_msg = stream.get_final_message()
+        usage = getattr(final_msg, "usage", None)
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        log_token_usage_table(
+            context="claude_draft_stream",
+            usage={
+                "provider": "claude",
+                "model": api_model,
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "totalTokens": input_tokens + output_tokens,
+            },
+            provider="claude",
+            model_name=api_model,
+        )
+
+
 # ── Claude (Anthropic) generation ─────────────────────────────────────────────
+
+def _claude_accepts_temperature(api_model: str) -> bool:
+    """Modern Claude models (Opus 4.6+, Sonnet 5/4.6, Fable/Mythos 5) reject the
+    `temperature` parameter outright (400 'temperature is deprecated for this model').
+    Older models still accept it. Default True so unknown/older ids keep working."""
+    m = (api_model or "").lower()
+    for tag in ("opus-4-8", "opus-4-7", "opus-4-6", "sonnet-5", "sonnet-4-6",
+                "fable-5", "mythos-5", "mythos-preview"):
+        if tag in m:
+            return False
+    return True
+
+
+def _claude_thinking_config(api_model: str, llm_params: dict) -> dict:
+    """Correct extended-thinking config per model generation. Claude 4.6+ (Opus 4.6/4.7/4.8,
+    Sonnet 4.6/5, Fable/Mythos 5) use {"type":"adaptive"} — the OLD {"type":"enabled",
+    "budget_tokens":N} form is REJECTED with a 400 on Opus 4.7/4.8, Sonnet 5 and Fable 5,
+    which silently sank Claude drafts into the gemma fallback. Older models keep the budget
+    form. (The 4.6+ set is the same one that rejects `temperature`.)"""
+    if not _claude_accepts_temperature(api_model):
+        return {"type": "adaptive"}
+    return {"type": "enabled", "budget_tokens": _resolve_thinking_budget(llm_params, "claude")}
+
 
 def _generate_text_claude(
     prompt: str,
@@ -1646,35 +1919,64 @@ def _generate_text_claude(
         active_flags.append("system_instructions")
 
     # ── Extended thinking ────────────────────────────────────────────────────
-    if llm_params.get("thinking_mode"):
-        budget = _resolve_thinking_budget(llm_params, "claude")
-        create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-        # Anthropic requires temperature=1 when extended thinking is on
+    thinking_on = bool(llm_params.get("thinking_mode"))
+    if thinking_on:
+        create_kwargs["thinking"] = _claude_thinking_config(api_model, llm_params)
+        # Anthropic requires temperature unset (=1) when extended thinking is on
         temperature = 1.0
-        active_flags.append(f"thinking(budget={budget})")
+        active_flags.append(f"thinking({create_kwargs['thinking'].get('type')})")
 
-    create_kwargs["temperature"] = temperature
+    # Temperature: modern Claude models (Opus 4.6+, Sonnet 5, Fable 5) reject `temperature`
+    # entirely, and it must be unset when extended thinking is on. Only send it where the
+    # model accepts it and thinking is off.
+    if not thinking_on and _claude_accepts_temperature(api_model):
+        create_kwargs["temperature"] = temperature
 
     if active_flags:
         logger.info("[DocumentAI] Claude flags active: %s", ", ".join(active_flags))
 
+    # The Anthropic SDK REFUSES a non-streaming request whose max_tokens is large enough
+    # that it estimates the response could take >10 minutes ("Streaming is required for
+    # operations that may take longer than 10 minutes"). The drafting pipeline stages use
+    # 16K–32K max_tokens, which trips this — so stream and collect the final message for
+    # any high-max_tokens call. Streaming + get_final_message returns the identical Message
+    # (same .content / .usage), just without the timeout guard.
+    use_stream = max_tokens > 8000
+
     logger.info(
-        "[DocumentAI] ▶ Claude generate  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d",
+        "[DocumentAI] ▶ Claude generate  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d  stream=%s",
         api_model,
         model_name,
         temperature,
         max_tokens,
+        use_stream,
     )
 
-    response = client.messages.create(**create_kwargs)
+    if use_stream:
+        with client.messages.stream(**create_kwargs) as stream:
+            response = stream.get_final_message()
+    else:
+        response = client.messages.create(**create_kwargs)
 
     usage = getattr(response, "usage", None)
-    logger.info(
-        "[TokenUsage] provider=claude  model=%s  prompt_tokens=%s  completion_tokens=%s  total_tokens=%s",
-        api_model,
-        getattr(usage, "input_tokens", "?"),
-        getattr(usage, "output_tokens", "?"),
-        (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "output_tokens", 0) or 0),
+    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+    # RECORD, don't just print. This path is what every non-streaming Claude agent uses —
+    # including the draft guardian (grounding/format audit, section repair, slot recovery).
+    # It used to emit a bare logger.info, so its tokens never reached the per-request
+    # accumulator: the guardian's Opus calls were invisible to the DRAFT COMPLETE cost table
+    # and their (real, billed) cost was silently omitted from the end-to-end total.
+    log_token_usage_table(
+        context="claude_generate",
+        usage={
+            "provider": "claude",
+            "model": api_model,
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "totalTokens": input_tokens + output_tokens,
+        },
+        provider="claude",
+        model_name=api_model,
     )
 
     # Extract text from content blocks (thinking blocks are skipped)
@@ -1747,12 +2049,21 @@ def _generate_text_deepseek(
         )
         raise
     usage = getattr(response, "usage", None)
-    logger.info(
-        "[TokenUsage] provider=deepseek  model=%s  prompt_tokens=%s  completion_tokens=%s  total_tokens=%s",
-        api_model,
-        getattr(usage, "prompt_tokens", "?"),
-        getattr(usage, "completion_tokens", "?"),
-        getattr(usage, "total_tokens", "?"),
+    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or (input_tokens + output_tokens)
+    # Record (not just print) — same accumulator bug as the non-streaming Claude path.
+    log_token_usage_table(
+        context="deepseek_generate",
+        usage={
+            "provider": "deepseek",
+            "model": api_model,
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "totalTokens": total_tokens,
+        },
+        provider="deepseek",
+        model_name=api_model,
     )
     content = (response.choices[0].message.content or "") if response.choices else ""
     return normalize_markdown_render_output(content)
@@ -1909,6 +2220,228 @@ def deepseek_stream_generator(
 
 # ── Unified text generation (routes Gemini ↔ Claude) ─────────────────────────
 
+def _is_transient_gemini_error(exc: BaseException) -> bool:
+    """Retryable Gemini/Gemma error. Two families are safe to retry:
+    - 500 INTERNAL / 503 UNAVAILABLE / OVERLOADED — Gemma intermittently returns these and the
+      very next call succeeds (verified in prod logs).
+    - 429 RESOURCE_EXHAUSTED — the PAID tier caps Gemma at a low input-TPM (e.g. gemma-4-31b =
+      16,000 input tokens/min); a burst of section drafts trips it, but Google returns a
+      `retryDelay` and the request succeeds once the per-minute window refills. (This was NOT
+      retried before — the old note "Gemma free tier is TPM unlimited" only held on the free
+      tier.) 429 retries MUST honour the server's retryDelay — see `_gemini_retry_delay`."""
+    msg = str(exc).upper()
+    return any(tok in msg for tok in (
+        "500", "INTERNAL", "503", "UNAVAILABLE", "OVERLOADED", "DEADLINE EXCEEDED",
+        "429", "RESOURCE_EXHAUSTED", "QUOTA",
+    ))
+
+
+_RETRY_DELAY_RES = (
+    re.compile(r"retry in\s+([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE),
+    re.compile(r"retryDelay['\"]?\s*[:=]\s*['\"]?([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE),
+)
+
+
+def _gemini_retry_delay(exc: BaseException, fallback: float, *, cap: float = 60.0) -> float:
+    """Seconds to wait before retrying a rate-limited (429) call. Prefers the server's own
+    `retryDelay` ("Please retry in 17.78s" / "retryDelay: 17s"), +1s cushion, capped; falls
+    back to the caller's backoff when the message has no delay."""
+    msg = str(exc)
+    for rx in _RETRY_DELAY_RES:
+        m = rx.search(msg)
+        if m:
+            try:
+                return min(cap, float(m.group(1)) + 1.0)
+            except ValueError:
+                pass
+    return fallback
+
+
+class GemmaInputTPMExceeded(RuntimeError):
+    """Free-tier Gemma input-tokens-per-minute quota is exhausted and could not be satisfied in
+    time (a single request larger than the per-minute budget, or the window stayed full through a
+    retry). Raised so the caller can surface a plain-language message instead of hanging on retries
+    or bubbling a raw 429. Enable billing / raise GEMMA_FREE_TIER_INPUT_TPM to lift the ceiling."""
+
+
+def _estimate_input_tokens(contents: Any) -> int:
+    """Rough input-token estimate (~4 chars/token) for a google.genai `contents` value — a plain
+    prompt string or a list of Parts. Used only for client-side rate pacing, so an approximation
+    is fine; non-text Parts (an attached PDF) count as a coarse floor."""
+    try:
+        if isinstance(contents, str):
+            n = len(contents)
+        elif isinstance(contents, (list, tuple)):
+            n = 0
+            for part in contents:
+                t = getattr(part, "text", None)
+                n += len(t) if isinstance(t, str) else 2000
+        else:
+            t = getattr(contents, "text", None)
+            n = len(t) if isinstance(t, str) else 0
+        return max(1, n // 4)
+    except Exception:
+        return 0
+
+
+def _gemma_input_tpm_budget() -> int:
+    """Client-side per-minute input-token budget for Gemma, at 90% of the configured tier limit
+    (10% headroom). 0 disables token pacing."""
+    try:
+        from app.core.config import get_settings
+        tpm = int(getattr(get_settings(), "gemma_free_tier_input_tpm", 0) or 0)
+    except Exception:
+        tpm = 0
+    return int(tpm * 0.9) if tpm > 0 else 0
+
+
+def _is_input_tpm_quota_error(exc: BaseException) -> bool:
+    """True when a 429 specifically names the per-minute INPUT-token quota (not RPM/RPD). These
+    can't be waited out by pacing alone when a single request exceeds the minute budget."""
+    m = str(exc)
+    if "RESOURCE_EXHAUSTED" not in m and "429" not in m:
+        return False
+    low = m.lower()
+    return "input_token" in low or "inputtokenspermodel" in low
+
+
+_GEMMA_PACE_LOCK = threading.Lock()
+_gemma_last_request_ts = 0.0
+# Rolling 60s window of (monotonic_ts, est_input_tokens) for Gemma input-TPM pacing.
+_gemma_token_window: list[tuple[float, int]] = []
+
+
+def _pace_gemma_call(model_name: str | None, *, est_input_tokens: int = 0) -> None:
+    """Enforce free-tier-safe pacing between successive Gemma requests — GLOBAL across threads and
+    INCLUDING retries. Two limits are enforced together:
+      • RPM  — a minimum wall-clock interval between calls (GEMMA_MIN_CALL_INTERVAL_S, default 9s
+        ≈ 6-7 RPM; free AI Studio keys allow ~15-30 RPM and the endpoint 500s under rapid fire).
+      • input-TPM — free keys cap Gemma at ~16,000 INPUT tokens/min per model. When the caller
+        passes an estimate, a rolling 60s window holds the request until sending it would stay
+        under GEMMA_FREE_TIER_INPUT_TPM (90% of, for headroom). A single request larger than the
+        whole budget can't be satisfied by waiting, so it is let through to 429 + fail-fast rather
+        than sleeping pointlessly.
+    Sleeping under the lock is deliberate — it serialises concurrent gemma callers so both limits
+    hold even when sections draft in parallel. Only ever runs in executor threads (never on the
+    event loop). Non-gemma models pass straight through."""
+    global _gemma_last_request_ts
+    if not _is_gemma_model(model_name):
+        return
+    try:
+        from app.core.config import get_settings
+        _s = get_settings()
+        interval = float(getattr(_s, "gemma_min_call_interval_s", 9.0) or 0.0)
+        max_pace_wait = float(getattr(_s, "gemma_max_pace_wait_s", 15.0) or 0.0)
+    except Exception:
+        interval = 9.0
+        max_pace_wait = 15.0
+    tpm_budget = _gemma_input_tpm_budget()
+    with _GEMMA_PACE_LOCK:
+        now = time.monotonic()
+        # ── input-TPM: wait until the rolling 60s window has room for this request ──
+        if tpm_budget > 0 and est_input_tokens > 0:
+            # Drop entries older than 60s.
+            _gemma_token_window[:] = [(ts, tok) for (ts, tok) in _gemma_token_window if now - ts < 60.0]
+            used = sum(tok for _, tok in _gemma_token_window)
+            if est_input_tokens <= tpm_budget and used + est_input_tokens > tpm_budget:
+                need_free = used + est_input_tokens - tpm_budget
+                freed = 0.0
+                wait_tpm = 0.0
+                for ts, tok in sorted(_gemma_token_window):  # oldest first
+                    freed += tok
+                    if freed >= need_free:
+                        wait_tpm = max(0.0, ts + 60.0 - now)
+                        break
+                wait_tpm = min(wait_tpm, 60.0)
+                # Cap the block: when the window is saturated (heavy back-to-back use), sleeping the
+                # full ~50s inside a request just blows the step timeout. Wait at most
+                # gemma_max_pace_wait_s, then proceed — a fast 429 + fail-fast message beats a long
+                # hang that times out anyway.
+                if max_pace_wait > 0 and wait_tpm > max_pace_wait:
+                    logger.info(
+                        "[DocumentAI] input-TPM needs %.1fs but capped to %.1fs — proceeding "
+                        "(quota saturated; may 429 → fail-fast)", wait_tpm, max_pace_wait,
+                    )
+                    wait_tpm = max_pace_wait
+                if wait_tpm > 0:
+                    logger.info(
+                        "[DocumentAI] pacing gemma %.1fs for input-TPM (window=%d + req=%d > budget=%d)",
+                        wait_tpm, used, est_input_tokens, tpm_budget,
+                    )
+                    time.sleep(wait_tpm)
+                    now = time.monotonic()
+                    _gemma_token_window[:] = [(ts, tok) for (ts, tok) in _gemma_token_window if now - ts < 60.0]
+            elif est_input_tokens > tpm_budget:
+                logger.warning(
+                    "[DocumentAI] gemma request est %d input tokens exceeds the whole per-minute "
+                    "budget (%d) — will 429; reduce context or raise GEMMA_FREE_TIER_INPUT_TPM",
+                    est_input_tokens, tpm_budget,
+                )
+            _gemma_token_window.append((now, est_input_tokens))
+        # ── RPM: minimum interval between calls ──
+        if interval > 0:
+            wait = _gemma_last_request_ts + interval - now
+            if wait > 0:
+                logger.info("[DocumentAI] pacing gemma request %.1fs (free-tier RPM guard)", wait)
+                time.sleep(wait)
+                now = time.monotonic()
+        _gemma_last_request_ts = now
+
+
+def _gemini_generate_content_retrying(client, *, model, contents, config, retries: int = 4, base_delay: float = 2.0):
+    """`client.models.generate_content` with automatic retry on transient errors. Turns Gemma's
+    intermittent 500s AND paid-tier 429 rate limits into successful calls. On a 429 it waits the
+    server-provided `retryDelay` (the per-minute quota refills); on a 5xx it backs off 2s/4s/8s
+    (gemma calls are additionally paced to GEMMA_MIN_CALL_INTERVAL_S apart — see
+    `_pace_gemma_call` — so a retry burst can never hammer the 15 RPM free-tier window).
+    Input-token-TPM 429s (free-tier Gemma, 16K input tokens/min) are handled specially: a single
+    request bigger than the whole per-minute budget can NEVER succeed by retrying, so it fails fast
+    as GemmaInputTPMExceeded; otherwise it is retried at most ONCE (honouring the server retryDelay,
+    capped short so it fits the caller's step timeout) before giving up cleanly. Never retries
+    400/401/403. Raises the last error if all attempts fail."""
+    est_tokens = _estimate_input_tokens(contents) if _is_gemma_model(model) else 0
+    tpm_budget = _gemma_input_tpm_budget()
+    last_exc: BaseException | None = None
+    input_tpm_retries = 0
+    for attempt in range(max(1, retries)):
+        _pace_gemma_call(model, est_input_tokens=est_tokens)
+        try:
+            return client.models.generate_content(model=model, contents=contents, config=config)
+        except Exception as exc:  # inspect + selectively retry
+            last_exc = exc
+            input_tpm = _is_input_tpm_quota_error(exc)
+            # A single request over the whole minute budget is unrecoverable — fail fast so the UI
+            # can show a clear message instead of hanging through futile retries.
+            if input_tpm and tpm_budget > 0 and est_tokens > tpm_budget:
+                raise GemmaInputTPMExceeded(str(exc)) from exc
+            if attempt >= retries - 1 or not _is_transient_gemini_error(exc):
+                if input_tpm:
+                    raise GemmaInputTPMExceeded(str(exc)) from exc
+                raise
+            if input_tpm:
+                # Retry the input-TPM quota at most once; a short cap keeps retry+call under the
+                # caller's timeout (a 58s server delay + a 25s call would blow an ~88s step budget).
+                input_tpm_retries += 1
+                if input_tpm_retries > 1:
+                    raise GemmaInputTPMExceeded(str(exc)) from exc
+                delay = _gemini_retry_delay(exc, base_delay * (2 ** attempt), cap=35.0)
+                reason = "input-token quota (429)"
+            elif "429" in str(exc).upper() or "RESOURCE_EXHAUSTED" in str(exc).upper() or "QUOTA" in str(exc).upper():
+                delay = _gemini_retry_delay(exc, base_delay * (2 ** attempt))
+                reason = "rate-limited (429)"
+            else:
+                delay = base_delay * (2 ** attempt)
+                reason = "transient error"
+            logger.warning(
+                "[DocumentAI] %s %s (attempt %d/%d) — retrying in %.1fs: %s",
+                model, reason, attempt + 1, retries, delay, str(exc)[:160],
+            )
+            time.sleep(delay)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("gemini generate_content produced no result")
+
+
 def _generate_text(
     prompt: str,
     *,
@@ -1917,6 +2450,7 @@ def _generate_text(
     user_id: str | int | None = None,
     summarization_llm_config: dict | None = None,
     model_name_override: str | None = None,
+    max_output_tokens: int | None = None,
 ) -> str:
     """
     Generate text using either Gemini or Claude depending on the model name
@@ -1925,6 +2459,10 @@ def _generate_text(
     Routing:
       model id tail starts with "claude" (after any vendor/ path prefix) → Anthropic API
       everything else → Gemini API
+
+    max_output_tokens: optional per-call override of the configured output budget
+    (used by the multi-stage template drafting pipeline, whose fact-inventory and
+    section stages need a large budget). It is clamped to the model ceiling downstream.
     """
     model_name, gen_kwargs, llm_params = _generation_config(
         for_summary=for_summary,
@@ -1933,11 +2471,13 @@ def _generate_text(
         summarization_llm_config=summarization_llm_config,
         model_name_override=model_name_override,
     )
+    if max_output_tokens:
+        gen_kwargs = {**gen_kwargs, "max_output_tokens": int(max_output_tokens)}
     provider = _detect_provider(model_name)
 
     logger.info(
-        "[DocumentAI] generate  provider=%s  model=%s  agent=%s",
-        provider, model_name, agent_name or "N/A",
+        "[DocumentAI] LLM IN USE  provider=%s  model=%s  api_key=%s  agent=%s",
+        provider, model_name, _api_key_label_for_model(model_name, provider), agent_name or "N/A",
     )
 
     if provider == "claude":
@@ -1957,12 +2497,13 @@ def _generate_text(
         )
 
     # ── Gemini ───────────────────────────────────────────────────────────────
-    client = _gemini_client()
+    client = _gemini_client(model_name)
     if client is None:
         logger.warning("[DocumentAI] Gemini client unavailable — check GEMINI_API_KEY")
         return ""
     gemini_config = _build_gemini_config(gen_kwargs, llm_params, model_name=model_name)
-    response = client.models.generate_content(
+    response = _gemini_generate_content_retrying(
+        client,
         model=model_name,
         contents=prompt,
         config=gemini_config,
@@ -2188,6 +2729,24 @@ def _call_gemini_for_qa(
         # dropped most of a large case file and produced
         # "Not mentioned in the document." answers.
         char_limit = 380_000
+        # ...but a free-tier Gemma caps INPUT at ~16K tokens/min, so it 429s long before 380k chars
+        # (~95K tokens). Resolve the model that will actually answer and clamp only Gemma to its
+        # safe budget — every other model keeps the full 380k above, so the truncation bug that
+        # motivated it does not come back. get_agent_config is cached, so this extra resolve is
+        # cheap and the value is reused by _generate_text below.
+        try:
+            _qa_model, _, _ = _generation_config(
+                for_summary=True,
+                agent_name=agent_name,
+                user_id=user_id,
+                summarization_llm_config=summarization_llm_config,
+                model_name_override=model_name_override,
+            )
+            if _is_gemma_model(_qa_model):
+                from app.core.config import get_settings as _qa_settings
+                char_limit = min(char_limit, int(getattr(_qa_settings(), "gemma_max_context_chars", 48000) or 48000))
+        except Exception:
+            pass
         for doc in document_texts:
             name = doc.get("name", "document")
             # Repair deterministic OCR artefacts (split numbers + known terms) before

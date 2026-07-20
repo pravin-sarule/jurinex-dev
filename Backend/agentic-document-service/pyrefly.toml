@@ -1,0 +1,5 @@
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
+]
+python-interpreter-path = "/home/dell-3/Documents/Jurinex RBAC/jurinex-dev/Backend/agentic-document-service/venv/bin/python"

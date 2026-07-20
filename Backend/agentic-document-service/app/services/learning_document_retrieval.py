@@ -54,13 +54,43 @@ def _rewrite_query_for_embedding(raw: str) -> str:
     return text
 
 
-def _neighbor_rows(file_id: str, chunk_index: int | None) -> list[dict[str, Any]]:
-    if not is_db_available() or chunk_index is None:
+def _neighbor_rows_batch(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fetch the ±1 neighbours of EVERY hit in ONE query on ONE connection.
+
+    This used to run per hit: with top_k=12 that opened 12 separate psycopg connections to
+    the remote DB, and since there is no connection pool each one paid a full TCP+TLS+auth
+    handshake — several times the cost of the query itself. The draft path calls retrieval
+    dozens of times (per facet, per section), so the handshakes dominated retrieval latency.
+    One batched row-constructor IN (...) returns exactly the same rows.
+    """
+    if not is_db_available():
         return []
+    # (file_id, chunk_index±1) pairs, deduped — several hits in one file share neighbours.
+    pairs: set[tuple[str, int]] = set()
+    for row in hits:
+        fid = str(row.get("file_id") or "")
+        cidx = row.get("chunk_index")
+        if not fid or cidx is None:
+            continue
+        try:
+            ci = int(cidx)
+        except (TypeError, ValueError):
+            continue
+        for nb in (ci - 1, ci + 1):
+            if nb >= 0:
+                pairs.add((fid, nb))
+    if not pairs:
+        return []
+
+    ordered = sorted(pairs)
+    placeholders = ", ".join(["(%s, %s)"] * len(ordered))
+    params: list[Any] = []
+    for fid, nb in ordered:
+        params.extend((fid, nb))
     try:
         with get_db_connection() as conn, conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                   fc.id::text AS chunk_id,
                   fc.content,
@@ -73,18 +103,16 @@ def _neighbor_rows(file_id: str, chunk_index: int | None) -> list[dict[str, Any]
                   0.0::float AS similarity
                 FROM file_chunks fc
                 LEFT JOIN user_files uf ON uf.id::text = fc.file_id::text
-                WHERE fc.file_id::text = %s
-                  AND fc.chunk_index IN (%s, %s)
-                ORDER BY fc.chunk_index ASC
+                WHERE (fc.file_id::text, fc.chunk_index) IN ({placeholders})
+                ORDER BY fc.file_id, fc.chunk_index ASC
                 """,
-                (str(file_id), int(chunk_index) - 1, int(chunk_index) + 1),
+                params,
             )
             return list(cur.fetchall())
     except Exception as exc:
         logger.warning(
-            "[learning_document_retrieval] neighbor fetch failed file_id=%s chunk_index=%s err=%s",
-            file_id,
-            chunk_index,
+            "[learning_document_retrieval] batched neighbor fetch failed (%d pair(s)): %s",
+            len(ordered),
             exc,
         )
         return []
@@ -129,11 +157,16 @@ def get_relevant_chunks(
 
     pipeline = get_pipeline_service()
     req = QueryRequest(user_id=user_id, case_id=case_id, query=q)
+    # Ceiling was 12, which silently clamped every caller — a broad/comprehensive chat asks for
+    # top_k=30 to fill the model's context budget, but got only 12 primary chunks (~a sliver of a
+    # 1,600-chunk case), starving input and answers. Honour the caller's top_k up to 48 (narrow
+    # asks and learning mode pass <=12, so they are unchanged). The underlying hybrid retriever
+    # respects top_k; the downstream char budget + rerank still cap what reaches the prompt.
     hits = pipeline.retrieve_learning_chunk_hits(
         req,
         file_ids,
-        top_k=max(3, min(int(top_k) or 5, 12)),
-        similarity_floor=float(similarity_floor or 0.0),
+        top_k=max(3, min(top_k or 5, 48)),
+        similarity_floor=similarity_floor or 0.0,
     )
 
     section_needle = (filter_by_section or "").strip().lower()
@@ -173,33 +206,30 @@ def get_relevant_chunks(
 
     if include_surrounding_chunks:
         extras: dict[str, dict[str, Any]] = {}
-        for row in hits:
-            fid = str(row.get("file_id") or "")
-            cidx = row.get("chunk_index")
-            for nb in _neighbor_rows(fid, int(cidx) if cidx is not None else None):
-                cid = str(nb.get("chunk_id") or "")
-                if not cid or cid in merged:
-                    continue
-                pstart = nb.get("page_start")
-                try:
-                    page_num = int(pstart) if pstart is not None else None
-                except (TypeError, ValueError):
-                    page_num = None
-                extras[cid] = {
-                    "chunk_id": cid,
-                    "source_id": f"{str(nb.get('file_id') or '')}:{cid}",
-                    "content": str(nb.get("content") or "").strip(),
-                    "page_number": page_num,
-                    "section_title": str(nb.get("section_title") or ""),
-                    "metadata": {
-                        "file_id": str(nb.get("file_id") or ""),
-                        "document_name": str(nb.get("document_name") or ""),
-                        "page_end": nb.get("page_end"),
-                        "chunk_index": nb.get("chunk_index"),
-                        "neighbor": True,
-                    },
-                    "similarity_score": 0.0,
-                }
+        for nb in _neighbor_rows_batch(hits):
+            cid = str(nb.get("chunk_id") or "")
+            if not cid or cid in merged:
+                continue
+            pstart = nb.get("page_start")
+            try:
+                page_num = int(pstart) if pstart is not None else None
+            except (TypeError, ValueError):
+                page_num = None
+            extras[cid] = {
+                "chunk_id": cid,
+                "source_id": f"{str(nb.get('file_id') or '')}:{cid}",
+                "content": str(nb.get("content") or "").strip(),
+                "page_number": page_num,
+                "section_title": str(nb.get("section_title") or ""),
+                "metadata": {
+                    "file_id": str(nb.get("file_id") or ""),
+                    "document_name": str(nb.get("document_name") or ""),
+                    "page_end": nb.get("page_end"),
+                    "chunk_index": nb.get("chunk_index"),
+                    "neighbor": True,
+                },
+                "similarity_score": 0.0,
+            }
         merged.update(extras)
 
     out = sorted(merged.values(), key=lambda x: float(x.get("similarity_score") or 0.0), reverse=True)
@@ -287,7 +317,8 @@ def analyze_relationships(chunks: list[dict[str, Any]], *, max_pairs: int = 12) 
             )
             if not (has_light_conflict or has_visibility_conflict):
                 continue
-            key = tuple(sorted([str(left.get("source_id")), str(right.get("source_id"))]) + ["fact_conflict"])
+            lid, rid = sorted([str(left.get("source_id")), str(right.get("source_id"))])
+            key = (lid, rid, "fact_conflict")
             if key in seen_conflicts:
                 continue
             seen_conflicts.add(key)

@@ -39,6 +39,50 @@ EMBEDDING_MODELS = ("gemini-embedding-001",)
 _bad_models: set[str] = set()
 
 
+def _record_embedding_tokens(
+    result: object,
+    model_name: str,
+    texts: str | list[str] | None = None,
+) -> None:
+    """Fold this embed call's tokens into the active draft's token table (silent otherwise).
+
+    Token count, in order of preference:
+      1. embeddings[].statistics.token_count  — exact, but VERTEX AI ONLY.
+      2. metadata.billable_character_count    — also Vertex only.
+      3. the input text length (~4 chars/token) — the fallback that actually fires here.
+
+    (3) exists because the Gemini Developer API (generativelanguage.googleapis.com, i.e. an
+    AI Studio key — what this service uses) returns NEITHER `statistics` NOR `metadata`: both
+    come back as None. Without a fallback, `toks` was always 0 and every embedding call was
+    silently dropped from the per-draft cost table, so RAG embeddings looked free when they
+    are not. Estimated tokens are marked in the model label so the table never passes an
+    estimate off as a measured value. Best-effort — never raises into the embedding path."""
+    try:
+        from app.services.token_usage_log import record_embedding_usage
+
+        toks = 0
+        for emb in (getattr(result, "embeddings", None) or []):
+            st = getattr(emb, "statistics", None)
+            toks += int(getattr(st, "token_count", 0) or 0)
+        if toks <= 0:
+            md = getattr(result, "metadata", None)
+            chars = int(getattr(md, "billable_character_count", 0) or 0)
+            toks = (chars + 3) // 4 if chars > 0 else 0
+        exact = toks > 0
+        if toks <= 0 and texts is not None:
+            items = [texts] if isinstance(texts, str) else list(texts or [])
+            chars = sum(len(t or "") for t in items)
+            toks = (chars + 3) // 4 if chars > 0 else 0
+        if toks > 0:
+            record_embedding_usage(
+                model_name=model_name if exact else f"{model_name} (est.)",
+                input_tokens=toks,
+                provider="gemini",
+            )
+    except Exception:  # instrumentation must never break embedding
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
@@ -395,6 +439,7 @@ def _gemini_embed_batch_with_retry(texts: list[str], dims: int) -> list[list[flo
                             "output_dimensionality": dims,
                         },
                     )
+                    _record_embedding_tokens(result, model_name, texts)
                     payload = getattr(result, "embeddings", None) or []
                     parsed: list[list[float]] = []
                     for item in payload:
@@ -472,6 +517,7 @@ def _gemini_embed(text: str, *, dims: int | None = None) -> list[float] | None:
                         "output_dimensionality": target_dims,
                     },
                 )
+                _record_embedding_tokens(result, model_name, text)
                 embeddings_payload = getattr(result, "embeddings", None)
                 if embeddings_payload and len(embeddings_payload) > 0:
                     vec = list(getattr(embeddings_payload[0], "values", []) or [])

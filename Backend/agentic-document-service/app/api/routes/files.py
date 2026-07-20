@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import logging
+import re
 import time
 import uuid
 
@@ -42,6 +44,7 @@ from app.services.db import get_db_connection, is_db_available
 from app.services.llm_chat_config import (
     get_llm_chat_config,
     get_request_upload_ceiling_mb,
+    get_streaming_delay_ms,
     merge_folder_chat_request_llm_overrides,
 )
 from app.services.legal_system_prompt import build_document_qa_system_prompt, build_legal_system_prompt, fetch_full_profile
@@ -66,8 +69,10 @@ from app.services.token_usage_log import (
     begin_token_usage_session,
     bind_token_usage_session,
     flush_aggregated_token_usage_table,
+    log_draft_token_usage,
     record_token_usage,
     unbind_token_usage_session,
+    usage_entry_count,
 )
 
 
@@ -94,13 +99,325 @@ def _build_learning_citations_from_chunks(chunks: list[dict[str, Any]]) -> list[
     return citations
 
 
-def _split_text_for_sse_stream(text: str, *, max_chunk_chars: int = 2048) -> list[str]:
-    """
-    Split a complete answer into a small number of SSE chunks on line boundaries.
+_COMPREHENSIVE_QUERY_KEYWORDS = (
+    "summary", "summarize", "summarise", "summaries", "summarization", "summarisation",
+    "comprehensive", "detailed", "in detail", "in-depth", "in depth", "overview",
+    "elaborate", "thorough", "exhaustive", "everything", "entire case", "whole case",
+    "full summary", "full detail", "full details", "full overview", "full picture",
+    "complete summary", "complete overview", "list all", "all events", "all the events",
+    "all data", "all the data", "all facts", "all details", "all dates", "all documents",
+    "all information", "all the information", "all points", "key points",
+)
 
-    Used only for answers that arrive whole (vector path / non-stream fallback) so
-    the UI can paint progressively. Live provider streams emit their deltas
-    directly — no re-splitting, no artificial pacing.
+
+def _is_comprehensive_query(query: str) -> bool:
+    """True when the question wants a broad / whole-case answer (summary, all events,
+    detailed overview, "list all data in a table", etc.). Such questions keep the FULL
+    document context instead of focused chunks, so the answer can cover the entire case."""
+    q = (query or "").lower()
+    if any(kw in q for kw in _COMPREHENSIVE_QUERY_KEYWORDS):
+        return True
+    # Breadth signal + a content noun, in ANY word order — catches phrasings the keyword
+    # list misses, e.g. "list of data and event all in tabular format".
+    breadth = any(w in q for w in ("all", "every", "each", "tabular", "table", "list of", "list the", "list out"))
+    content = any(n in q for n in ("data", "event", "detail", "fact", "point", "date",
+                                   "document", "information", "record", "proceeding",
+                                   "timeline", "chronolog", "history", "part"))
+    return breadth and content
+
+
+# Deep/extreme tier: a STRONGER signal than comprehensive. These route to the multi-pass
+# generator (outline -> per-section expansion) for an exhaustive, report-style answer.
+_DEEP_QUERY_KEYWORDS = (
+    "deep analysis", "deep-dive", "deep dive", "deeply analyze", "deeply analyse",
+    "extreme detail", "extremely detailed", "exhaustive analysis", "exhaustive report",
+    "in-depth analysis", "in depth analysis", "detailed report", "full report",
+    "comprehensive report", "complete report", "deep report", "thorough analysis",
+    "detailed analysis", "extensive analysis", "extensive report", "section by section",
+    "section-by-section", "as detailed as possible", "maximum detail", "leave no detail",
+    "everything in detail", "extreme depth", "extremely deep", "deep legal analysis",
+)
+
+
+def _find_numbered_headings(text: str) -> list:
+    """Match top-level numbered headings, newline- AND markdown-tolerant: '1. ', '2) ',
+    '**1. ...**', '### 1. ...', '> 1. ...', '- 1. ...', indented, up to 3-digit numbers.
+    Used by _is_deep_query to count a prompt's explicit numbered sections — a long, highly
+    structured prompt signals an extreme/exhaustive report ask."""
+    import re
+    return list(re.finditer(r"(?m)^[ \t>#*\-]*(\d{1,3})[.)]\s+(.+?)\*{0,2}\s*$", text or ""))
+
+
+def _is_deep_query(query: str) -> bool:
+    """True for EXTREME / exhaustive report asks (a strict escalation of comprehensive).
+    These route to a single full-document deep call with a no-ceiling, follow-the-user's-
+    structure prompt. Implies comprehensive (full document + temperature bump)."""
+    q = (query or "").lower()
+    if any(kw in q for kw in _DEEP_QUERY_KEYWORDS):
+        return True
+    # intensity word + an analysis/report noun, in ANY order.
+    intensity = any(w in q for w in ("deep", "extreme", "exhaustive", "extensive", "exhaustively"))
+    artefact = any(n in q for n in ("analysis", "analyse", "analyze", "report", "breakdown",
+                                    "study", "review", "assessment", "dossier", "brief"))
+    if intensity and artefact:
+        return True
+    # A prompt that enumerates many numbered sections IS a structured multi-part brief — treat it
+    # as deep regardless of length. A concise 14-point ask (<1500 chars) must still get the deep,
+    # no-ceiling, completion-contract path, not the comprehensive prompt's "1,200-2,500 word" cap.
+    if len(_find_numbered_headings(query or "")) >= 6:
+        return True
+    # Long, explicitly-structured prompts (e.g. a multi-section court-ready brief with many
+    # tables) are extreme even without an intensity word — route them to the deep call too.
+    if len(query or "") > 1500:
+        n_sections = len(_find_numbered_headings(query or ""))
+        n_tables = q.count("| ---") + q.count("|---") + q.count("create a table") + q.count("table:")
+        cues = any(c in q for c in ("court-ready", "court ready", "litigation intelligence",
+                                    "stress test", "claim verification", "red-team", "red team",
+                                    "hallucination trap", "exact structure", "page reference"))
+        if n_sections >= 4 or n_tables >= 3 or cues:
+            return True
+    return False
+
+
+# Pure social / greeting tokens — a message made ENTIRELY of these needs no document context.
+_GREETING_WORDS = {
+    "hi", "hii", "hiii", "hey", "heya", "hello", "helo", "hlo", "yo", "sup", "hola",
+    "namaste", "namaskar", "gm", "gn", "good", "morning", "afternoon", "evening", "night",
+    "greetings", "thanks", "thank", "thankyou", "thx", "ty", "tysm", "welcome",
+    "ok", "okay", "okey", "cool", "nice", "great", "awesome", "fine", "alright",
+    "how", "are", "you", "u", "doing", "hru", "howdy", "there",
+    "yes", "no", "yeah", "yep", "nope", "hmm", "test", "testing", "ping",
+}
+
+
+def _is_trivial_query(query: str) -> bool:
+    """True for greetings / chit-chat that need NO document context (e.g. 'hi', 'hello',
+    'good morning', 'how are you', 'thanks'). Conservative: only fires when the message is short
+    AND every word is a known social token — so a real question is never starved of context."""
+    import re
+    q = (query or "").strip().lower()
+    if not q:
+        return True
+    words = re.findall(r"[a-z']+", q)
+    if not words or len(words) > 6:
+        return False
+    return all(w in _GREETING_WORDS for w in words)
+
+
+def _doc_context_char_budget(
+    query: str, *, learning_mode: bool, is_deep: bool, is_comprehensive: bool,
+    model_name: str | None = None,
+) -> int:
+    """Dynamically size the document context to the QUESTION (relevance/speed over blind cost):
+      - greeting / chit-chat   ->   8,000  (~3K tokens; barely any doc — 'hi' shouldn't load the case)
+      - normal specific ask    ->  90,000  (~33K tokens; a focused slice for a narrow question)
+      - comprehensive / broad  -> 260,000  (~95K tokens)
+      - extreme / deep         -> 550,000  (~200K tokens; the whole doc even for large PDFs)
+      - learning mode          -> 160,000  (unchanged)
+    gemma-4's context WINDOW is ~262K tokens, but a free-tier key is rate-limited to only
+    16,000 INPUT tokens/minute — so any tier above ~13K tokens 429s on Gemma no matter the
+    window. When the answering model is Gemma, the budget is hard-capped to
+    settings.gemma_max_context_chars (default 48K chars ≈ 12K tokens) so a single request stays
+    under the per-minute quota. Raise GEMMA_MAX_CONTEXT_CHARS once billing lifts the ceiling."""
+    if learning_mode:
+        budget = 160000
+    elif _is_trivial_query(query):
+        budget = 8000
+    elif is_deep:
+        budget = 550000
+    elif is_comprehensive:
+        budget = 260000
+    else:
+        budget = 90000
+    try:
+        from app.services.adapters.document_ai import _is_gemma_model
+        if _is_gemma_model(model_name):
+            from app.core.config import get_settings
+            cap = int(getattr(get_settings(), "gemma_max_context_chars", 48000) or 48000)
+            if cap > 0:
+                budget = min(budget, cap)
+    except Exception:
+        pass
+    return budget
+
+
+def _extract_template_text_sync(data: bytes, mime_type: str | None, filename: str | None) -> str:
+    """Extract an uploaded draft TEMPLATE as plain text for injection into the prompt.
+
+    gemma-4-31b-it does NOT accept PDF/image/file Parts on the Gemini Developer API
+    (inline PDF -> 500; rasterized images / Files-API -> empty output — verified live,
+    consistent with Google's own note that Gemma models are not served file/image input
+    on this API). So the template is fed as TEXT. Prefer fast local extraction; fall back
+    to the OCR adapter (Document AI) for scanned/empty PDFs.
+    """
+    from app.services.adapters.word import extract_word_text, is_word_filename, is_word_mime
+
+    if is_word_mime(mime_type) or is_word_filename(filename or ""):
+        return (extract_word_text(data, mime_type=mime_type, filename=filename) or "").strip()
+    # Digital PDF templates extract instantly via pypdf. Prefer layout-mode extraction:
+    # normal extract_text() can collapse a pleading cause title into one huge line and
+    # then emit wrapped words one-per-line, which destroys section mapping. Layout mode
+    # preserves the visible PDF line breaks the template actually uses.
+    try:
+        import io as _io
+        import re as _re
+        from pypdf import PdfReader  # type: ignore
+        pages = PdfReader(_io.BytesIO(data)).pages
+        layout_pages = []
+        for page in pages:
+            try:
+                raw = page.extract_text(extraction_mode="layout") or ""
+            except TypeError:
+                raw = ""
+            if raw.strip():
+                cleaned_lines = []
+                for line in raw.replace("\r", "\n").split("\n"):
+                    stripped = _re.sub(r"[ \t]+", " ", line).strip()
+                    cleaned_lines.append(stripped)
+                layout_pages.append("\n".join(cleaned_lines).strip())
+        layout_text = "\n\n".join(p for p in layout_pages if p).strip()
+        if len(layout_text) > 40:
+            return layout_text
+        text = "\n".join((page.extract_text() or "") for page in pages).strip()
+        if len(text) > 40:
+            return text
+    except Exception:
+        pass
+    # Fallback (scanned template / non-PDF): full OCR adapter.
+    try:
+        from app.services.adapters import ocr as _ocr
+        return (_ocr.extract_text_from_bytes(data, mime_type or "application/pdf", filename or "template").text or "").strip()
+    except Exception:
+        return ""
+
+
+# Section-heading keywords that mark a template's structure (recitals, schedules,
+# signature/witness blocks, pleading blocks, etc.).
+_SKELETON_KEYWORDS = re.compile(
+    r"^(RECITALS?|WHEREAS|NOW\s+TH(IS|E)|DEFINITIONS?|SCHEDULE|ANNEXURE|APPENDIX|EXHIBIT|"
+    r"IN\s+WITNESS\s+WHEREOF|SIGNATURE|SIGNED|WITNESS|VERIFICATION|AFFIDAVIT|PRAYER|"
+    r"TESTIMONIUM|ARTICLE|CLAUSE|SECTION|PART)\b",
+    re.IGNORECASE,
+)
+# A numbered / lettered clause line ("1. TERM", "(a) ...", "2) RENT").
+_SKELETON_NUM_RE = re.compile(r"^\(?([0-9]{1,2}|[a-zA-Z])[.)]\s+(.+)$")
+
+
+def _extract_template_skeleton(template_text: str, *, max_items: int = 45) -> list[str]:
+    """Parse an ordered list of the template's own section/heading labels.
+
+    Structure-first drafting (mirrors how a human drafter works): rather than hoping the
+    model loosely imitates the template's layout, we hand it the template's explicit
+    skeleton and require the draft to expand EVERY section, in order. Heuristic and
+    lossless-optional — the model still has the full template (attached PDF or injected
+    text); the skeleton is a completeness/ordering aid, so an imperfect parse cannot make
+    the draft worse.
+    """
+    if not template_text:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in template_text.replace("\r", "\n").split("\n"):
+        line = raw.strip().strip("*").strip()
+        if not line:
+            continue
+        label = ""
+        m = _SKELETON_NUM_RE.match(line)
+        if m:
+            num, rest = m.group(1), m.group(2)
+            head = re.split(r"[:.]", rest, 1)[0].strip()
+            head = " ".join(head.split()[:8])
+            label = f"{num}. {head}".strip() if head else f"{num}."
+        elif len(line) <= 60:
+            letters = [c for c in line if c.isalpha()]
+            is_caps = bool(letters) and (sum(c.isupper() for c in letters) / len(letters)) > 0.8
+            if (is_caps and len(line) > 2) or _SKELETON_KEYWORDS.match(line):
+                label = " ".join(line.split()[:10])
+        if not label:
+            continue
+        key = re.sub(r"\s+", " ", label.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(label)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+# ── Draft pipeline: session-scoped fact-inventory cache ──────────────────────
+# The Stage-B fact inventory depends only on the case's supporting documents, which
+# don't change within a drafting session — so re-drafts / "make it longer" follow-ups
+# reuse it and skip the single most expensive pipeline call. Keyed by a hash of the
+# doc-set (ids + text lengths) so a NEW upload invalidates the entry automatically.
+_DRAFT_FACTINV_CACHE: dict[str, str] = {}
+_DRAFT_FACTINV_CACHE_MAX = 40
+
+# Models a draft request may select, per role. Allowlisted so an arbitrary model string can
+# never be injected through the request body. The DRAFT engine writes the sections; the
+# STRUCTURE model maps the template (Stage A); the GUARDIAN audits/repairs the result
+# (Stage D/E) — guardian and structure share the wider list (they are read/critique tasks,
+# so the cheap flash models are legitimate choices there).
+_DRAFT_ALLOWED_MODELS = {
+    "gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-2.5-flash",
+    "claude-opus-4-8", "claude-sonnet-5",
+    "gemma-4-31b-it", "gemma-4-26b-a4b-it",
+}
+_STRUCTURE_ALLOWED_MODELS = _DRAFT_ALLOWED_MODELS
+_GUARDIAN_ALLOWED_MODELS = _DRAFT_ALLOWED_MODELS
+
+# Shown when a free-tier Gemma chat exhausts its per-minute input-token quota and the request
+# can't be satisfied by waiting (see GemmaInputTPMExceeded). Actionable, not a raw 429 dump.
+_GEMMA_INPUT_TPM_USER_MESSAGE = (
+    "This question needs more of the case than the current free-tier model allows per minute "
+    "(16,000 input tokens/min on Gemma). Try a narrower question, ask again in about a minute, "
+    "switch the chat model, or enable billing to lift the limit."
+)
+
+# Shown when a Gemma comprehensive/deep NON-STREAM call runs past its (already generous) timeout.
+# We deliberately do NOT chain a second generic-QA call after this: the timed-out call's executor
+# thread cannot be cancelled and is still consuming the 16K/min input budget, so a second call would
+# just stack on top and 429. A clean retry message is both honest and cheaper.
+_GEMMA_SLOW_TIMEOUT_USER_MESSAGE = (
+    "The free-tier model is responding slowly right now and this detailed answer ran past the time "
+    "limit. Please try again in a minute (the free tier is throttled and can be temporarily "
+    "overloaded), ask a narrower question, switch the chat model, or enable billing for faster, "
+    "higher-priority responses."
+)
+
+
+def _draft_factinv_key(folder_name: str, user_id: Any, doc_texts: list[dict]) -> str:
+    sig = "|".join(sorted(
+        f"{d.get('file_id')}:{len(str(d.get('text') or ''))}" for d in (doc_texts or [])
+    ))
+    raw = f"{folder_name}::{user_id}::{sig}"
+    return hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()
+
+
+def _draft_factinv_cache_put(key: str, value: str) -> None:
+    if not key or not value:
+        return
+    _DRAFT_FACTINV_CACHE[key] = value
+    while len(_DRAFT_FACTINV_CACHE) > _DRAFT_FACTINV_CACHE_MAX:
+        try:
+            del _DRAFT_FACTINV_CACHE[next(iter(_DRAFT_FACTINV_CACHE))]
+        except StopIteration:
+            break
+
+
+def _split_text_for_sse_stream(text: str, *, max_chunk_chars: int = 48) -> list[str]:
+    """Slice model output into small SSE chunks for incremental UI rendering.
+
+    The slices preserve the EXACT original content — every space and newline — so
+    the chunks, once concatenated by the client, equal the input verbatim. That is
+    what keeps Markdown structure intact, especially tables (whose header, ``|---|``
+    separator, and rows must each stay on their own line) when a table row is split
+    across several stream deltas. We break on a nearby space/newline for nicer
+    word-by-word streaming, but never add, drop, or collapse any character.
+
+    Only for answers that arrive WHOLE (vector path / non-stream fallback — notably Gemma
+    under GEMMA_DISABLE_STREAMING, whose reply lands in one piece). A live provider stream
+    already emits its own deltas: never re-split those here, or the UI is paced twice.
     """
     text = text or ""
     if not text:
@@ -108,17 +425,17 @@ def _split_text_for_sse_stream(text: str, *, max_chunk_chars: int = 2048) -> lis
     if len(text) <= max_chunk_chars:
         return [text]
     chunks: list[str] = []
-    current: list[str] = []
-    size = 0
-    for line in text.splitlines(keepends=True):
-        if current and size + len(line) > max_chunk_chars:
-            chunks.append("".join(current))
-            current = []
-            size = 0
-        current.append(line)
-        size += len(line)
-    if current:
-        chunks.append("".join(current))
+    i, n = 0, len(text)
+    while i < n:
+        end = min(i + max_chunk_chars, n)
+        if end < n:
+            # Prefer to cut at the last space/newline in the window so words and
+            # table cells aren't split mid-token; fall back to a hard cut.
+            cut = max(text.rfind(" ", i, end), text.rfind("\n", i, end))
+            if cut > i:
+                end = cut + 1
+        chunks.append(text[i:end])
+        i = end
     return chunks
 
 
@@ -127,6 +444,36 @@ def _gemini_chunk_text(chunk: Any) -> str:
     if raw is not None and str(raw).strip() != "":
         return str(raw)
     return ""
+
+
+def _gemini_chunk_parts(chunk: Any) -> tuple[str, str]:
+    """Split a streaming chunk into (answer_text, thought_text).
+
+    gemma-4 streams its reasoning as content parts flagged ``thought=True``; the SDK's
+    ``chunk.text`` EXCLUDES those, so a thought-only chunk looks empty and the stream loop would
+    skip every chunk (never setting ``streamed``) and fall back to a non-stream dump. We read the
+    parts directly: ``thought=True`` parts are surfaced as live 'thinking', the rest are the
+    answer. Falls back to ``chunk.text`` when no parts are exposed (older response shape)."""
+    answer: list[str] = []
+    thought: list[str] = []
+    try:
+        for cand in (getattr(chunk, "candidates", None) or []):
+            content = getattr(cand, "content", None)
+            for part in (getattr(content, "parts", None) or []):
+                t = getattr(part, "text", None)
+                if not t:
+                    continue
+                if getattr(part, "thought", False):
+                    thought.append(str(t))
+                else:
+                    answer.append(str(t))
+    except Exception:
+        pass
+    if not answer and not thought:
+        raw = getattr(chunk, "text", None)
+        if raw:
+            answer.append(str(raw))
+    return "".join(answer), "".join(thought)
 
 
 def _learning_case_excerpt_for_remediation(doc_texts: list[dict[str, Any]], *, max_chars: int = 48000) -> str:
@@ -154,11 +501,21 @@ def _learning_case_excerpt_for_remediation(doc_texts: list[dict[str, Any]], *, m
 async def _yield_text_as_streaming_chunks(
     sse_fn,
     text: str,
+    *,
+    delay_ms: int = 0,
 ) -> AsyncGenerator[str, None]:
-    """Emit a complete answer as a handful of type=chunk SSE events (no pacing)."""
+    """Emit type=chunk SSE events; optional delay between chunks from summarization_chat_config.
+
+    delay_ms is admin-configurable (llm_chat_config.get_streaming_delay_ms) and defaults to 0, i.e.
+    no pacing — so callers that omit it behave exactly as if the parameter did not exist.
+    """
+    import asyncio
+
     for piece in _split_text_for_sse_stream(text):
         if piece:
             yield sse_fn({"type": "chunk", "text": piece})
+        if delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000.0)
 
 
 async def _stream_blocking_generator(loop, gen_factory, *, label: str) -> AsyncGenerator[str, None]:
@@ -339,7 +696,7 @@ def _resolve_role_id_from_authservice(domain_role: str) -> str | None:
     """Call authservice to resolve a domain_role string → role UUID."""
     try:
         import httpx
-        base = str(get_settings().auth_service_url or "").rstrip("/")
+        base = (get_settings().auth_service_url or "").rstrip("/")
         if not base:
             return None
         response = httpx.get(
@@ -456,6 +813,17 @@ class InternalAnalyticsRequest(BaseModel):
     userIds: list[int | str] = []
     startDate: str | None = None
     endDate: str | None = None
+
+
+class DraftExportDocxRequest(BaseModel):
+    markdown: str
+    title: str | None = None
+    filename: str | None = None
+
+
+class DraftUpdateRequest(BaseModel):
+    session_id: str
+    markdown: str
 
 
 def _user_id_as_int(user_id: str | None) -> int | None:
@@ -711,7 +1079,7 @@ def _build_gcs_object_path(user_id: str, folder_name: str, filename: str) -> str
 
 def _normalize_gs_uri_from_record(gcs_path: str | None) -> str | None:
     import re as _re
-    raw = str(gcs_path or "").strip()
+    raw = (gcs_path or "").strip()
     if not raw:
         return None
 
@@ -749,16 +1117,281 @@ def _get_file_record_for_user(file_id: str, user_id: str) -> dict[str, Any] | No
     with get_db_connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, user_id, originalname, mimetype, size, gcs_path, status, created_at
+            SELECT id, user_id, originalname, mimetype, size, gcs_path, status, created_at,
+                   full_text_content, processed_at, updated_at
             FROM user_files
             WHERE id::text = %s
               AND is_folder = false
               AND user_id::text = ANY(%s::text[])
             LIMIT 1
             """,
-            [str(file_id), accessible_user_ids],
+            [file_id, accessible_user_ids],
         )
         return cur.fetchone()
+
+
+def _get_public_table_columns(cur: Any, table_name: str) -> set[str]:
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s
+        """,
+        [table_name],
+    )
+    return {row["column_name"] for row in cur.fetchall()}
+
+
+def _parse_jsonish(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+    return value
+
+
+def _split_text_evenly_by_pages(text: str, page_count: int) -> list[str]:
+    cleaned = (text or "").strip()
+    if not cleaned or page_count <= 1:
+        return [cleaned] if cleaned else []
+    lines = [line for line in cleaned.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    nonempty_chars = sum(len(line) for line in lines if line.strip()) or len(cleaned)
+    target = max(1, nonempty_chars // page_count)
+    pages: list[str] = []
+    current: list[str] = []
+    current_chars = 0
+    for line in lines:
+        current.append(line)
+        current_chars += len(line)
+        remaining_lines = len(lines) - (sum(len(page.splitlines()) for page in pages) + len(current))
+        remaining_pages = page_count - len(pages) - 1
+        if remaining_pages > 0 and current_chars >= target and remaining_lines >= remaining_pages:
+            page_text = "\n".join(current).strip()
+            if page_text:
+                pages.append(page_text)
+            current = []
+            current_chars = 0
+    tail = "\n".join(current).strip()
+    if tail:
+        pages.append(tail)
+    while len(pages) < page_count:
+        pages.append("")
+    return pages[:page_count]
+
+
+def _pdf_page_texts_from_record(record: dict[str, Any] | None) -> list[str]:
+    if not record:
+        return []
+    mime = str(record.get("mimetype") or "").lower()
+    name = str(record.get("originalname") or "").lower()
+    if "pdf" not in mime and not name.endswith(".pdf"):
+        return []
+    gs_uri = _normalize_gs_uri_from_record(record.get("gcs_path"))
+    if not gs_uri:
+        return []
+    try:
+        import io
+        from pypdf import PdfReader  # type: ignore
+
+        pdf_bytes = gcs.download_bytes(gs_uri)
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        return [(page.extract_text() or "").strip() for page in reader.pages]
+    except Exception as exc:
+        logger.debug("[files.ocr] PDF page-text fallback skipped file_id=%s error=%s", record.get("id"), exc)
+        return []
+
+
+def _fallback_structured_ocr_from_text(
+    text: str,
+    *,
+    source: str = "processed_text",
+    page_texts: list[str] | None = None,
+) -> dict[str, Any] | None:
+    cleaned = (text or "").strip()
+    supplied_pages = [(part or "").strip() for part in (page_texts or [])]
+    supplied_pages = supplied_pages if any(supplied_pages) else []
+    if not cleaned and supplied_pages:
+        cleaned = "\n\n".join(part for part in supplied_pages if part).strip()
+    if not cleaned:
+        return None
+    # Keep the fallback compact: the real Document AI structure is preferred when present,
+    # but processed uploads still get a reconstructed OCR panel from stored extracted text.
+    pages: list[dict[str, Any]] = []
+    if supplied_pages:
+        resolved_page_texts = supplied_pages
+    else:
+        page_chunks = re.split(r"\n\s*(?:-{3,}|={3,}|Page\s+\d+\s*(?:of\s*\d+)?)\s*\n", cleaned, flags=re.IGNORECASE)
+        resolved_page_texts = [chunk.strip() for chunk in page_chunks if chunk.strip()] or [cleaned]
+    for index, page_text in enumerate(resolved_page_texts):
+        lines = [
+            {"type": "line", "text": line.strip()}
+            for line in str(page_text or "").splitlines()
+            if line.strip()
+        ]
+        pages.append({
+            "pageNumber": index + 1,
+            "dimension": {"width": None, "height": None, "unit": ""},
+            "text": str(page_text or "").strip(),
+            "blocks": [],
+            "paragraphs": [],
+            "lines": lines,
+            "tables": [],
+        })
+    return {
+        "schemaVersion": 1,
+        "source": source,
+        "provider": source,
+        "text": cleaned,
+        "pageCount": len(pages),
+        "pages": pages,
+    }
+
+
+def _fallback_file_ocr_payload(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not record:
+        return None
+    text = str(record.get("full_text_content") or "").strip()
+    pdf_page_texts = _pdf_page_texts_from_record(record)
+    page_count = len(pdf_page_texts)
+    if not any(pdf_page_texts) and text and page_count > 1:
+        pdf_page_texts = _split_text_evenly_by_pages(text, page_count)
+    if not text and any(pdf_page_texts):
+        text = "\n\n".join(part for part in pdf_page_texts if part).strip()
+    if not text:
+        return None
+    structured = _fallback_structured_ocr_from_text(
+        text,
+        source="processed_file_text",
+        page_texts=pdf_page_texts or None,
+    )
+    timestamp = record.get("processed_at") or record.get("updated_at") or record.get("created_at")
+    processed_at = timestamp.isoformat() if hasattr(timestamp, "isoformat") else timestamp
+    return {
+        "available": True,
+        "pageCount": (structured or {}).get("pageCount") or page_count or 1,
+        "confidence": None,
+        "status": "processed",
+        "processedAt": processed_at,
+        "structuredJson": structured,
+        "extractedText": text,
+        "metadata": {
+            "source": "user_files.full_text_content",
+            "fallback": True,
+            "pageSource": "original_pdf" if pdf_page_texts else "full_text_content",
+        },
+    }
+
+
+def _ocr_payload_page_count(payload: dict[str, Any] | None) -> int:
+    if not payload:
+        return 0
+    structured = _parse_jsonish(payload.get("structuredJson") or payload.get("structured_json"))
+    pages = structured.get("pages") if isinstance(structured, dict) else None
+    if isinstance(pages, list) and pages:
+        return len(pages)
+    try:
+        return int(payload.get("pageCount") or payload.get("page_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _choose_ocr_payload(
+    stored: dict[str, Any] | None,
+    fallback: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not stored:
+        return fallback
+    if not fallback:
+        return stored
+    stored_pages = _ocr_payload_page_count(stored)
+    fallback_pages = _ocr_payload_page_count(fallback)
+    stored_structured = _parse_jsonish(stored.get("structuredJson") or stored.get("structured_json"))
+    stored_has_structured_pages = bool(
+        isinstance(stored_structured, dict)
+        and isinstance(stored_structured.get("pages"), list)
+        and stored_structured.get("pages")
+    )
+    if not stored_has_structured_pages or fallback_pages > stored_pages:
+        merged = dict(fallback)
+        if stored.get("confidence") is not None:
+            merged["confidence"] = stored.get("confidence")
+        if stored.get("processedAt"):
+            merged["processedAt"] = stored.get("processedAt")
+        metadata = dict(merged.get("metadata") or {})
+        metadata["replacedIncompleteStoredOcr"] = True
+        merged["metadata"] = metadata
+        return merged
+    return stored
+
+
+def _get_file_ocr_extraction(file_id: str, *, include_structure: bool = False) -> dict[str, Any] | None:
+    if not is_db_available():
+        return None
+    try:
+        with get_db_connection() as conn, conn.cursor() as cur:
+            columns = _get_public_table_columns(cur, "document_ai_extractions")
+            if not columns or "file_id" not in columns:
+                return None
+
+            wanted = [
+                "page_count",
+                "confidence_score",
+                "average_confidence",
+                "processing_status",
+                "processed_at",
+                "updated_at",
+                "created_at",
+            ]
+            if include_structure:
+                wanted.extend(["extracted_text", "metadata", "structured_schema", "raw_response"])
+            select_columns = [column for column in wanted if column in columns]
+            if not select_columns:
+                return None
+
+            order_columns = [column for column in ("processed_at", "updated_at", "created_at") if column in columns]
+            order_expr = ", ".join(f"{column} DESC NULLS LAST" for column in order_columns) or "file_id"
+            cur.execute(
+                f"""
+                SELECT {", ".join(select_columns)}
+                FROM document_ai_extractions
+                WHERE file_id::text = %s
+                ORDER BY {order_expr}
+                LIMIT 1
+                """,
+                [file_id],
+            )
+            row = cur.fetchone()
+    except Exception as exc:
+        logger.debug("[files.ocr] file_id=%s lookup skipped: %s", file_id, exc)
+        return None
+
+    if not row:
+        return None
+
+    processed_at = row.get("processed_at") or row.get("updated_at") or row.get("created_at")
+    out: dict[str, Any] = {
+        "available": True,
+        "pageCount": row.get("page_count"),
+        "confidence": row.get("average_confidence") if row.get("average_confidence") is not None else row.get("confidence_score"),
+        "status": row.get("processing_status") or "processed",
+        "processedAt": processed_at.isoformat() if hasattr(processed_at, "isoformat") else processed_at,
+    }
+    if include_structure:
+        structured = _parse_jsonish(row.get("structured_schema")) or _parse_jsonish(row.get("raw_response"))
+        out.update({
+            "structuredJson": structured,
+            "extractedText": row.get("extracted_text") or "",
+            "metadata": _parse_jsonish(row.get("metadata")) or {},
+        })
+    return out
 
 
 def _get_file_processing_status_payload(file_id: str, user_id: str) -> dict[str, Any] | None:
@@ -771,7 +1404,7 @@ def _get_file_processing_status_payload(file_id: str, user_id: str) -> dict[str,
     accessible = get_folder_service()._get_accessible_user_ids(user_id)
     if not accessible:
         return None
-    fid = str(file_id).strip()
+    fid = file_id.strip()
     if not fid:
         return None
     try:
@@ -837,6 +1470,21 @@ def _get_file_processing_status_payload(file_id: str, user_id: str) -> dict[str,
     ftc = row.get("full_text_content")
     if ftc:
         out["full_text_content"] = ftc
+
+    ocr_summary = _get_file_ocr_extraction(fid, include_structure=False)
+    if ocr_summary:
+        out["ocr_available"] = True
+        out["ocr_page_count"] = ocr_summary.get("pageCount")
+        out["ocr_confidence"] = ocr_summary.get("confidence")
+        out["ocr_processed_at"] = ocr_summary.get("processedAt")
+    elif ftc:
+        out["ocr_available"] = True
+        out["ocr_page_count"] = None
+        out["ocr_confidence"] = None
+        out["ocr_processed_at"] = processed_at
+        out["ocr_source"] = "full_text_content"
+    else:
+        out["ocr_available"] = False
     return out
 
 
@@ -892,7 +1540,7 @@ async def get_analysis_chat_sessions(
     limit: int = 20,
     x_user_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
-) -> dict:
+) -> list[dict[str, Any]]:
     """Return paginated analysis chat sessions (chat_type = 'analysis') for the current user."""
     user_id = _resolve_user_id(x_user_id, authorization)
     if not user_id:
@@ -943,7 +1591,10 @@ async def view_file(
         logger.exception("[Route:view_file] file_id=%s failed to sign read URL: %s", file_id, exc)
         raise HTTPException(status_code=500, detail="Could not generate document view URL") from exc
 
-    page_number = max(1, int(page or 1))
+    page_number = max(1, page or 1)
+    stored_ocr_payload = _get_file_ocr_extraction(file_id, include_structure=True)
+    fallback_ocr_payload = _fallback_file_ocr_payload(record)
+    ocr_payload = _choose_ocr_payload(stored_ocr_payload, fallback_ocr_payload)
     return {
         "success": True,
         "document": {
@@ -957,6 +1608,7 @@ async def view_file(
         "viewUrl": signed_url,
         "viewUrlWithPage": f"{signed_url}#page={page_number}",
         "page": page_number,
+        "ocr": ocr_payload,
     }
 
 
@@ -977,7 +1629,7 @@ async def get_llm_limits_for_client(
             "max_file_size_mb": cfg.get("max_file_size_mb"),
             "max_document_size_mb": cfg.get("max_document_size_mb"),
             "max_upload_mb": ceiling,
-            "max_upload_bytes": int(ceiling * 1024 * 1024),
+            "max_upload_bytes": ceiling * 1024 * 1024,
             "max_upload_files": cfg.get("max_upload_files"),
             "max_file_upload_per_day": cfg.get("max_file_upload_per_day"),
             "max_document_pages": cfg.get("max_document_pages"),
@@ -1072,7 +1724,7 @@ def get_user_usage_and_plan_for_payment(
                     try:
                         blob = _bucket.blob(gcs_path)
                         blob.reload()
-                        real_size = int(blob.size or 0)
+                        real_size = blob.size or 0
                         if real_size > 0:
                             repaired_bytes += real_size
                             cur.execute(
@@ -1331,7 +1983,7 @@ def import_google_drive_documents(
 ) -> dict:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
     llm_config = get_llm_chat_config(user_id=user_id, plan_limit_mode="summarization")
-    file_ids = [str(item).strip() for item in (request.file_ids or []) if str(item).strip()]
+    file_ids = [item.strip() for item in (request.file_ids or []) if item.strip()]
     if not file_ids:
         raise HTTPException(status_code=400, detail="file_ids is required")
     if not x_google_access_token:
@@ -1473,14 +2125,14 @@ def generate_upload_url_for_folder(
             user_id,
             llm_config,
             files_count=1,
-            size_bytes=int(request.size or 0),
+            size_bytes=request.size or 0,
             mimetype=request.mimetype,
             originalname=request.filename,
         )
         if not check.get("ok"):
             raise HTTPException(status_code=429, detail=check)
         # Plan-level storage quota check
-        storage_check = assert_storage_allowed(user_id, size_bytes=int(request.size or 0))
+        storage_check = assert_storage_allowed(user_id, size_bytes=request.size or 0)
         if not storage_check.get("ok"):
             raise HTTPException(status_code=429, detail=storage_check)
         return _build_signed_upload(user_id, folder_name, request, llm_config)
@@ -1488,6 +2140,73 @@ def generate_upload_url_for_folder(
         raise
     except Exception as exc:
         logger.exception("[Route:generate_upload_url] folder=%s error=%s", folder_name, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/{folder_name}/draft/export-docx")
+async def export_edited_draft_docx(
+    folder_name: str,
+    request: DraftExportDocxRequest,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Render EDITED draft markdown (from Draft Studio's editor) into a court-styled .docx
+    and return a signed download URL. Same pipeline as the live draft's DOCX export, but
+    driven by the user's edited markdown so the download always reflects their changes."""
+    user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
+    md = (request.markdown or "").strip()
+    if not md:
+        raise HTTPException(status_code=400, detail="markdown is required")
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        from app.services.docx_export import markdown_to_court_docx
+        docx_bytes = await loop.run_in_executor(
+            None, lambda: markdown_to_court_docx(md, title=(request.title or "Draft"), typography=None)
+        )
+        safe_name = (re.sub(r"[^A-Za-z0-9._-]+", "_", request.filename or folder_name or "draft").strip("_") or "draft")[:60]
+        safe_name = re.sub(r"\.docx?$", "", safe_name, flags=re.IGNORECASE)
+        dest = f"{user_id}/drafts/{safe_name}_{uuid.uuid4().hex[:12]}.docx"
+        uri = await loop.run_in_executor(
+            None,
+            lambda: gcs.upload_bytes(
+                docx_bytes, dest,
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                bucket_type="output",
+            ),
+        )
+        url = await loop.run_in_executor(None, lambda: gcs.signed_read_url(uri, expiration_minutes=1440))
+        return {"download_url": url, "filename": f"{safe_name}.docx"}
+    except Exception as exc:
+        logger.exception("[Route:export_edited_draft_docx] folder=%s error=%s", folder_name, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/{folder_name}/draft/update")
+async def update_draft_message(
+    folder_name: str,
+    request: DraftUpdateRequest,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Persist an edited draft (MARKDOWN) back onto its saved chat row, so history reopens
+    the edited version. Targets the newest row for this session."""
+    user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
+    if not (request.session_id or "").strip():
+        raise HTTPException(status_code=400, detail="session_id is required")
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        updated = await loop.run_in_executor(
+            None,
+            lambda: get_folder_service().update_latest_chat_answer(
+                user_id=user_id, folder_name=folder_name,
+                session_id=request.session_id, answer=request.markdown or "",
+            ),
+        )
+        return {"updated": updated}
+    except Exception as exc:
+        logger.exception("[Route:update_draft_message] folder=%s error=%s", folder_name, exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -1515,7 +2234,7 @@ def complete_upload_for_folder(
             user_id,
             llm_config,
             files_count=1,
-            size_bytes=int(request.size or 0),
+            size_bytes=request.size or 0,
             mimetype=request.mimetype,
             originalname=request.filename,
             buffer=pdf_buffer,
@@ -1523,11 +2242,11 @@ def complete_upload_for_folder(
         if not check.get("ok"):
             raise HTTPException(status_code=429, detail=check)
         # Plan-level storage quota check (at completion, file is already in GCS)
-        storage_check = assert_storage_allowed(user_id, size_bytes=int(request.size or 0))
+        storage_check = assert_storage_allowed(user_id, size_bytes=request.size or 0)
         if not storage_check.get("ok"):
             raise HTTPException(status_code=429, detail=storage_check)
         # ── Resolve real file size from GCS when request.size is missing/zero ──
-        declared_size = int(request.size or 0)
+        declared_size = request.size or 0
         real_size = declared_size
         if declared_size == 0 and request.gcsPath:
             try:
@@ -1540,7 +2259,7 @@ def complete_upload_for_folder(
                     _gcs_path = "/".join(_gcs_path.split("/")[3:])
                 _blob = _get_gcs_client().bucket(_bn).blob(_gcs_path)
                 _blob.reload()
-                real_size = int(_blob.size or 0)
+                real_size = _blob.size or 0
                 logger.info(
                     "[Route:complete_upload] resolved real_size=%d bytes from GCS for %s",
                     real_size, request.filename,
@@ -1774,7 +2493,7 @@ def init_learning_session(
     document_context = str(payload.get("documentContext") or payload.get("document_context") or "").strip()
     if not document_context:
         document_context = build_learning_folder_document_context(
-            get_folder_service(), folder_name, str(user_id)
+            get_folder_service(), folder_name, user_id
         ).strip()
     if not document_context:
         raise HTTPException(
@@ -1782,7 +2501,7 @@ def init_learning_session(
             detail="No processed documents with text are available for Learning Mode in this folder.",
         )
     state = LearningAgentController.init_session(
-        user_id=str(user_id),
+        user_id=user_id,
         folder_name=folder_name,
         session_id=session_id,
         document_context=document_context,
@@ -1809,7 +2528,7 @@ def get_learning_session_state(
 ) -> dict[str, Any]:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
     snap = LearningAgentController.get_session_snapshot(
-        user_id=str(user_id),
+        user_id=user_id,
         folder_name=folder_name,
         session_id=session_id,
     )
@@ -1826,15 +2545,15 @@ def submit_learning_question_answer(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
-    sid = str(body.session_id or "").strip()
+    sid = (body.session_id or "").strip()
     if not sid:
         raise HTTPException(status_code=400, detail="session_id is required")
     result = LearningAgentController.record_mcq_answer(
-        user_id=str(user_id),
+        user_id=user_id,
         folder_name=folder_name,
         session_id=sid,
-        question_id=str(body.question_id or ""),
-        selected_answer=str(body.selected_answer or ""),
+        question_id=body.question_id or "",
+        selected_answer=body.selected_answer or "",
         time_taken=body.time_taken,
     )
     return {"success": True, **result}
@@ -1862,7 +2581,7 @@ def generate_learning_question(
         raise HTTPException(status_code=400, detail="No documents available for this folder.")
     concept_q = (body.concept or "key facts in the record").strip()
     chunks = get_relevant_chunks(
-        user_id=str(user_id),
+        user_id=user_id,
         case_id=folder_name,
         query=concept_q,
         file_ids=fids,
@@ -1903,7 +2622,7 @@ def generate_learning_question(
     except Exception as exc:
         logger.exception("[learning/questions/generate] LLM failed folder=%s", folder_name)
         raise HTTPException(status_code=502, detail="Unable to generate a question right now.") from exc
-    payload, ok = LearningAgentController.parse_model_json_with_status(str(raw or ""))
+    payload, ok = LearningAgentController.parse_model_json_with_status(raw or "")
     if not ok:
         raise HTTPException(status_code=502, detail="Model returned invalid JSON for question generation.")
     pq = payload.get("popup_question") if isinstance(payload.get("popup_question"), dict) else payload
@@ -1919,10 +2638,10 @@ def generate_learning_question(
             status_code=422,
             detail={"message": "Question failed validation", "errors": v.get("errors"), "raw": pq},
         )
-    sid_gen = str(body.session_id or "").strip()
+    sid_gen = (body.session_id or "").strip()
     if sid_gen:
         LearningAgentController.register_popup_question(
-            user_id=str(user_id),
+            user_id=user_id,
             folder_name=folder_name,
             session_id=sid_gen,
             popup=pq2,
@@ -1958,7 +2677,7 @@ def analyze_learning_relationships(
 
     query = str(payload.get("query") or payload.get("focus") or "identify contradictions and statutory requirements").strip()
     chunks = get_relevant_chunks(
-        user_id=str(user_id),
+        user_id=user_id,
         case_id=folder_name,
         query=query,
         file_ids=fids,
@@ -2006,7 +2725,7 @@ def learning_draft_bridge(
         return {"success": True, "trigger_learning_popup": False, "message": "No processed documents yet."}
 
     chunks = get_relevant_chunks(
-        user_id=str(user_id),
+        user_id=user_id,
         case_id=folder_name,
         query="jurisdiction limitation maintainability contradiction grounds",
         file_ids=fids,
@@ -2034,7 +2753,7 @@ def learning_draft_bridge(
         )
     return {
         "success": True,
-        "trigger_learning_popup": bool(weak_signal),
+        "trigger_learning_popup": weak_signal,
         "message": message,
         "grounding_preview": {
             "conflicts": rel.get("conflicting_facts", [])[:2],
@@ -2056,7 +2775,7 @@ def intelligent_chat(
         document_context = str(getattr(request, "document_context", "") or "").strip()
         if not document_context:
             document_context = build_learning_folder_document_context(
-                get_folder_service(), folder_name, str(user_id)
+                get_folder_service(), folder_name, user_id
             ).strip()
         if not document_context:
             raise HTTPException(
@@ -2064,12 +2783,12 @@ def intelligent_chat(
                 detail="No processed documents with text are available for Learning Mode in this folder.",
             )
         if LearningAgentController.get_state(
-            user_id=str(user_id),
+            user_id=user_id,
             folder_name=folder_name,
             session_id=session_id,
         ) is None:
             LearningAgentController.init_session(
-                user_id=str(user_id),
+                user_id=user_id,
                 folder_name=folder_name,
                 session_id=session_id,
                 document_context=document_context,
@@ -2079,7 +2798,7 @@ def intelligent_chat(
         state_meta = LearningAgentController.processMessage(
             sessionId=session_id,
             userMessage=(request.question or ""),
-            userId=str(user_id),
+            userId=user_id,
             folderName=folder_name,
         )
         return {
@@ -2123,7 +2842,7 @@ def intelligent_chat(
             request=request,
             authorization=authorization,
         )
-        requested_model = str(request.llm_name or "").strip()
+        requested_model = (request.llm_name or "").strip()
         if requested_model.lower() in {"", "gemini", "claude", "deepseek", "default"}:
             requested_model = ""
         model_name = str(
@@ -2182,6 +2901,7 @@ async def intelligent_chat_stream(
             gemini_stream_config_for_folder_chat,
             stream_config_for_folder_chat,
             claude_stream_generator,
+            claude_draft_stream_generator,
             deepseek_stream_generator,
             normalize_markdown_render_output,
         )
@@ -2205,8 +2925,31 @@ async def intelligent_chat_stream(
                 )
                 raise TimeoutError(timeout_message) from exc
 
+        async def _draft_run_blocking(func, *, timeout_s: float, timeout_message: str):
+            # Same as _run_blocking, but BINDS the request's token-usage session inside the
+            # executor thread. The draft pipeline runs every model call here; without the
+            # bind those calls (on pool threads) miss the accumulator and only log per-call.
+            # Binding makes them aggregate, so we can report the draft's per-model token burn.
+            def _wrapped():
+                bind_token_usage_session(usage_session_key)
+                try:
+                    return func()
+                finally:
+                    unbind_token_usage_session()
+            try:
+                return await asyncio.wait_for(
+                    loop.run_in_executor(None, _wrapped),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError as exc:
+                logger.warning(
+                    "[Route:intelligent_chat_stream] folder=%s timeout=%ss step=%s",
+                    folder_name, timeout_s, timeout_message,
+                )
+                raise TimeoutError(timeout_message) from exc
+
         def _truncate_prompt(text: str, *, max_chars: int, label: str) -> str:
-            raw = str(text or "")
+            raw = text or ""
             if len(raw) <= max_chars:
                 return raw
             logger.warning(
@@ -2263,7 +3006,7 @@ async def intelligent_chat_stream(
         if not query_text:
             yield _sse({"type": "error", "message": "Please enter a question."})
             return
-        requested_model_name = str(chat_request.llm_name or "").strip()
+        requested_model_name = (chat_request.llm_name or "").strip()
         # The UI may send a bare provider label instead of a concrete model id.
         # Map "deepseek"/"claude" to their configured model so the request actually
         # routes to that provider; "gemini"/"default"/"" fall back to the agent's
@@ -2277,11 +3020,26 @@ async def intelligent_chat_stream(
         elif _provider_label == "claude":
             requested_model_name = get_settings().claude_model
         selected_model_name = resolve_secret_prompt_llm_name(chat_request.secret_id) or requested_model_name or None
+        # ── Admin-panel model control ────────────────────────────────────────────────
+        # When the user did NOT explicitly pick a model in chat (no secret-prompt model, no dropdown),
+        # use the model configured in the LLM Management → Summarization Chat panel
+        # (summarization_chat_config.llm_model). That table IS live-synced to this service's DB, unlike
+        # the agent_prompts row the model previously resolved from (a separate super-admin store the
+        # panel never writes to — model changes there never reached us). Passing it as
+        # selected_model_name flows it through as model_name_override everywhere, so it wins over the
+        # stale agent_prompts row and an admin's panel choice takes effect with NO DB edits.
+        # Precedence kept: secret-prompt model > in-chat dropdown > LLM Management panel > agent_prompts.
+        _panel_model = str((llm_config or {}).get("llm_model") or "").strip()
+        _model_source = "in_chat" if selected_model_name else None
+        if not selected_model_name and _panel_model:
+            selected_model_name = _panel_model
+            _model_source = "llm_management_panel(summarization_chat_config)"
         logger.info(
-            "[Route:intelligent_chat_stream] model_resolution folder=%s secret_id=%s model=%s",
+            "[Route:intelligent_chat_stream] model_resolution folder=%s secret_id=%s model=%s source=%s",
             folder_name,
             (chat_request.secret_id or "").strip() or None,
             selected_model_name,
+            _model_source or "agent_prompts_fallback",
         )
 
         folder_service = get_folder_service()
@@ -2299,7 +3057,7 @@ async def intelligent_chat_stream(
                 try:
                     built_ctx = await _run_blocking(
                         lambda: build_learning_folder_document_context(
-                            folder_service, folder_name, str(user_id)
+                            folder_service, folder_name, user_id
                         ),
                         timeout_s=90.0,
                         timeout_message="learning_document_context",
@@ -2322,13 +3080,13 @@ async def intelligent_chat_stream(
                 )
                 return
             existing_state = LearningAgentController.get_state(
-                user_id=str(user_id),
+                user_id=user_id,
                 folder_name=folder_name,
                 session_id=session_id_for_learning,
             )
             if existing_state is None or existing_state.document_context.strip() != document_context:
                 LearningAgentController.init_session(
-                    user_id=str(user_id),
+                    user_id=user_id,
                     folder_name=folder_name,
                     session_id=session_id_for_learning,
                     document_context=document_context,
@@ -2337,7 +3095,7 @@ async def intelligent_chat_stream(
                 )
             chat_request = chat_request.model_copy(update={"session_id": session_id_for_learning})
             learning_state = LearningAgentController.begin_turn(
-                user_id=str(user_id),
+                user_id=user_id,
                 folder_name=folder_name,
                 session_id=session_id_for_learning,
                 user_text=query_text,
@@ -2415,6 +3173,45 @@ async def intelligent_chat_stream(
         except Exception:
             effective_query_text = query_text
 
+        # Free-tier Gemma: cap the system prompt + conversation history + question at
+        # gemma_history_system_max_chars (~5K tokens) so document chunks always get their full ~9K
+        # budget and total input stays ~14K. If the history block is too long, drop the OLDEST
+        # turns — the "Current question:" tail is always preserved. (Only trims for a Gemma chat;
+        # other models keep full history.)
+        try:
+            from app.services.adapters.document_ai import _is_gemma_model as _is_gemma_hist
+            _eff_settings = get_settings()
+            # Resolve the effective chat model (selected override, else the admin grounded model).
+            _hist_model = selected_model_name
+            if not _hist_model:
+                try:
+                    from app.services.agent_config_service import get_agent_config as _gac_hist
+                    _hist_model = (_gac_hist("grounded_retrieval_agent").model_name or "").strip()
+                except Exception:
+                    _hist_model = ""
+            if (not learning_mode) and _is_gemma_hist(_hist_model) and effective_query_text:
+                _hist_cap = int(getattr(_eff_settings, "gemma_history_system_max_chars", 20000) or 20000)
+                # system prompt is built below (build_document_qa_system_prompt ~3.2K chars); reserve for it
+                _room = max(2000, _hist_cap - 3200)
+                if len(effective_query_text) > _room:
+                    _marker = "Current question:\n"
+                    _mi = effective_query_text.rfind(_marker)
+                    if _mi != -1:
+                        _q_tail = effective_query_text[_mi:]
+                        _hist_room = max(0, _room - len(_q_tail))
+                        _hist_head = effective_query_text[:_mi]
+                        if _hist_room < len(_hist_head):
+                            _hist_head = _hist_head[-_hist_room:] if _hist_room > 0 else ""
+                        effective_query_text = _hist_head + _q_tail
+                    else:
+                        effective_query_text = effective_query_text[-_room:]
+                    logger.info(
+                        "[Route:intelligent_chat_stream] gemma history+system clamp folder=%s -> %d chars",
+                        folder_name, len(effective_query_text),
+                    )
+        except Exception:
+            pass
+
         # ── Step 1: emit status so the frontend shows "Analyzing..." ──
         yield _sse({"type": "status", "status": "analyzing", "message": "Analyzing query intent..."})
         yield _sse({"type": "thinking", "text": "Understanding your question and selecting the best answer path...\n"})
@@ -2441,7 +3238,13 @@ async def intelligent_chat_stream(
                     "text": "Using Learning Mode: case-grounded teaching (system prompt from configuration)...\n",
                 }
             )
-
+        # The vector 'fast path' (answer_case_folder_chat) is GONE, not merely skipped: it ran a
+        # FULL non-stream generation that could not finish within vector_timeout_s for a thinking
+        # model, so it always timed out — and because a worker thread cannot be cancelled, the
+        # discarded generation kept running to completion, costing a SECOND model call per answer
+        # (wasted tokens + rate-limit pressure). The DB+Gemini path below does the same focused
+        # retrieval and streams the answer, so this was redundant; it always fell through anyway.
+        yield _sse({"type": "thinking", "text": "Retrieving the most relevant passages...\n"})
 
         yield _sse(
             {
@@ -2470,9 +3273,14 @@ async def intelligent_chat_stream(
                 for d in documents
                 if d.get("full_text_content") or d.get("summary")
             ]
-            default_cap = 24 if learning_mode else 8
+            # Draft-from-template must see ALL supporting documents (the fact inventory is
+            # built once over the whole set) — an 8-doc cap silently drops evidence and
+            # forces later sections to blank/hallucinate. Give drafts the same generous cap
+            # as learning mode.
+            _draft_req = bool(getattr(chat_request, "draft_mode", False))
+            default_cap = 24 if (learning_mode or _draft_req) else 8
             max_context_documents = max(1, int(llm_config.get("max_context_documents") or default_cap))
-            if learning_mode:
+            if learning_mode or _draft_req:
                 max_context_documents = min(len(eligible_docs), max(max_context_documents, 24))
             doc_texts = [
                 {
@@ -2505,7 +3313,7 @@ async def intelligent_chat_stream(
 
                         def _fetch_learning_chunks():
                             return get_relevant_chunks(
-                                user_id=str(user_id),
+                                user_id=user_id,
                                 case_id=folder_name,
                                 query=query_text,
                                 file_ids=fids,
@@ -2529,6 +3337,155 @@ async def intelligent_chat_stream(
                         chunk_exc,
                     )
 
+            # ── Normal chat: DYNAMIC context per question. ──
+            # Comprehensive / summary asks ("summarize the case", "list all events", "detailed
+            # overview") keep the FULL document(s) so the answer can cover the whole case.
+            # Specific questions use focused semantic chunks (~6K tokens) for speed + cost.
+            # On retrieval failure we keep the full documents (safe fallback).
+            # Comprehensive/detailed asks keep full context AND get a forceful long-form prompt +
+            # higher temperature below; specific asks stay focused/terse. Deep/extreme asks are a
+            # strict escalation that ALSO triggers the multi-pass report generator. Computed once.
+            is_deep = bool(not learning_mode and doc_texts and _is_deep_query(query_text))
+            # Draft-from-template: explicit flag + an uploaded template (attached to the model as a
+            # file). Treated like comprehensive for context sizing + temperature so the case's
+            # supporting documents are fed as grounding evidence for filling the template.
+            is_draft = bool(
+                not learning_mode
+                and getattr(chat_request, "draft_mode", False)
+                and getattr(chat_request, "template_gcs_path", None)
+            )
+            is_comprehensive = (
+                bool(not learning_mode and doc_texts and _is_comprehensive_query(query_text))
+                or is_deep
+                or is_draft
+            )
+            # Which model will actually ANSWER this chat? Draft uses a dedicated big-context engine
+            # (gemini/claude), so only a Gemma *chat* model needs the free-tier input cap. Resolve
+            # cheaply — get_agent_config is cached and reused when the model is resolved for real
+            # below. A free-tier Gemma can't take the full-document dump a comprehensive/deep ask
+            # normally keeps (60K–130K tokens >> its 16K input-tokens/min quota → guaranteed 429),
+            # so for Gemma we send the most-relevant passages within a bounded budget instead.
+            _effective_chat_model = selected_model_name or ""
+            if not _effective_chat_model and not is_draft:
+                try:
+                    from app.services.agent_config_service import get_agent_config as _get_agent_cfg
+                    _effective_chat_model = (
+                        _get_agent_cfg(learning_agent_name or "grounded_retrieval_agent").model_name or ""
+                    ).strip()
+                except Exception:
+                    _effective_chat_model = ""
+            try:
+                from app.services.adapters.document_ai import _is_gemma_model as _is_gemma
+                _gemma_capped_chat = (not is_draft) and _is_gemma(_effective_chat_model)
+            except Exception:
+                _gemma_capped_chat = False
+            # Set when a FIXED chunk count is used for Gemma (predictable, no dynamic sizing) — the
+            # dynamic context clamp is then skipped (fixed count + history cap already bound input).
+            _gemma_fixed_active = False
+            if is_comprehensive and not _gemma_capped_chat:
+                logger.info(
+                    "[Route:intelligent_chat_stream] comprehensive query folder=%s — keeping full-document context",
+                    folder_name,
+                )
+                yield _sse({"type": "thinking", "text": "Comprehensive request — reading the full case for a complete answer...\n"})
+            elif not learning_mode and doc_texts:
+                if _gemma_capped_chat and is_comprehensive:
+                    logger.info(
+                        "[Route:intelligent_chat_stream] comprehensive query folder=%s on Gemma — using focused "
+                        "retrieval within the free-tier input budget (full dump would exceed 16K tokens/min)",
+                        folder_name,
+                    )
+                    yield _sse({"type": "thinking", "text": "Broad request on a free-tier model — retrieving the most relevant passages to stay within the per-minute limit...\n"})
+                # A broad ask on a capped Gemma pulls MORE passages into a bigger (but still
+                # free-tier-safe) budget so the answer draws on the whole case, not just the top few
+                # chunks; a normal narrow ask keeps the tight focused slice.
+                _broad_gemma = _gemma_capped_chat and is_comprehensive
+                # GEMMA ONLY: a fixed chunk count gives predictable input (no dynamic char sizing).
+                # Other models never reach here for comprehensive (they keep full-document context),
+                # and a narrow non-gemma ask keeps the dynamic char-budget slice below.
+                _fixed_chunks = 0
+                try:
+                    from app.core.config import get_settings as _fs_settings
+                    _fs = _fs_settings()
+                    _gemma_cap_chars = int(getattr(_fs, "gemma_max_context_chars", 40000) or 40000)
+                    if _broad_gemma:
+                        _fixed_chunks = int(getattr(_fs, "gemma_chat_chunk_count", 0) or 0)
+                except Exception:
+                    _gemma_cap_chars = 40000
+                if _fixed_chunks > 0:
+                    # Feed exactly _fixed_chunks passages (top by relevance). Retrieval ceiling is 48.
+                    _focus_top_k = min(48, _fixed_chunks)
+                    _focus_budget = 10 ** 9  # count controls the feed, not chars
+                else:
+                    _focus_top_k = 30 if _broad_gemma else 12
+                    # Leave ~4K chars of headroom under the cap for the system prompt + question.
+                    _focus_budget = max(24000, _gemma_cap_chars - 4000) if _broad_gemma else 24000
+                try:
+                    from app.services.learning_document_retrieval import get_relevant_chunks
+
+                    _fids = [str(d.get("file_id")) for d in doc_texts if d.get("file_id")]
+                    _fids = [x for x in _fids if x][:48]
+                    if _fids:
+                        def _fetch_chat_chunks():
+                            return get_relevant_chunks(
+                                user_id=user_id,
+                                case_id=folder_name,
+                                query=query_text,
+                                file_ids=_fids,
+                                top_k=_focus_top_k,
+                                include_surrounding_chunks=True,
+                                similarity_floor=0.40,
+                            )
+
+                        _chat_chunks = await _run_blocking(
+                            _fetch_chat_chunks,
+                            timeout_s=15.0,
+                            timeout_message="chat_chunk_retrieval",
+                        )
+                        if _chat_chunks:
+                            # Regroup relevant chunks into {name, text, file_id} per document so
+                            # downstream context-building + citations keep working — most-relevant
+                            # first, capped to a focused budget.
+                            _by_file: dict = {}
+                            _budget, _used, _added = _focus_budget, 0, 0
+                            for _ch in _chat_chunks:
+                                _content = str(_ch.get("content") or "").strip()
+                                if not _content:
+                                    continue
+                                if _fixed_chunks > 0:
+                                    # Fixed count (Gemma): stop after N chunks, ignore char budget.
+                                    if _added >= _fixed_chunks:
+                                        break
+                                elif _used + len(_content) > _budget:
+                                    break
+                                _meta = _ch.get("metadata") or {}
+                                _fid = str(_meta.get("file_id") or "")
+                                _name = str(_meta.get("document_name") or "document")
+                                _page = _ch.get("page_number")
+                                _page_bit = f"[p.{_page}] " if _page is not None else ""
+                                _entry = _by_file.setdefault(_fid, {"name": _name, "text": "", "file_id": _fid or None})
+                                _entry["text"] += f"{_page_bit}{_content}\n\n"
+                                _used += len(_content)
+                                _added += 1
+                            _focused = [v for v in _by_file.values() if v["text"].strip()]
+                            if _focused:
+                                doc_texts = _focused
+                                if _fixed_chunks > 0:
+                                    _gemma_fixed_active = True
+                                logger.info(
+                                    "[Route:intelligent_chat_stream] focused retrieval folder=%s fed_chunks=%s docs=%s chars=%s "
+                                    "mode=%s (replaced full-document context)",
+                                    folder_name, _added, len(_focused), _used,
+                                    ("fixed=%d" % _fixed_chunks) if _fixed_chunks > 0 else "char_budget",
+                                )
+                                yield _sse({"type": "thinking", "text": f"Found {len(_chat_chunks)} relevant passage(s); answering from those.\n"})
+                except Exception as _chunk_exc:
+                    logger.warning(
+                        "[Route:intelligent_chat_stream] chat chunk retrieval failed folder=%s err=%s — using full documents",
+                        folder_name,
+                        _chunk_exc,
+                    )
+
             yield _sse({"type": "status", "status": "generating", "message": "Generating answer from documents..."})
             yield _sse({"type": "thinking", "text": f"Loaded {len(doc_texts)} document(s). Generating answer now...\n"})
 
@@ -2541,12 +3498,28 @@ async def intelligent_chat_stream(
                     + (float(llm_config.get("max_summarization_output_tokens") or llm_config.get("max_output_tokens") or 65536) / 200.0),
                 ),
             )
+            # Free-tier gemma is a slow, throttled thinking model: a SINGLE non-stream call
+            # measured 51-88s just to return 200 OK (see the Green_Eye comprehensive run — the
+            # deep call was killed at 88s while the very next call succeeded in 51s). The generic
+            # formula above ties the timeout to the OUTPUT budget (10K/200=50s -> ~88s total),
+            # which has nothing to do with how slow the free tier actually is, so it prematurely
+            # kills calls that would have succeeded. Give gemma a generous floor so one honest
+            # call has room to finish instead of timing out and stacking a second concurrent call.
+            if _gemma_capped_chat:
+                non_stream_timeout_s = min(
+                    600.0,
+                    max(non_stream_timeout_s, float(getattr(get_settings(), "gemma_non_stream_timeout_s", 220.0))),
+                )
 
             # Real-time streaming: emit chunk events as text is generated.
             answer_parts: list[str] = []
             source_names: list[str] = [str(d.get("name") or "document").strip() for d in doc_texts if d.get("name")]
             citations_payload: list[dict[str, Any]] = []
             streamed = False
+            # Per-chunk SSE pacing for _yield_text_as_streaming_chunks. Every streaming branch below
+            # (gemini / claude / deepseek / the non-stream fallbacks) reads this, so it must be bound
+            # before the try — an unbound name here fails the whole chat with "not defined".
+            stream_delay_ms = get_streaming_delay_ms(llm_config)
             # Will be set to the resolved model from agent_prompts (used for token usage logging)
             actual_model_name: str = str((llm_config or {}).get("llm_model") or "unknown")
             stream_usage: dict[str, Any] | None = None
@@ -2555,30 +3528,142 @@ async def intelligent_chat_stream(
 
                 settings = get_settings()
                 if settings.gemini_api_key:
-                    # Resolve provider + model + config from agent_prompts FIRST so
-                    # the document budget matches the model's real context window.
-                    stream_provider, resolved_model_name, stream_cfg = stream_config_for_folder_chat(
-                        for_summary=True,
-                        summarization_llm_config=llm_config,
-                        agent_name=learning_agent_name,
-                        model_name_override=selected_model_name,
+                    context_parts = []
+                    running_chars = 0
+                    # Dynamically size the document context to the question: a greeting loads
+                    # almost nothing, a narrow ask gets a focused slice, and comprehensive/deep asks
+                    # get the whole case (gemma-4 input limit ~262K tokens). Scales cost + latency to
+                    # what the question actually needs instead of a fixed tier.
+                    char_limit = _doc_context_char_budget(
+                        query_text,
+                        learning_mode=learning_mode,
+                        # Drafting needs maximal grounding (missing evidence => wrong "[NOT FOUND]"),
+                        # so give draft the full-document budget like deep, not the comprehensive tier.
+                        is_deep=(is_deep or is_draft),
+                        is_comprehensive=is_comprehensive,
+                        # Hard-caps the budget for a free-tier Gemma chat (input-TPM safety); draft
+                        # passes no model here (uses a big-context engine) so it keeps the full tier.
+                        model_name=(None if is_draft else _effective_chat_model),
                     )
-                    # Store for token-usage logging below
-                    actual_model_name = resolved_model_name
+                    # Free-tier Gemma safety: the 16K/min limit is on TOTAL input — the system
+                    # prompt + conversation history (both inside effective_query_text) + question +
+                    # doc context. History is VARIABLE (grows with the chat), so a fixed context cap
+                    # can still blow the limit once retrieval fills it. Dynamically reserve room for
+                    # the measured system prompt + history + question and give the rest to context,
+                    # keeping TOTAL input under ~85% of the TPM budget no matter how long the chat is.
+                    # Skipped when a FIXED Gemma chunk count is active — the fixed count + the ~5K
+                    # history/system cap already bound total input, so no dynamic trimming is needed
+                    # (keeps the chunk count predictable, as requested).
+                    if _gemma_capped_chat and not is_draft and not _gemma_fixed_active:
+                        _tpm = int(getattr(settings, "gemma_free_tier_input_tpm", 16000) or 16000)
+                        _target_input_tok = int(_tpm * 0.85) if _tpm > 0 else 13600
+                        _overhead_chars = len(system_instruction or "") + len(effective_query_text or "") + 800
+                        _ctx_room_tok = max(2000, _target_input_tok - (_overhead_chars // 4))
+                        _dyn_cap = _ctx_room_tok * 4
+                        if _dyn_cap < char_limit:
+                            logger.info(
+                                "[Route:intelligent_chat_stream] gemma dynamic context clamp %d->%d chars "
+                                "(reserved ~%d tok for system+history+question)",
+                                char_limit, _dyn_cap, _overhead_chars // 4,
+                            )
+                            char_limit = _dyn_cap
+                    for doc in doc_texts:
+                        name = doc.get("name", "document")
+                        text = (doc.get("text") or "").strip()
+                        if not text:
+                            continue
+                        block = f"[Document: {name}]\n{text}"
+                        if running_chars + len(block) > char_limit:
+                            block = block[: max(0, char_limit - running_chars)]
+                            if block:
+                                context_parts.append(block)
+                            break
+                        context_parts.append(block)
+                        running_chars += len(block)
 
-                    char_limit = _PROVIDER_CONTEXT_CHAR_BUDGET.get(stream_provider, 380_000)
-                    context = _build_document_context(doc_texts, char_limit)
-                    total_doc_chars = sum(len(d.get("text") or "") for d in doc_texts)
-                    if total_doc_chars > char_limit:
-                        logger.warning(
-                            "[Route:intelligent_chat_stream] folder=%s document text (%s chars) exceeds "
-                            "%s context budget (%s chars) — fair-share truncated",
-                            folder_name, total_doc_chars, stream_provider, char_limit,
+                    context = "\n\n---\n\n".join(context_parts)
+                    # ── Draft-from-template setup ────────────────────────────────────────────────
+                    # A dedicated draft model (settings.draft_model_name, e.g. gemini-3.1-pro-preview)
+                    # reads the uploaded template PDF DIRECTLY and reproduces all pages with clean
+                    # formatting. gemma cannot accept PDF Parts (verified: 500) and truncates long
+                    # templates, so when the draft model is gemma / blank we fall back to injecting the
+                    # template as extracted TEXT. Blocking download+extract run in the executor so the
+                    # SSE event loop is never blocked.
+                    template_text = ""
+                    _draft_template_bytes = None
+                    _draft_template_layout = {}
+                    # Draft engine: honour the frontend selector (chat_request.draft_model) when it is
+                    # one of the allowed engines; otherwise fall back to the .env default. Only these
+                    # are permitted so an arbitrary model string can't be injected via the request.
+                    _draft_model_name = ""
+                    _analysis_model = "gemini-3.1-pro-preview"
+                    if is_draft:
+                        _req_draft_model = (getattr(chat_request, "draft_model", None) or "").strip()
+                        _draft_model_name = (
+                            _req_draft_model if _req_draft_model in _DRAFT_ALLOWED_MODELS
+                            else (settings.draft_model_name or "").strip()
                         )
-                    logger.info(
-                        "[Route:intelligent_chat_stream] folder=%s provider=%s model=%s docs=%s context_chars=%s budget=%s",
-                        folder_name, stream_provider, resolved_model_name, len(doc_texts), len(context), char_limit,
+                        # Stage-A structure model selector (frontend dropdown). Same allowlist
+                        # plus gemini flash; anything else → the reliable pro default.
+                        _req_structure_model = (getattr(chat_request, "analysis_model", None) or "").strip()
+                        _analysis_model = (
+                            _req_structure_model if _req_structure_model in _STRUCTURE_ALLOWED_MODELS
+                            else "gemini-3.1-pro-preview"
+                        )
+                    _tmpl_uri = str(getattr(chat_request, "template_gcs_path", "") or "") if is_draft else ""
+                    _tmpl_mime = (getattr(chat_request, "template_mimetype", None) or "") if is_draft else ""
+                    _tmpl_is_pdf = _tmpl_mime.lower() == "application/pdf" or _tmpl_uri.lower().endswith(".pdf")
+                    # Attach the template as a native PDF Part only for a PDF template on a non-gemma model.
+                    _draft_attach_pdf = bool(
+                        _draft_model_name and not _draft_model_name.lower().startswith("gemma") and _tmpl_is_pdf
                     )
+                    if is_draft and _tmpl_uri:
+                        try:
+                            yield _sse({"type": "thinking", "text": "Reading the uploaded template...\n"})
+                            _draft_template_bytes = await loop.run_in_executor(
+                                None, lambda: gcs.download_bytes(_tmpl_uri)
+                            )
+                            # Always extract the template TEXT (cheap) — even when we ALSO attach the PDF —
+                            # so we can parse its explicit section skeleton (structure-first drafting). When
+                            # the PDF is attached, this text feeds ONLY the skeleton, not a second full copy.
+                            template_text = await loop.run_in_executor(
+                                None,
+                                lambda: _extract_template_text_sync(
+                                    _draft_template_bytes, _tmpl_mime or None, _tmpl_uri.rsplit("/", 1)[-1]
+                                ),
+                            )
+                            try:
+                                from app.services.template_layout import extract_template_layout as _extract_template_layout
+                                _draft_template_layout = await loop.run_in_executor(
+                                    None,
+                                    lambda: _extract_template_layout(
+                                        _draft_template_bytes or b"",
+                                        mime_type=_tmpl_mime or None,
+                                        filename=_tmpl_uri.rsplit("/", 1)[-1],
+                                    ),
+                                )
+                            except Exception as _layout_exc:
+                                logger.warning(
+                                    "[Route:intelligent_chat_stream] folder=%s draft template layout extraction failed: %s",
+                                    folder_name, _layout_exc,
+                                )
+                                _draft_template_layout = {}
+                            logger.info(
+                                "[Route:intelligent_chat_stream] folder=%s draft model=%s attach_pdf=%s "
+                                "template_bytes=%d template_text_chars=%d template_layout_lines=%d",
+                                folder_name, _draft_model_name or "(admin)", _draft_attach_pdf,
+                                len(_draft_template_bytes or b""), len(template_text),
+                                len((_draft_template_layout or {}).get("lines") or []),
+                            )
+                        except Exception as _tmpl_exc:
+                            logger.warning(
+                                "[Route:intelligent_chat_stream] folder=%s draft template read failed: %s",
+                                folder_name, _tmpl_exc,
+                            )
+                            template_text = ""
+                            _draft_template_bytes = None
+                            _draft_template_layout = {}
+                            _draft_attach_pdf = False
                     if learning_mode and learning_state is not None:
                         _lr_core = LearningAgentController.learning_system_prompt(
                             turn_count=learning_state.turn_count,
@@ -2609,6 +3694,284 @@ async def intelligent_chat_stream(
                             f"=== USER INPUT ===\n{effective_query_text}\n\n"
                             "=== JSON OUTPUT ==="
                         )
+                    elif is_draft:
+                        # Draft-from-template. When the draft model can read the PDF (Pro models), the
+                        # template rides along as a PDF Part (see the streaming call) and we reference it;
+                        # otherwise it is injected here as extracted TEXT. Either way the model uses the
+                        # template as a FORMAT/STRUCTURE reference and drafts a COMPLETE document of the same
+                        # type and comparable LENGTH, grounding every fact ONLY in the supporting documents.
+                        # NOTE: this single-call branch is the current live path; the multi-stage pipeline
+                        # (analyze -> fact inventory -> per-section draft -> audit) is the planned successor.
+                        if _draft_attach_pdf and _draft_template_bytes:
+                            _tmpl_section = (
+                                "The TEMPLATE is ATTACHED to this message as a PDF. Study it ONLY as your "
+                                "FORMAT & STRUCTURE REFERENCE — learn from it the document type, the set and "
+                                "order of clauses, the headings, the professional drafting style/tone, and the "
+                                "layout (recitals, signature/witness blocks, schedules). Do NOT copy its blanks "
+                                "or boilerplate placeholder text; draft fresh, real clauses in this style.\n\n"
+                            )
+                        else:
+                            _tmpl_block = (template_text or "").strip() or (
+                                "[The uploaded template could not be read. Ask the user to re-upload it as a "
+                                "text-based PDF or .docx.]"
+                            )
+                            _tmpl_section = (
+                                "=== TEMPLATE (FORMAT & STRUCTURE REFERENCE ONLY) ===\n"
+                                "Use this ONLY to learn the document type, clause set/order, headings, style "
+                                "and layout. Do NOT copy its blanks or boilerplate wording — draft fresh, real "
+                                f"clauses in this style.\n{_tmpl_block}\n\n"
+                            )
+                        # Structure-first drafting: hand the model the template's OWN section skeleton so the
+                        # draft expands every section in order (a completeness/ordering contract), rather than
+                        # loosely imitating the layout. The model still has the full template too.
+                        _draft_skeleton = _extract_template_skeleton(template_text)
+                        if _draft_skeleton:
+                            _skeleton_block = (
+                                "═══ TEMPLATE SKELETON (the template's OWN sections, in order) ═══\n"
+                                "Your draft MUST contain EVERY section below, in THIS order, each expanded into "
+                                "properly drafted clause(s) — not the bare label. Do not skip, merge, or reorder "
+                                "them. Place the ADDITIONAL STANDARD CLAUSES (section 3) AFTER these:\n"
+                                + "\n".join(f"  • {s}" for s in _draft_skeleton)
+                                + "\n\n"
+                            )
+                        else:
+                            _skeleton_block = ""
+                        prompt = (
+                            f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n"
+                            "You are a SENIOR LEGAL DRAFTING ATTORNEY — an expert agreement / deed / pleading "
+                            "drafter in Indian practice. You are given a TEMPLATE and the case's SUPPORTING "
+                            "DOCUMENTS. Use the TEMPLATE ONLY as a FORMAT & STRUCTURE REFERENCE — it shows you the "
+                            "document type, the clauses such a document contains, their order, the headings, the "
+                            "professional drafting style, and the layout. Then DRAFT A FRESH, COMPLETE, "
+                            "EXECUTION-READY document of that type — composing the actual legal language YOURSELF "
+                            "and drawing every party-specific fact from the SUPPORTING DOCUMENTS.\n\n"
+                            "THIS IS INTELLIGENT EXPERT DRAFTING, NOT FILLING BLANKS. Do NOT merely copy the "
+                            "template and drop values into its gaps. Do NOT reproduce its placeholder text, blanks, "
+                            "or boilerplate wording verbatim. Write proper, self-composed operative clauses in "
+                            "clean professional legal prose, the way a senior advocate drafting from scratch (with "
+                            "this template as a style guide) would — with correct paragraphing, sensible clause "
+                            "wording, and sound legal judgement.\n\n"
+                            "═══ 1. INTELLIGENT DRAFTING (compose; do not fill-in-the-blank) ═══\n"
+                            "- Follow the template's STRUCTURE and clause set, but COMPOSE the content yourself in "
+                            "clean, professional legal prose. Where the template shows a blank or a generic "
+                            "placeholder, WRITE THE REAL, properly-worded clause — never echo the placeholder.\n"
+                            "- Produce a COMPLETE document of this type: every section such a document needs "
+                            "(title, parties, recitals/WHEREAS, definitions, operative clauses, schedules/"
+                            "annexures, testimonium and signature/witness blocks), in a sensible professional order "
+                            "guided by the template.\n"
+                            "- LENGTH & COMPLETENESS CONTRACT (critical — do NOT violate): your draft MUST be as "
+                            "long and as complete as the source template. EVERY section, clause, sub-clause, "
+                            "recital, proviso, schedule and annexure that the template contains MUST appear in your "
+                            "draft — EXPANDED into full professional legal prose, NEVER compressed, summarized, "
+                            "sampled, or dropped. A ~20-page template MUST produce a comparably long (~15-20+ page) "
+                            "draft matching its section count and depth; a short template stays short. Do NOT "
+                            "conclude, sign off, or write the closing sections until EVERY template section has been "
+                            "fully drafted. If you feel 'done' while any template section is still undrafted, you "
+                            "are NOT done — keep writing section after section until all are complete.\n"
+                            "- Be SELF-AWARE: detect the document type and jurisdiction, and draft what a competent "
+                            "such document requires — choosing, ordering and wording clauses appropriately, and "
+                            "adapting to the facts (a franchise, partnership, sale deed or will each get their own "
+                            "proper clauses, not a rent agreement's).\n\n"
+                            "═══ 2. TWO-TIER CONTENT (facts vs. standard terms) ═══\n"
+                            "As you compose each clause, classify EVERY value you write into ONE tier and handle "
+                            "it accordingly:\n"
+                            "• TIER A — PARTY-SPECIFIC FACTS (identity & money belonging to THESE parties): names, "
+                            "parentage, ages, addresses, Aadhaar / PAN / ID numbers, the specific rent / price / "
+                            "deposit amounts, dates, property description, bank name / account number / IFSC / UPI "
+                            "ID, cheque or registration numbers.\n"
+                            "  → Fill ONLY from the supporting documents. NEVER invent or guess a party-specific "
+                            "fact. If a Tier-A value is genuinely absent from the documents, insert EXACTLY this "
+                            "RED PLACEHOLDER in the body, unchanged: "
+                            '<span style="color:red;font-weight:bold;">[________ FIELD NAME ________]</span> — where '
+                            "FIELD NAME is a short CAPS label of what the user must fill, e.g. "
+                            '<span style="color:red;font-weight:bold;">[________ ACCOUNT NUMBER ________]</span>. '
+                            "Use this SAME red span for EVERY missing field (bank name, account number, IFSC, UPI "
+                            "ID, payment mode, dates, amounts) so they ALL render red and consistent — NEVER a plain "
+                            "'[BANK NAME]' bracket and NEVER a bare underscore blank. Put nothing else inside it — no "
+                            "guess, no 'e.g.'. EXCEPTION: fields the template leaves blank at execution (signatures, "
+                            "thumb impressions, notary/seal, witness signatures, stamp/registration number) stay as "
+                            "ordinary blanks, not red. Also record each red placeholder in ITEMS REQUIRING "
+                            "COMPLETION (section 6) so nothing is missed.\n"
+                            "• TIER B — STANDARD CONTRACT TERMS (conventional, NOT identity/money-specific): notice "
+                            "period for inspection/entry, renewal duration and renewal-notice period, rent grace "
+                            "period, late-payment interest rate, lock-in period, refund window, and similar "
+                            "boilerplate values.\n"
+                            "  → An expert drafter does NOT leave these blank. Supply the STANDARD, market-"
+                            "conventional value for Indian practice, phrased in the template's own style (typical "
+                            "defaults: inspection/entry notice = 24 hours; renewal notice = 30 days before expiry; "
+                            "late-payment interest ≈ 18% p.a.; deposit-refund window = 30 days; lock-in = 6 "
+                            "months). MARK every value YOU supply (not taken from the documents) by appending "
+                            "' [standard — verify]' the FIRST time it appears. Do NOT tag Tier-A values that came "
+                            "from the documents.\n\n"
+                            "═══ 3. PROFESSIONAL COMPLETION (make it a proper agreement) ═══\n"
+                            "- After drafting the clauses the template shows, ADD any STANDARD PROTECTIVE CLAUSES "
+                            "that a competent agreement OF THIS SAME TYPE should contain but the template omits — "
+                            "and ONLY clauses appropriate to THIS detected document type (never import clauses from "
+                            "a different kind of document). Continue the numbering, group them under a bold heading "
+                            "'ADDITIONAL STANDARD CLAUSES', and mark each with ' [standard — verify]'. Decide the "
+                            "right set from the document type you detect — do NOT hardcode. (For a residential "
+                            "tenancy this typically means late-payment interest, alterations/fixtures, pets & "
+                            "nuisance, visitors/guests, quiet enjoyment, and notice for termination.)\n"
+                            "- Keep the settled legal meaning of standard clauses intact — draft them in their "
+                            "conventional protective form; do not water them down.\n\n"
+                            "═══ 4. JURISDICTION / LEGAL ADVISORY ═══\n"
+                            "- If the facts reveal a jurisdiction-specific concern about the INSTRUMENT itself, "
+                            "note it in DRAFTING & LEGAL NOTES (section 6) — do NOT silently change the instrument. "
+                            "Example: residential letting of a property in Maharashtra is conventionally executed "
+                            "as a 'Leave and License Agreement' under the Maharashtra Rent Control Act, 1999, "
+                            "rather than a generic 'Rent Agreement'. State such points as advisory notes for the "
+                            "attorney, never as unilateral changes.\n"
+                            "- Keep the document's TITLE and instrument name EXACTLY as the template's (do not "
+                            "prefix, rename, or blend instrument types in the title or body). Raise any instrument-"
+                            "type concern ONLY in DRAFTING & LEGAL NOTES.\n\n"
+                            "═══ 5. FORMATTING & PARAGRAPHING (court/registrar-ready) ═══\n"
+                            "- Bold section headings on their OWN line (NOT '#'/'##'). Each numbered clause STARTS "
+                            "ON ITS OWN NEW LINE with its own heading. The operative-words line (e.g. 'NOW THIS "
+                            "AGREEMENT WITNESSETH AS FOLLOWS:') MUST be on its own line, then a BLANK line, then "
+                            "'**1. TERM:**' on the next line. NEVER fuse a heading or preamble with the next clause "
+                            "on one line (NOT '...WITNESSETH AS FOLLOWS:1. TERM:').\n"
+                            "- PARAGRAPHING (important): write recitals/WHEREAS clauses and each operative clause as "
+                            "PROPER paragraphs of flowing legal prose. START a new paragraph for each distinct "
+                            "clause or point and END that paragraph when the point is complete; separate EVERY "
+                            "clause, recital and block with a BLANK line. Do NOT run several clauses together into "
+                            "one block, and do NOT fragment a single clause into many stubby one-line pieces. "
+                            "Sub-points take indented (a)/(b)/(c) or (i)/(ii)/(iii) numbering, each on its own "
+                            "line. Aim for the rhythm of a professionally typed agreement, not a bulleted list.\n"
+                            "- SIDE-BY-SIDE COLUMNS → Markdown TABLE. When the template lays content out in columns "
+                            "— signature blocks (LANDLORD | TENANT, LESSOR | LESSEE, FRANCHISOR | FRANCHISEE, PARTY "
+                            "1 | PARTY 2), witness blocks (Witness 1 | Witness 2), or any multi-column arrangement "
+                            "— reproduce it as a Markdown table with ONE COLUMN PER template column so the columns "
+                            "stay aligned. NEVER flatten columns into a run-on line. Example:\n"
+                            "  | LANDLORD / LESSOR | TENANT / LESSEE |\n"
+                            "  |---|---|\n"
+                            "  | Signature: __________ | Signature: __________ |\n"
+                            "  | Name: Ramesh K. Desai | Name: Priya S. Malhotra |\n"
+                            "  | Date: 01/07/2025 | Date: 01/07/2025 |\n"
+                            "- Put each labelled field on its OWN line (Signature / Name / Date are separate lines) "
+                            "and separate distinct blocks with a blank line. Reproduce existing tables / schedules "
+                            "/ inventories (e.g. an ANNEXURE inventory) as Markdown tables with the template's "
+                            "exact columns. Centre only what the template centres (its title / cause title); keep "
+                            "body clauses left-aligned. Math in plain Unicode (no LaTeX).\n"
+                            "- The AGREEMENT BODY must contain ONLY the clean legal document — no source tags, no "
+                            "'[source: ...]', no analysis prose. It must read like a finished, signable agreement.\n\n"
+                            "═══ 6. CLOSING SECTIONS (after the agreement, clearly separated) ═══\n"
+                            "After the signature/witness block, output a line containing only '---', then these "
+                            "two sections, each under a bold heading:\n"
+                            "- '**ITEMS REQUIRING COMPLETION**' — a short numbered list of every Tier-A blank you "
+                            "left (what to fill and where). If none, write 'None — all required facts were found "
+                            "in the case file.'\n"
+                            "- '**DRAFTING & LEGAL NOTES**' — brief bullets: the standard values/clauses you "
+                            "supplied ('[standard — verify]'), any jurisdiction/instrument advisory from section "
+                            "4, and a one-line reminder that a qualified advocate must review the draft before "
+                            "execution.\n\n"
+                            "COURT-PLEADING CONVENTIONS — apply ONLY IF this template is itself a court pleading "
+                            "(plaint / petition / application) and already contains these sections; SKIP ENTIRELY "
+                            "for agreements, deeds, wills and other non-litigation documents:\n"
+                            "- Each material fact in its own numbered paragraph; complete cause-of-action, "
+                            "jurisdiction, valuation & court-fee and limitation paragraphs; PRAYER reliefs as "
+                            "lettered clauses (a),(b),(c); reproduce the VERIFICATION, affidavit, Section 12A "
+                            "mediation and Section 65B BSA blocks that are present in the template.\n\n"
+                            f"{_skeleton_block}"
+                            f"{_tmpl_section}"
+                            f"=== SUPPORTING DOCUMENTS ===\n{context}\n\n"
+                            f"=== USER INSTRUCTION ===\n{query_text}\n\n"
+                            "=== COMPLETED DRAFT ==="
+                        )
+                    elif is_deep:
+                        # Deep/extreme asks (e.g. multi-section court-ready briefs): ONE single
+                        # streaming call with the FULL document and a no-ceiling, follow-the-user's-
+                        # structure prompt. This replaces the old per-section multi-pass — splitting
+                        # the report into grouped passes fragmented the context (per-group RAG snippets
+                        # instead of the whole case) and the output, making answers SHORTER, slower,
+                        # and more hallucination-prone. The user's own prompt carries the structure,
+                        # so we just tell the model to follow it exactly and exhaustively. Small
+                        # models (gemma-4) tend to emit an end-of-turn EARLY on long structured asks
+                        # (finish_reason=STOP well before the token limit) — e.g. 17 of 22 points. We
+                        # counter that with an explicit completion contract anchored to the user's own
+                        # number of requested points.
+                        _deep_n_points = len(_find_numbered_headings(query_text))
+                        if _deep_n_points >= 4:
+                            _deep_completion_clause = (
+                                f"COMPLETION CONTRACT: the user's request contains {_deep_n_points} numbered "
+                                f"points/sections. Your output MUST contain ALL {_deep_n_points} of them, "
+                                f"numbered 1 to {_deep_n_points}, each with its own bold heading. After you "
+                                "finish one point, IMMEDIATELY begin the next. Do NOT write any closing "
+                                "remarks, overall summary, or sign-off until the FINAL numbered point is "
+                                f"complete. If you feel you are 'done' before point {_deep_n_points}, you are "
+                                "NOT — keep writing until every numbered point exists.\n\n"
+                            )
+                        else:
+                            _deep_completion_clause = (
+                                "COMPLETION CONTRACT: write EVERY section the user requested, in order. Do "
+                                "NOT conclude, summarise, or stop until all requested sections are written.\n\n"
+                            )
+                        prompt = (
+                            f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n"
+                            "The user has requested an EXHAUSTIVE, deeply detailed report. Produce the "
+                            "COMPLETE report in this single response.\n\n"
+                            + _deep_completion_clause +
+                            "FOLLOW THE USER'S REQUESTED STRUCTURE EXACTLY AND COMPLETELY: reproduce every "
+                            "section, heading, table, column, row count, and word limit they specify, in the "
+                            "order they specify. Do NOT drop, merge, summarise, or shorten any requested "
+                            "section. Be maximally thorough — cover every relevant fact, date, party, figure, "
+                            "argument, exhibit, and quotation the documents support. There is NO upper length "
+                            "limit; write as long as the material requires (a full multi-page report). Keep "
+                            "writing section after section — do NOT wind down or conclude until the last "
+                            "requested point is finished.\n\n"
+                            "GROUNDING (this is a legal RAG task — accuracy is critical): ground every factual "
+                            "statement ONLY in the documents below and add a page reference like [p.N]. Write "
+                            "'Not found in uploaded file' wherever the documents do not support a point. Do NOT "
+                            "invent facts, outcomes, case law, or numbers, and do NOT use outside knowledge. "
+                            "Treat allegations as allegations unless an exhibit or order proves them. If "
+                            "something is unclear, say 'Unclear from uploaded file.'\n\n"
+                            "FORMATTING: begin each section with a bold heading on its own line (for example "
+                            "'**1. Document Classification and Reliability**'). Do NOT use '#', '##', or '###' "
+                            "heading marks — they render as literal text. Write ALL math in plain text/Unicode "
+                            "(use ×, ÷, >, ≥, ≤, %), NEVER LaTeX or $...$. Use Markdown tables for any tabular "
+                            "or itemised data.\n\n"
+                            f"=== DOCUMENTS ===\n{context}\n\n"
+                            # RAW query_text, NOT effective_query_text: the latter prepends prior
+                            # conversation turns (e.g. an earlier 17-section benchmark), whose
+                            # structure the model then follows instead of THIS request's points.
+                            f"=== USER REQUEST ===\n{query_text}\n\n"
+                            "=== FULL REPORT ==="
+                        )
+                    elif is_comprehensive:
+                        # Forceful long-form prompt: a small model treats a bare "summary" ask as
+                        # license to be brief. Give it an explicit structure + length floor and tell
+                        # it not to compress, so it produces a full multi-section case analysis.
+                        prompt = (
+                            f"SYSTEM INSTRUCTION:\n{system_instruction}\n\n"
+                            "The user has asked for a COMPREHENSIVE, DETAILED answer. Produce an exhaustive, "
+                            "well-structured, long-form response grounded ONLY in the legal documents below. "
+                            "Do NOT compress, abbreviate, or omit relevant detail — this is a full case "
+                            "analysis, not a short summary.\n\n"
+                            "FORMATTING: structure the answer with bold section titles, each on its OWN line "
+                            "(for example: **Background and Material Facts**). Do NOT use '#', '##', or '###' "
+                            "heading marks — they are not rendered and show up as literal '##' text. "
+                            "Cover every part the documents support:\n"
+                            "- Parties and their roles\n"
+                            "- Background and material facts\n"
+                            "- Full chronology of events and dates (render as a Markdown table)\n"
+                            "- Issues / questions for determination\n"
+                            "- Each side's arguments and contentions\n"
+                            "- Evidence, documents, and authorities relied on\n"
+                            "- Findings, reasoning, and analysis\n"
+                            "- Holding / decision / order, with any reliefs, directions, or costs\n"
+                            "- Current status / next steps, if stated\n\n"
+                            "Use Markdown tables for any list of events, dates, parties, or itemised data. "
+                            "LENGTH: write an EXHAUSTIVE response of AT LEAST 3,500-4,500 words "
+                            "(≈4,000-5,000 tokens) when the documents contain enough material. Each section "
+                            "above must be SEVERAL fully-developed paragraphs of prose — never a single line or "
+                            "a bare bullet. Explain every fact, date, party, argument, and finding in depth and "
+                            "quote or reference the record. Do NOT stop early, do NOT compress, and do NOT end "
+                            "with a short conclusion until every section is covered thoroughly. Be shorter ONLY "
+                            "if the documents genuinely lack content. Stay accurate and grounded; if something is "
+                            "not in the documents, say so rather than inventing it.\n\n"
+                            f"=== DOCUMENTS ===\n{context}\n\n"
+                            f"=== QUESTION ===\n{effective_query_text}\n\n"
+                            "=== DETAILED ANSWER ==="
+                        )
                     else:
                         # Prompt Orchestration Layer:
                         #   Layer 1 (permanent system prompt) → SYSTEM INSTRUCTION block.
@@ -2620,10 +3983,17 @@ async def intelligent_chat_stream(
                         if system_instruction:
                             system_block = f"{system_block}\n\n{system_instruction}"
                         prompt = (
+                            # system_block (not system_instruction) — it prepends PERMANENT_SYSTEM_PROMPT,
+                            # which interpolating system_instruction alone would silently drop.
                             f"{system_block}\n\n"
-                            "Answer the user's question based ONLY on the "
-                            "following legal documents. Be concise and factual. If the answer is not in the "
-                            "documents, say so clearly.\n\n"
+                            "Answer the user's question based ONLY on the following legal documents. "
+                            # Deliberately NOT "be concise": length is matched to the ask, because a
+                            # blanket concision instruction caps the detailed/comprehensive tier.
+                            "Match the length and depth to what the user actually asked for: when they request "
+                            "a detailed, comprehensive, full, or in-depth summary/answer, produce a thorough, "
+                            "well-structured, multi-section response that covers all relevant material from the "
+                            "documents; when they ask something narrow, keep it focused. Always stay accurate and "
+                            "grounded. If the answer is not in the documents, say so clearly.\n\n"
                             f"=== DOCUMENTS ===\n{context}\n\n"
                             f"=== QUESTION ===\n{effective_query_text}\n\n"
                             "=== OUTPUT CONTRACT — OVERRIDES ALL PRIOR INSTRUCTIONS ===\n"
@@ -2631,42 +4001,548 @@ async def intelligent_chat_stream(
                             "=== ANSWER ==="
                         )
                     prompt = _truncate_prompt(prompt, max_chars=char_limit + 60_000, label="model_prompt")
+                    # Resolve provider + model + config from agent_prompts (or summarization fallback).
+                    # MUST stay unconditional: the draft branch below only assigns stream_provider when
+                    # `is_draft and _draft_model_name`, so without this a normal chat reaches the
+                    # `elif stream_provider == ...` dispatch with the name unbound — which raises
+                    # UnboundLocalError inside the streaming try, gets swallowed as "streaming
+                    # unavailable", and silently degrades every answer to the non-stream fallback.
+                    stream_provider, resolved_model_name, stream_cfg = stream_config_for_folder_chat(
+                        for_summary=True,
+                        summarization_llm_config=llm_config,
+                        agent_name=learning_agent_name,
+                        model_name_override=selected_model_name,
+                    )
+                    # Store for token-usage logging below
+                    actual_model_name = resolved_model_name
 
-                    if stream_provider in ("claude", "deepseek"):
-                        # ── Claude/DeepSeek streaming (thread + queue bridge, coalesced) ──
-                        provider_gen_kwargs, provider_llm_params = stream_cfg
-                        provider_generator = (
-                            claude_stream_generator if stream_provider == "claude" else deepseek_stream_generator
+                    # Draft-from-template: force the selected draft engine (frontend dropdown, else the
+                    # .env default) instead of the admin-selected chat model. Both Gemini-3.x and Claude
+                    # read the template PDF directly and reproduce all pages. Route by provider:
+                    #   • claude-*  → Claude path; the PDF rides as a document block (see the claude
+                    #     branch below), which uses the dedicated claude_draft_stream_generator.
+                    #   • else (gemini-3.x) → Gemini path with a precise temperature + full output budget.
+                    if is_draft and _draft_model_name:
+                        resolved_model_name = _draft_model_name
+                        actual_model_name = _draft_model_name
+                        if _draft_model_name.lower().startswith("claude"):
+                            stream_provider = "claude"
+                            stream_cfg = ({}, {})  # Claude draft uses the dedicated generator; kwargs unused
+                        else:
+                            from google.genai import types as _draft_types
+                            stream_provider = "gemini"
+                            _draft_cfg_kwargs: dict[str, Any] = dict(
+                                temperature=0.2,
+                                max_output_tokens=int(getattr(settings, "draft_max_output_tokens", 0) or 65536),
+                            )
+                            # Gemma-4 is a thinking model whose thinking + answer SHARE the output budget
+                            # and defaults to HEAVY thinking → slow drafts with most tokens burned on
+                            # hidden reasoning. Force minimal thinking for a gemma draft engine here too
+                            # (the section pipeline already does this via _build_gemini_config; this covers
+                            # the single-call draft path). Other gemini models don't accept thinking_level,
+                            # so apply it ONLY for gemma.
+                            try:
+                                from app.services.adapters.document_ai import _is_gemma_model as _dm_is_gemma
+                                if _dm_is_gemma(_draft_model_name):
+                                    _dlvl = str(getattr(settings, "gemma_thinking_level", "minimal") or "minimal").strip().lower()
+                                    if _dlvl in ("minimal", "high"):
+                                        _draft_cfg_kwargs["thinking_config"] = _draft_types.ThinkingConfig(thinking_level=_dlvl)
+                            except Exception:
+                                pass
+                            stream_cfg = _draft_types.GenerateContentConfig(**_draft_cfg_kwargs)
+
+                    # ── DRAFT PIPELINE (4-stage: analyze → fact inventory → per-section draft → audit) ──
+                    # Structure-first successor to the single-call draft; scales to long templates without
+                    # the single-call output-token ceiling and preserves the template's own section order.
+                    # On ANY failure we fall through to the single-call draft (the `prompt` built above) so
+                    # the user always gets a draft. Progress streams live; the finished document streams once
+                    # at the end (buffered internally through audit+repair — never appended twice).
+                    _draft_pipeline_done = False
+                    _draft_typography = None
+                    _draft_tiptap_json = None
+                    _draft_tiptap_sections = None
+                    _draft_legal_section_doc = None
+                    if is_draft and (template_text or "").strip():
+                        _fi_key = _draft_factinv_key(folder_name, user_id, doc_texts)
+                        _pipe_final = None
+                        # RAG: the pipeline retrieves top-chunks from THIS case's vector store
+                        # (per-facet for the fact matrix, per-section for drafting) instead of
+                        # dumping the whole corpus. Build a retrieve callback scoped to the
+                        # supporting file_ids; disable via llm_config draft_use_rag=false.
+                        _draft_retrieve = None
+                        try:
+                            _use_rag = bool(llm_config.get("draft_use_rag", True))
+                        except Exception:
+                            _use_rag = True
+                        _rag_fids = [str(d.get("file_id")) for d in doc_texts if d.get("file_id")]
+                        _rag_fids = [x for x in _rag_fids if x][:64]
+                        if _use_rag and _rag_fids:
+                            from app.services.learning_document_retrieval import get_relevant_chunks as _grc_draft
+
+                            def _draft_rerank_chunks(_query: str, _chunks: list[dict], _k: int) -> list[dict]:
+                                # Dependency-free rerank + diversity for drafting. The DB already does
+                                # hybrid vector/full-text RRF; this second pass makes the final prompt
+                                # less redundant: 5 best relevant chunks, 2 corroborating chunks from
+                                # different documents where possible, and 1 neighbour context chunk.
+                                _limit = 8 if (_k or 0) >= 20 else max(1, min(_k or 8, 12))
+                                _tokens = {
+                                    t for t in re.findall(r"[A-Za-z0-9]{3,}", (_query or "").lower())
+                                    if t not in {"the", "and", "for", "with", "this", "that", "section", "exact"}
+                                }
+
+                                def _score(_ch: dict) -> float:
+                                    _text = str(_ch.get("content") or "").lower()
+                                    _sim = float(_ch.get("similarity_score") or 0.0)
+                                    _overlap = sum(1 for t in _tokens if t in _text)
+                                    return (_sim * 3.0) + min(_overlap, 12)
+
+                                _ranked = sorted(_chunks or [], key=_score, reverse=True)
+                                _selected: list[dict] = []
+                                _seen_ids: set[str] = set()
+
+                                def _add(_ch: dict) -> bool:
+                                    _cid = str(_ch.get("chunk_id") or _ch.get("source_id") or id(_ch))
+                                    if _cid in _seen_ids:
+                                        return False
+                                    _seen_ids.add(_cid)
+                                    _selected.append(_ch)
+                                    return True
+
+                                _primary = [c for c in _ranked if not ((c.get("metadata") or {}).get("neighbor"))]
+                                for _ch in _primary:
+                                    if len(_selected) >= min(5, _limit):
+                                        break
+                                    _add(_ch)
+
+                                _used_docs = {str((c.get("metadata") or {}).get("document_name") or "") for c in _selected}
+                                _corroborating = 0
+                                for _ch in _primary:
+                                    if len(_selected) >= _limit or _corroborating >= 2:
+                                        break
+                                    _doc = str((_ch.get("metadata") or {}).get("document_name") or "")
+                                    if _doc and _doc not in _used_docs and _add(_ch):
+                                        _used_docs.add(_doc)
+                                        _corroborating += 1
+
+                                for _ch in _ranked:
+                                    if len(_selected) >= _limit:
+                                        break
+                                    if (_ch.get("metadata") or {}).get("neighbor") and _add(_ch):
+                                        break
+
+                                for _ch in _ranked:
+                                    if len(_selected) >= _limit:
+                                        break
+                                    _add(_ch)
+                                return _selected[:_limit]
+
+                            def _draft_retrieve(_q: str, _k: int):
+                                try:
+                                    _raw = _grc_draft(
+                                        user_id=user_id,
+                                        case_id=folder_name,
+                                        query=_q,
+                                        file_ids=_rag_fids,
+                                        top_k=_k,
+                                        include_surrounding_chunks=True,
+                                        # 0.30 was below the semantic similarity floor (~0.333),
+                                        # so it could not filter weak semantic hits. 0.42 screens
+                                        # obvious misses while retrieve_learning_chunk_hits still
+                                        # falls back to top rows if everything is below floor.
+                                        similarity_floor=0.42,
+                                    ) or []
+                                except Exception as _rex:
+                                    logger.warning("[Route:intelligent_chat_stream] draft RAG retrieval error: %s", _rex)
+                                    return []
+                                _raw = _draft_rerank_chunks(_q, _raw, _k or 8)
+                                _norm = []
+                                for _ch in _raw:
+                                    _m = _ch.get("metadata") or {}
+                                    _norm.append({
+                                        "text": str(_ch.get("content") or "").strip(),
+                                        "name": str(_m.get("document_name") or "document"),
+                                        "page": _ch.get("page_number"),
+                                        "score": float(_ch.get("similarity_score") or 0.0),
+                                        "neighbor": bool(_m.get("neighbor")),
+                                    })
+                                return _norm
+                        # Guardian model for the audit + repair passes (Stage D grounding/format
+                        # audit + section repair, Stage E slot recovery). This is the model that
+                        # CHECKS the draft, and it is billed on every draft — so it is explicitly
+                        # selectable rather than silently forced.
+                        #   1) frontend guardian dropdown (chat_request.guardian_model)
+                        #   2) DRAFT_GUARDIAN_MODEL in .env
+                        #   3) auto: Opus when an Anthropic key exists, else gemini-3.1-pro
+                        # Same allowlist as the structure model, so an arbitrary model string
+                        # cannot be injected through the request.
+                        # Guardian is OPT-IN. It is OFF by default (DRAFT_GUARDIAN_ENABLED=false): the
+                        # Stage D/E audit passes burned the guardian model's tokens for little gain, so
+                        # drafts now skip them unless an admin turns it back on. The frontend guardian
+                        # dropdown can ALSO force it off per-draft with a "disabled"/"none"/"off" value.
+                        _draft_engine_lc = (resolved_model_name or "").lower()
+                        _req_guardian = (getattr(chat_request, "guardian_model", None) or "").strip()
+                        _env_guardian = (getattr(settings, "draft_guardian_model", "") or "").strip()
+                        # Guardian is OFF by default. It runs only when explicitly turned on:
+                        #   • the dropdown picks an allowed guardian model → runs (per-draft opt-in), OR
+                        #   • the master switch DRAFT_GUARDIAN_ENABLED=true → auto/env resolves the model.
+                        # Force-OFF when the dropdown sends a disable sentinel, or when nothing is chosen
+                        # AND the master switch is off. So "Disabled"/"Auto(off)" skip; picking a model runs.
+                        _explicit_off = _req_guardian.lower() in {"disabled", "disable", "none", "off", "no", "skip"}
+                        _explicit_model = _req_guardian in _GUARDIAN_ALLOWED_MODELS
+                        _guardian_disabled = _explicit_off or (
+                            not _explicit_model and not bool(getattr(settings, "draft_guardian_enabled", False))
                         )
-                        async for delta in _stream_blocking_generator(
-                            loop,
-                            lambda: provider_generator(
-                                prompt,
-                                model_name=resolved_model_name,
-                                gen_kwargs=provider_gen_kwargs,
-                                llm_params=provider_llm_params,
-                            ),
-                            label=stream_provider,
-                        ):
+                        if _guardian_disabled:
+                            _guardian_model = None
+                            _guardian_src = "disabled"
+                            logger.info(
+                                "[Route:intelligent_chat_stream] folder=%s draft GUARDIAN DISABLED — "
+                                "Stage D/E audit skipped (no guardian tokens). engine=%s structure=%s",
+                                folder_name, resolved_model_name, _analysis_model,
+                            )
+                        else:
+                            if _req_guardian in _GUARDIAN_ALLOWED_MODELS:
+                                _guardian_model = _req_guardian
+                                _guardian_src = "request"
+                            elif _env_guardian in _GUARDIAN_ALLOWED_MODELS:
+                                _guardian_model = _env_guardian
+                                _guardian_src = "env"
+                            elif _draft_engine_lc.startswith("claude-opus"):
+                                _guardian_model = resolved_model_name
+                                _guardian_src = "auto(engine-is-opus)"
+                            elif getattr(settings, "anthropic_api_key", "") or getattr(settings, "ANTHROPIC_API_KEY", ""):
+                                _guardian_model = "claude-opus-4-8"
+                                _guardian_src = "auto(anthropic-key)"
+                            else:
+                                _guardian_model = "gemini-3.1-pro-preview"
+                                _guardian_src = "auto(no-anthropic-key)"
+                            logger.info(
+                                "[Route:intelligent_chat_stream] folder=%s draft engine=%s structure=%s "
+                                "guardian(audit)=%s via=%s",
+                                folder_name, resolved_model_name, _analysis_model,
+                                _guardian_model, _guardian_src,
+                            )
+                        # Mark where this draft's token entries begin so we can report the
+                        # per-model burn for JUST this draft after the pipeline finishes.
+                        _draft_usage_start = usage_entry_count(usage_session_key)
+                        # Stable short id for THIS draft — shown in the per-draft token table
+                        # and surfaced to the client so a draft's cost can be correlated.
+                        _draft_id = f"drf_{uuid.uuid4().hex[:12]}"
+                        try:
+                            from app.services import template_drafting as _tpl
+                            async for _pkind, _pdata in _tpl.run_template_drafting_pipeline(
+                                template_text=template_text,
+                                template_layout=_draft_template_layout,
+                                doc_texts=doc_texts,
+                                query_text=query_text,
+                                draft_engine=resolved_model_name,
+                                analysis_model=_analysis_model,
+                                user_id=user_id,
+                                run_blocking=_draft_run_blocking,
+                                doc_title=None,
+                                cached_fact_inventory=_DRAFT_FACTINV_CACHE.get(_fi_key),
+                                enable_audit=not _guardian_disabled,
+                                retrieve_fn=_draft_retrieve,
+                                audit_model=_guardian_model,
+                            ):
+                                if _pkind == "progress":
+                                    yield _sse(_pdata)
+                                elif _pkind == "outline":
+                                    yield _sse({"type": "draft_outline", **_pdata})
+                                elif _pkind == "section":
+                                    # Per-section content for a section-by-section draft UI.
+                                    yield _sse({"type": "draft_section", **_pdata})
+                                elif _pkind == "final":
+                                    _pipe_final = _pdata
+                        except Exception as _pipe_exc:
+                            logger.warning(
+                                "[Route:intelligent_chat_stream] folder=%s draft pipeline failed (%s); "
+                                "falling back to single-call draft", folder_name, _pipe_exc,
+                            )
+                            _pipe_final = None
+                        # NOTE: the per-draft token table is logged LATER (after the whole
+                        # draft finishes, incl. the single-call fallback below when the
+                        # pipeline fails) so it captures the FULL cost, not just the part
+                        # that ran before a failure. `_draft_usage_start` marks the slice.
+                        _draft_model_for_log = resolved_model_name
+                        if _pipe_final and (_pipe_final.get("answer") or "").strip():
+                            _final_md = _pipe_final["answer"]
+                            _draft_typography = _pipe_final.get("typography")
+                            _draft_tiptap_json = _pipe_final.get("tiptap_json")
+                            _draft_tiptap_sections = _pipe_final.get("tiptap_sections")
+                            _draft_legal_section_doc = _pipe_final.get("legal_section_doc")
+                            if _pipe_final.get("fact_inventory"):
+                                _draft_factinv_cache_put(_fi_key, _pipe_final["fact_inventory"])
+                            answer_parts.append(_final_md)
                             streamed = True
-                            answer_parts.append(delta)
-                            yield _sse({"type": "chunk", "text": delta})
+                            _draft_pipeline_done = True
+                            async for _sl in _yield_text_as_streaming_chunks(
+                                _sse, _final_md, delay_ms=stream_delay_ms
+                            ):
+                                yield _sl
+
+                    if _draft_pipeline_done:
+                        pass  # draft already produced + streamed by the 4-stage pipeline above
+                    elif stream_provider == "claude":
+                        # ── Claude streaming path (true SSE via thread + queue) ────────
+                        claude_gen_kwargs, claude_llm_params = stream_cfg
+                        _SENTINEL = object()
+                        chunk_queue: asyncio.Queue = asyncio.Queue()
+                        claude_stream_error: list[str] = []
+
+                        def _run_claude_stream():
+                            try:
+                                # Draft mode on a Claude engine: attach the template PDF as a document
+                                # block via the dedicated generator (Claude reads PDFs natively).
+                                if is_draft and _draft_attach_pdf and _draft_template_bytes:
+                                    _claude_gen = claude_draft_stream_generator(
+                                        prompt,
+                                        model_name=resolved_model_name,
+                                        pdf_bytes=_draft_template_bytes,
+                                        pdf_mime=(_tmpl_mime or "application/pdf"),
+                                        max_tokens=int(getattr(settings, "draft_max_output_tokens", 0) or 32000),
+                                    )
+                                else:
+                                    _claude_gen = claude_stream_generator(
+                                        prompt,
+                                        model_name=resolved_model_name,
+                                        gen_kwargs=claude_gen_kwargs,
+                                        llm_params=claude_llm_params,
+                                    )
+                                for chunk_text in _claude_gen:
+                                    loop.call_soon_threadsafe(chunk_queue.put_nowait, chunk_text)
+                            except Exception as exc:
+                                claude_stream_error.append(str(exc))
+                            finally:
+                                loop.call_soon_threadsafe(chunk_queue.put_nowait, _SENTINEL)
+
+                        stream_future = loop.run_in_executor(None, _run_claude_stream)
+                        while True:
+                            chunk_text = await chunk_queue.get()
+                            if chunk_text is _SENTINEL:
+                                break
+                            if not chunk_text:
+                                continue
+                            streamed = True
+                            answer_parts.append(chunk_text)
+                            async for sse_line in _yield_text_as_streaming_chunks(
+                                _sse, chunk_text, delay_ms=stream_delay_ms
+                            ):
+                                yield sse_line
+                        try:
+                            await stream_future
+                        except Exception as exc:
+                            claude_stream_error.append(str(exc))
+                        if claude_stream_error:
+                            raise RuntimeError(f"claude_stream_failed: {claude_stream_error[0]}")
+                    elif stream_provider == "deepseek":
+                        # ── DeepSeek streaming path (thread + queue, same as Claude) ──
+                        deepseek_gen_kwargs, deepseek_llm_params = stream_cfg
+                        _SENTINEL_DS = object()
+                        ds_chunk_queue: asyncio.Queue = asyncio.Queue()
+                        deepseek_stream_error: list[str] = []
+
+                        def _run_deepseek_stream():
+                            try:
+                                for chunk_text in deepseek_stream_generator(
+                                    prompt,
+                                    model_name=resolved_model_name,
+                                    gen_kwargs=deepseek_gen_kwargs,
+                                    llm_params=deepseek_llm_params,
+                                ):
+                                    loop.call_soon_threadsafe(ds_chunk_queue.put_nowait, chunk_text)
+                            except Exception as exc:
+                                deepseek_stream_error.append(str(exc))
+                            finally:
+                                loop.call_soon_threadsafe(ds_chunk_queue.put_nowait, _SENTINEL_DS)
+
+                        ds_stream_future = loop.run_in_executor(None, _run_deepseek_stream)
+                        while True:
+                            chunk_text = await ds_chunk_queue.get()
+                            if chunk_text is _SENTINEL_DS:
+                                break
+                            if not chunk_text:
+                                continue
+                            streamed = True
+                            answer_parts.append(chunk_text)
+                            async for sse_line in _yield_text_as_streaming_chunks(
+                                _sse, chunk_text, delay_ms=stream_delay_ms
+                            ):
+                                yield sse_line
+                        try:
+                            await ds_stream_future
+                        except Exception as exc:
+                            deepseek_stream_error.append(str(exc))
+                        if deepseek_stream_error:
+                            raise RuntimeError(f"deepseek_stream_failed: {deepseek_stream_error[0]}")
                     else:
                         # ── Gemini streaming path ─────────────────────────────────────
                         gemini_config = stream_cfg
-                        client = genai.Client(api_key=settings.gemini_api_key)
+                        # Admin-panel temperature control for PAID (non-Gemma) models: apply the
+                        # temperature from the LLM Management → Summarization Chat panel
+                        # (summarization_chat_config.model_temperature), which is synced, instead of the
+                        # unsynced agent_prompts temp — matching "gemini → paid + admin config". Gemma
+                        # keeps its hardcoded temperature (set in _build_gemini_config), so it is NOT
+                        # touched here (guarded by `not _gemma_capped_chat`).
+                        if not is_draft and not _gemma_capped_chat:
+                            _panel_temp = (llm_config or {}).get("model_temperature")
+                            if _panel_temp is not None:
+                                try:
+                                    _pt = float(_panel_temp)
+                                    if isinstance(gemini_config, dict):
+                                        gemini_config["temperature"] = _pt
+                                    else:
+                                        gemini_config.temperature = _pt
+                                    logger.info(
+                                        "[Route:intelligent_chat_stream] non-gemma temperature from LLM Management panel -> %.2f",
+                                        _pt,
+                                    )
+                                except Exception:
+                                    pass
+                        # Comprehensive asks: OPTIONALLY nudge temperature up so the model writes a
+                        # fuller, less terse answer. The agent_prompts row uses a low temp (~0.3-0.7)
+                        # tuned for precise specific-question answers, which suppresses long-form output.
+                        # Gemma supports up to 2.0; 1.0 gives markedly fuller output while the
+                        # "grounded ONLY in the documents / do not invent" prompt keeps it accurate.
+                        # GATED behind COMPREHENSIVE_TEMP_NUDGE (default False) so the admin-configured
+                        # temperature is honored verbatim by default — per the contract "model +
+                        # temperature come from admin config; only thinking is hardcoded minimal". This
+                        # object is shared with the non-stream deep fallback (files.py ~_ns_cfg), so
+                        # leaving it unmutated means the admin temp reaches BOTH paths.
+                        # (Draft mode keeps its own precise temperature — do not nudge it.)
+                        if is_comprehensive and not is_draft and bool(getattr(settings, "comprehensive_temp_nudge", False)):
+                            try:
+                                _nudged = None
+                                if isinstance(gemini_config, dict):
+                                    if float(gemini_config.get("temperature") or 0.0) < 1.0:
+                                        gemini_config["temperature"] = 1.0
+                                        _nudged = 1.0
+                                else:
+                                    _cur_temp = getattr(gemini_config, "temperature", None)
+                                    if _cur_temp is None or float(_cur_temp) < 1.0:
+                                        gemini_config.temperature = 1.0
+                                        _nudged = 1.0
+                                if _nudged is not None:
+                                    logger.info(
+                                        "[Route:intelligent_chat_stream] comprehensive temperature nudged -> %.2f "
+                                        "(used for streaming AND the non-stream deep fallback)", _nudged,
+                                    )
+                            except Exception:
+                                pass
+                        # Gemma models must use the dedicated Gemma key (consistent with
+                        # document_ai._gemini_client); other gemini models use GEMINI_API_KEY.
+                        _stream_tail = (resolved_model_name or "").split("/")[-1].lower()
+                        _stream_key = (
+                            (settings.gemma_api_key or "").strip()
+                            if _stream_tail.startswith("gemma") and (settings.gemma_api_key or "").strip()
+                            else settings.gemini_api_key
+                        )
+                        client = genai.Client(api_key=_stream_key)
+                        # Deep/extreme asks use this SAME single streaming call — the full document +
+                        # the no-ceiling, follow-the-user's-structure prompt built above. The earlier
+                        # per-section multi-pass was removed: splitting the report into grouped passes
+                        # fed each pass only per-group RAG snippets (not the whole case), which made
+                        # deep answers SHORTER, slower (5+ throttle-prone calls), and more
+                        # hallucination-prone than one call over the complete document.
+                        # Draft mode: a PDF-capable draft model (e.g. gemini-3.1-pro-preview) reads the
+                        # uploaded template PDF directly for full-fidelity reproduction, so attach it as
+                        # a file Part alongside the grounding prompt. gemma / non-PDF templates instead
+                        # carry the template as TEXT inside `prompt` (built above), so contents=prompt.
+                        # `contents` wants list[PartUnionDict]; list is invariant, so a bare list[Part]
+                        # is rejected by the type checker even though the SDK accepts it. Import hoisted so
+                        # the annotation resolves — a local annotation is never evaluated at runtime, so
+                        # this adds no cost on the non-draft path.
+                        from google.genai import types as _gtypes
+                        _draft_contents: list[_gtypes.PartUnionDict] | None = None
+                        if is_draft and _draft_attach_pdf and _draft_template_bytes:
+                            _draft_contents = [
+                                _gtypes.Part.from_bytes(data=_draft_template_bytes, mime_type="application/pdf"),
+                                _gtypes.Part.from_text(text=prompt),
+                            ]
+                        # Free-tier Gemma: skip the streaming attempt entirely and use the single
+                        # non-stream call below. Streaming + the non-stream fallback each send the
+                        # full ~13K input (~26K/min → 429s the 16K/min budget); one non-stream send
+                        # fits. Raising drops into the `except` → the deep non-stream fallback, which
+                        # runs the SAME prompt with the 20K budget + temperature nudge. Trade-off: no
+                        # token-by-token streaming. Disable via GEMMA_DISABLE_STREAMING=false.
+                        if not is_draft:
+                            _gemma_skip = False
+                            try:
+                                from app.services.adapters.document_ai import _is_gemma_model as _is_gemma_skip_fn
+                                _gemma_skip = _is_gemma_skip_fn(resolved_model_name) and bool(
+                                    getattr(settings, "gemma_disable_streaming", True)
+                                )
+                            except Exception:
+                                _gemma_skip = False
+                            if _gemma_skip:
+                                logger.info(
+                                    "[Route:intelligent_chat_stream] gemma streaming disabled — single "
+                                    "non-stream call (avoids the stream+fallback double-send that 429s "
+                                    "the free-tier 16K/min input budget)"
+                                )
+                                raise RuntimeError("gemma_stream_disabled")
+                        # Pace the STREAMING gemma call too (the retry wrapper only paces the
+                        # non-stream path). Runs in the executor so the blocking sleep never stalls
+                        # the event loop; feeds the same rolling RPM + input-TPM window.
+                        try:
+                            from app.services.adapters.document_ai import (
+                                _is_gemma_model as _is_gemma_stream,
+                                _estimate_input_tokens as _est_tokens_stream,
+                                _pace_gemma_call as _pace_stream,
+                            )
+                            if _is_gemma_stream(resolved_model_name):
+                                _pre_contents = _draft_contents if _draft_contents is not None else prompt
+                                _pre_est = _est_tokens_stream(_pre_contents)
+                                await loop.run_in_executor(
+                                    None,
+                                    lambda: _pace_stream(resolved_model_name, est_input_tokens=_pre_est),
+                                )
+                        except Exception:
+                            pass
                         stream_iter = client.models.generate_content_stream(
                             model=resolved_model_name,
-                            contents=prompt,
+                            contents=(_draft_contents if _draft_contents is not None else prompt),
                             config=gemini_config,
                         )
                         # Generous limits: short per-chunk timeouts were stopping the stream mid-answer
                         # when the model paused between chunks, producing truncated UI responses.
-                        first_chunk_timeout_s = min(180.0, max(90.0, non_stream_timeout_s / 2.0))
+                        # Comprehensive/deep asks send a huge prompt (full doc + structure), so the
+                        # model needs much longer to emit the FIRST token. Give it room before falling
+                        # back to non-stream — a premature fallback both loses streaming AND (for deep)
+                        # routes through a path that truncates the prompt.
+                        if is_comprehensive:
+                            first_chunk_timeout_s = min(360.0, max(180.0, non_stream_timeout_s))
+                        else:
+                            first_chunk_timeout_s = min(180.0, max(90.0, non_stream_timeout_s / 2.0))
+                        # Gemma with minimal thinking emits its first token in ~1-2s when healthy; a
+                        # long silence means the free-tier input-TPM quota is SATURATED and the
+                        # request is being throttled (it keeps hanging, it does not recover). Cap the
+                        # first-chunk wait so a throttled Gemma call falls back in ~45s instead of
+                        # freezing the UI for 3 minutes.
+                        try:
+                            from app.services.adapters.document_ai import _is_gemma_model as _is_gemma_to
+                            if _is_gemma_to(resolved_model_name):
+                                first_chunk_timeout_s = min(first_chunk_timeout_s, 45.0)
+                        except Exception:
+                            pass
                         next_chunk_timeout_s = 600.0
                         agg_full = ""
+                        # _got_content tracks ANY streamed content (gemma-4's thought parts count too),
+                        # so the long first-chunk timeout only applies until the model STARTS emitting,
+                        # not between later chunks. `streamed` (which gates the non-stream fallback) is
+                        # still set only when real ANSWER text flows.
+                        _got_content = False
+                        # Stream diagnostics: how many type=chunk events actually left this loop, and
+                        # when. "Answer appears all at once" has three different causes that look
+                        # identical in the UI — the provider emitted ONE big delta, the stream never
+                        # produced answer text (so the non-stream fallback replayed it whole), or the
+                        # deltas were real but arrived faster than a repaint. These numbers separate them.
+                        _dbg_chunks = 0
+                        _dbg_chars = 0
+                        _dbg_t0 = time.monotonic()
+                        _dbg_t_first: float | None = None
                         while True:
-                            chunk_timeout_s = first_chunk_timeout_s if not streamed else next_chunk_timeout_s
+                            chunk_timeout_s = first_chunk_timeout_s if not _got_content else next_chunk_timeout_s
                             try:
                                 chunk = await asyncio.wait_for(
                                     loop.run_in_executor(None, lambda it=stream_iter: next(it, None)),
@@ -2696,9 +4572,17 @@ async def intelligent_chat_stream(
                                     "outputTokens": completion_tokens,
                                     "totalTokens": total_tokens,
                                 }
-                            piece = _gemini_chunk_text(chunk)
+                            piece, thought_piece = _gemini_chunk_parts(chunk)
+                            # gemma-4 streams its reasoning as thought parts (chunk.text excludes
+                            # them). Surface them LIVE as "thinking" so the UI shows activity during a
+                            # long thinking phase instead of freezing — and so the loop never skips
+                            # every chunk and silently falls back to a non-stream dump.
+                            if thought_piece:
+                                _got_content = True
+                                yield _sse({"type": "thinking", "text": thought_piece})
                             if not piece:
                                 continue
+                            _got_content = True
                             if not agg_full:
                                 delta = piece
                                 agg_full = piece
@@ -2711,8 +4595,20 @@ async def intelligent_chat_stream(
                             if not delta:
                                 continue
                             streamed = True
+                            if _dbg_t_first is None:
+                                _dbg_t_first = time.monotonic() - _dbg_t0
+                            _dbg_chunks += 1
+                            _dbg_chars += len(delta)
                             answer_parts.append(delta)
                             yield _sse({"type": "chunk", "text": delta})
+                        logger.info(
+                            "[Route:intelligent_chat_stream] STREAM-STATS folder=%s model=%s streamed=%s "
+                            "chunks=%d chars=%d avg_delta=%.0f first_token=%s total=%.2fs",
+                            folder_name, resolved_model_name, streamed, _dbg_chunks, _dbg_chars,
+                            (_dbg_chars / _dbg_chunks) if _dbg_chunks else 0,
+                            ("%.2fs" % _dbg_t_first) if _dbg_t_first is not None else "never",
+                            time.monotonic() - _dbg_t0,
+                        )
                     if streamed:
                         yield _sse({"type": "thinking", "text": "Finalizing response and citations...\n"})
             except Exception as stream_exc:
@@ -2748,47 +4644,178 @@ async def intelligent_chat_stream(
                         if learning_chunk_addon
                         else _lr_core_ns
                     )
-                # Resolve the actual model from agent_prompts for non-stream fallback
-                try:
-                    _fb_provider, _fb_model, _ = stream_config_for_folder_chat(
-                        for_summary=True,
-                        summarization_llm_config=llm_config,
-                        agent_name=learning_agent_name,
-                        model_name_override=selected_model_name,
-                    )
-                    actual_model_name = _fb_model
-                except Exception:
-                    pass
+                # The model was already resolved for the streaming attempt — reuse it. (Re-resolving
+                # here via stream_config_for_folder_chat just re-ran _generation_config and logged the
+                # agent's raw temperature=0.70, which looked like the generation temp but was a
+                # discarded lookup. The real generation config, _ns_cfg below, carries the nudged 1.0.)
+                _reused_model = locals().get("resolved_model_name")
+                if _reused_model:
+                    actual_model_name = _reused_model
 
-                qa_result = await _run_blocking(
-                    lambda: _call_gemini_for_qa(
-                        _truncate_prompt(effective_query_text, max_chars=12000, label="non_stream_query"),
-                        doc_texts,
-                        query_intent="summary",
-                        output_format="structured",
-                        system_instruction=_truncate_prompt(
-                            non_stream_system_instruction,
-                            max_chars=64000,
-                            label="non_stream_system_instruction",
+                # ── Comprehensive/deep fallback: run the FULL prompt non-stream ──────────
+                # The generic QA path below truncates the user prompt to 12K chars and uses a
+                # summary template — fatal for a long, structured deep ask (it drops the later
+                # numbered points and ignores the completion contract). For comprehensive/deep
+                # gemini asks, run the SAME `prompt` (full doc + structure) non-stream instead.
+                # These were assigned inside the streaming try above; on an early failure they may
+                # be unbound, so read them defensively (locals().get never raises for unbound names).
+                _ns_provider = locals().get("stream_provider")
+                _ns_model = locals().get("resolved_model_name")
+                _ns_cfg = locals().get("gemini_config")
+                _ns_client = locals().get("client")
+                _ns_prompt = locals().get("prompt")
+                # Draft mode: reuse the same [template PDF Part, prompt] contents built for streaming so
+                # the non-stream fallback also drafts from the attached template (not text-only). When no
+                # PDF Part was attached (gemma / text templates), `_ns_draft` is None and we send the
+                # prompt, which already carries the template text.
+                _ns_draft = locals().get("_draft_contents")
+                _deep_fallback_done = False
+                # Model the generic-QA path below runs on. Normally the admin-selected model; a failed
+                # free-tier gemma deep call retargets this at its fallback (see the except handler).
+                _qa_model_override = selected_model_name
+                if (
+                    is_comprehensive and not learning_mode and _ns_provider == "gemini"
+                    and _ns_model and _ns_cfg is not None and _ns_client is not None and _ns_prompt
+                ):
+                    try:
+                        from app.services.adapters.document_ai import _gemini_generate_content_retrying
+                        _ns_resp = await _run_blocking(
+                            lambda: _gemini_generate_content_retrying(
+                                _ns_client,
+                                model=_ns_model,
+                                contents=(_ns_draft if _ns_draft is not None else _ns_prompt),
+                                config=_ns_cfg,
+                            ),
+                            timeout_s=non_stream_timeout_s,
+                            timeout_message="gemini_non_stream_deep",
+                        )
+                        _ns_text = (getattr(_ns_resp, "text", "") or "").strip()
+                        if _ns_text:
+                            _ns_um = getattr(_ns_resp, "usage_metadata", None)
+                            if _ns_um is not None:
+                                _p = int(getattr(_ns_um, "prompt_token_count", 0) or 0)
+                                _c = int(getattr(_ns_um, "candidates_token_count", 0) or 0)
+                                stream_usage = {
+                                    "provider": "gemini",
+                                    "model": _ns_model,
+                                    "inputTokens": _p,
+                                    "outputTokens": _c,
+                                    "totalTokens": int(getattr(_ns_um, "total_token_count", 0) or 0) or (_p + _c),
+                                }
+                            answer_parts = [_ns_text]
+                            async for sse_line in _yield_text_as_streaming_chunks(
+                                _sse, _ns_text, delay_ms=stream_delay_ms
+                            ):
+                                yield sse_line
+                            yield _sse({"type": "thinking", "text": "Response generated. Preparing final metadata...\n"})
+                            _deep_fallback_done = True
+                    except Exception as _ns_deep_exc:
+                        # Free-tier Gemma input-tokens-per-minute quota is unrecoverable by retrying
+                        # (see GemmaInputTPMExceeded) — surface a clear, actionable message instead
+                        # of falling through to the generic QA path (which would 429 the same way,
+                        # then hang until the step timeout and show "Something went wrong").
+                        try:
+                            from app.services.adapters.document_ai import GemmaInputTPMExceeded as _TPMExc
+                        except Exception:
+                            _TPMExc = ()  # type: ignore[assignment]
+                        _is_tpm_exc = bool(_TPMExc) and isinstance(_ns_deep_exc, _TPMExc)
+                        if _gemma_capped_chat or _is_tpm_exc:
+                            # Retry a failed free-tier gemma deep call on its fallback chain
+                            # (26b -> 31b -> flash-lite), reusing the drafting pipeline's chain so both
+                            # share one definition. _call_gemini_for_qa resolves the API key per model
+                            # (_gemini_api_key_for_model), so the paid backstop uses GEMINI_API_KEY.
+                            #
+                            # BUT never chain a SECOND gemma call after a timeout or a TPM breach: the
+                            # deep call runs via run_in_executor, so a timed-out thread is NOT cancelled
+                            # and still holds part of the free 16K/min input budget, and a TPM breach
+                            # means that budget is already gone. Another gemma call would stack on the
+                            # same pool and 429. The paid backstop draws on a different key/quota, so it
+                            # is safe in both cases — drop the gemma hops and jump straight to it.
+                            from app.services.template_drafting import _reliable_alt_chain as _alt_chain
+                            from app.services.adapters.document_ai import _is_gemma_model as _is_gemma
+                            _fb_chain = _alt_chain(_ns_model or selected_model_name or "")
+                            _skip_gemma_hops = _is_tpm_exc or isinstance(_ns_deep_exc, TimeoutError)
+                            if _skip_gemma_hops:
+                                _fb_chain = [m for m in _fb_chain if not _is_gemma(m)]
+                            if _fb_chain:
+                                _qa_model_override = _fb_chain[0]
+                                logger.warning(
+                                    "[Route:intelligent_chat_stream] folder=%s gemma deep fallback failed (%s) — retrying generic QA on %s (skip_gemma_hops=%s)",
+                                    folder_name,
+                                    _ns_deep_exc,
+                                    _qa_model_override,
+                                    _skip_gemma_hops,
+                                )
+                            else:
+                                logger.warning(
+                                    "[Route:intelligent_chat_stream] folder=%s gemma deep fallback failed (%s) — no usable fallback, clean message",
+                                    folder_name,
+                                    _ns_deep_exc,
+                                )
+                                yield _sse({
+                                    "type": "error",
+                                    "message": _GEMMA_INPUT_TPM_USER_MESSAGE if _is_tpm_exc else _GEMMA_SLOW_TIMEOUT_USER_MESSAGE,
+                                })
+                                return
+                        else:
+                            logger.warning(
+                                "[Route:intelligent_chat_stream] folder=%s deep non-stream fallback failed (%s) — using generic QA",
+                                folder_name,
+                                _ns_deep_exc,
+                            )
+
+                if not _deep_fallback_done:
+                    # Run via the SESSION-BINDING wrapper so the fallback model's REAL token
+                    # usage is accumulated into the request's token session (instead of being
+                    # logged immediately and lost, which forced a bogus "estimated" record with
+                    # input≈2 tokens derived from the short query text). _qa_fallback_ran then
+                    # suppresses the estimate below since we now have the real numbers.
+                    _qa_fallback_ran = True
+                    # Comprehensive/deep asks that land HERE (streaming + deep fallback failed, e.g.
+                    # under a 503 / saturated free tier) must NOT be answered with the terse "summary"
+                    # template — that is what made a "detailed summary" come back as ~1 page. Use a
+                    # non-summary intent (so for_summary=False keeps the full output budget) and force
+                    # an exhaustive, multi-section answer. Narrow asks keep the concise summary.
+                    _qa_intent = "detailed" if is_comprehensive else "summary"
+                    _qa_extra = (
+                        "Write a THOROUGH, exhaustive, multi-section answer covering ALL material "
+                        "facts, issues, dates, parties, amounts, and reasoning from the record — do "
+                        "not condense into a brief summary. When a chronology/timeline is asked for, "
+                        "include a detailed Markdown table (Date | Event | Reference). Favor "
+                        "completeness over brevity."
+                    ) if is_comprehensive else None
+                    qa_result = await _draft_run_blocking(
+                        lambda: _call_gemini_for_qa(
+                            _truncate_prompt(effective_query_text, max_chars=12000, label="non_stream_query"),
+                            doc_texts,
+                            query_intent=_qa_intent,
+                            output_format="structured",
+                            extra_instructions=_qa_extra,
+                            system_instruction=_truncate_prompt(
+                                non_stream_system_instruction,
+                                max_chars=64000,
+                                label="non_stream_system_instruction",
+                            ),
+                            summarization_llm_config=llm_config,
+                            agent_name=learning_agent_name,
+                            model_name_override=_qa_model_override,
                         ),
-                        summarization_llm_config=llm_config,
-                        agent_name=learning_agent_name,
-                        model_name_override=selected_model_name,
-                    ),
-                    timeout_s=non_stream_timeout_s,
-                    timeout_message="gemini_non_stream_generation",
-                )
-                answer = (qa_result.get("answer") or "").strip()
-                if not answer:
-                    yield _sse({"type": "error", "message": "Could not generate an answer. Please try rephrasing your question."})
-                    return
-                source_docs = qa_result.get("source_documents", "")
-                if source_docs:
-                    source_names = [item.strip() for item in source_docs.split(",") if item.strip()]
-                answer_parts = [answer]
-                async for sse_line in _yield_text_as_streaming_chunks(_sse, answer):
-                    yield sse_line
-                yield _sse({"type": "thinking", "text": "Response generated. Preparing final metadata...\n"})
+                        timeout_s=non_stream_timeout_s,
+                        timeout_message="gemini_non_stream_generation",
+                    )
+                    answer = (qa_result.get("answer") or "").strip()
+                    if not answer:
+                        yield _sse({"type": "error", "message": "Could not generate an answer. Please try rephrasing your question."})
+                        return
+                    source_docs = qa_result.get("source_documents", "")
+                    if source_docs:
+                        source_names = [item.strip() for item in source_docs.split(",") if item.strip()]
+                    answer_parts = [answer]
+                    async for sse_line in _yield_text_as_streaming_chunks(
+                        _sse, answer, delay_ms=stream_delay_ms
+                    ):
+                        yield sse_line
+                    yield _sse({"type": "thinking", "text": "Response generated. Preparing final metadata...\n"})
 
             raw_answer = normalize_markdown_render_output("".join(answer_parts))
             if not raw_answer:
@@ -2904,7 +4931,7 @@ async def intelligent_chat_stream(
                     learning_payload["citations"] = _build_learning_citations_from_chunks(learning_grounding_chunks)
                 if isinstance(pq_fb, dict) and pq_fb:
                     LearningAgentController.register_popup_question(
-                        user_id=str(user_id),
+                        user_id=user_id,
                         folder_name=folder_name,
                         session_id=chat_request.session_id,
                         popup=pq_fb,
@@ -2925,14 +4952,19 @@ async def intelligent_chat_stream(
                         user_id, folder_name, chat_request.session_id, display_question
                     ).id,
                 )
-                await loop.run_in_executor(None, lambda: folder_service._append_message(
-                    folder_service._sessions.get(folder_name, {}).get(session_id),
-                    "user", display_question,
-                ) if folder_service._sessions.get(folder_name, {}).get(session_id) else None)
-                await loop.run_in_executor(None, lambda: folder_service._append_message(
-                    folder_service._sessions.get(folder_name, {}).get(session_id),
-                    "assistant", answer,
-                ) if folder_service._sessions.get(folder_name, {}).get(session_id) else None)
+
+                def _append_user_msg():
+                    sess = folder_service._sessions.get(folder_name, {}).get(session_id)
+                    if sess is not None:
+                        folder_service._append_message(sess, "user", display_question)
+
+                def _append_assistant_msg():
+                    sess = folder_service._sessions.get(folder_name, {}).get(session_id)
+                    if sess is not None:
+                        folder_service._append_message(sess, "assistant", answer)
+
+                await loop.run_in_executor(None, _append_user_msg)
+                await loop.run_in_executor(None, _append_assistant_msg)
                 sec_id = (chat_request.secret_id or "").strip() or None
 
                 # Build stable citations payload for persistence + UI.
@@ -2977,7 +5009,7 @@ async def intelligent_chat_stream(
             yield _sse({
                 "type": "metadata",
                 "session_id": session_id,
-                "method": "gemini_direct",
+                "method": ("template_draft" if is_draft else "gemini_direct"),
                 "routing_decision": "db_text_fallback",
                 "prompt_label": display_question if (chat_request.secret_id or "").strip() else None,
                 "used_secret_prompt": bool((chat_request.secret_id or "").strip()),
@@ -3006,7 +5038,10 @@ async def intelligent_chat_stream(
                     provider=stream_usage.get("provider"),
                     model_name=actual_model_name,
                 )
-            elif not streamed:
+            elif not streamed and not locals().get("_qa_fallback_ran"):
+                # Only estimate when NOTHING recorded real usage. When the non-stream QA
+                # fallback ran, its real token usage was already accumulated into the session
+                # (session-bound), so a rough estimate here would double-count and misreport.
                 record_token_usage(
                     context="gemini_direct_estimated",
                     usage={
@@ -3019,11 +5054,28 @@ async def intelligent_chat_stream(
                     provider="estimated",
                     model_name=actual_model_name,
                 )
+            # Per-draft, per-model token burn — logged HERE (after the whole draft,
+            # including any single-call fallback) so it reflects the COMPLETE cost of the
+            # draft, not just the part before a pipeline failure. Only fires for drafts.
+            _ds_start = locals().get("_draft_usage_start")
+            if bool(locals().get("is_draft")) and _ds_start is not None:
+                try:
+                    log_draft_token_usage(
+                        usage_session_key, _ds_start,
+                        draft_id=locals().get("_draft_id"),
+                        draft_model=locals().get("_draft_model_for_log") or actual_model_name,
+                        session_id=session_id or "",
+                        user_id=uid_int,
+                        request_id=request_id,
+                        answer_length=len(answer or ""),
+                    )
+                except Exception as _tok_exc:
+                    logger.debug("[Route:intelligent_chat_stream] draft token log skipped: %s", _tok_exc)
             usage_totals = flush_aggregated_token_usage_table(
                 usage_session_key,
                 endpoint="/api/files/{folder}/intelligent-chat/stream",
                 user_id=uid_int,
-                session_id=str(session_id or ""),
+                session_id=session_id or "",
                 request_id=request_id,
                 model_name=actual_model_name,
                 answer_length=len(answer or ""),
@@ -3036,16 +5088,66 @@ async def intelligent_chat_stream(
             log_llm_usage(
                 user_id=uid_int,
                 model_name=actual_model_name,
-                input_tokens=int(usage_totals.get("inputTokens") or 0),
-                output_tokens=int(usage_totals.get("outputTokens") or 0),
+                input_tokens=usage_totals.get("inputTokens") or 0,
+                output_tokens=usage_totals.get("outputTokens") or 0,
                 endpoint="/api/files/{folder}/intelligent-chat/stream",
                 request_id=request_id,
-                session_id=str(session_id or ""),
+                session_id=session_id or "",
             )
+            # Draft-from-template: render the finished draft into a downloadable, court-styled DOCX
+            # (Times New Roman, A4, 1" margins, 1.5 spacing) and return a signed download URL — a
+            # Markdown chat bubble cannot be filed. Failure is non-fatal (the streamed draft still shows).
+            _draft_download_url = None
+            _draft_filename = None
+            if is_draft and (answer or "").strip():
+                try:
+                    import re as _re_docx
+                    from app.services.docx_export import markdown_to_court_docx
+                    # Typography captured by the drafting pipeline's Stage-A structural analysis
+                    # (base font / title alignment from the template); None on the single-call path.
+                    _typo = locals().get("_draft_typography")
+                    _docx_bytes = await loop.run_in_executor(
+                        None, lambda: markdown_to_court_docx(
+                            answer, title=(display_question or "Draft"), typography=_typo
+                        )
+                    )
+                    _safe_name = (_re_docx.sub(r"[^A-Za-z0-9._-]+", "_", folder_name or "draft").strip("_") or "draft")[:60]
+                    _docx_dest = f"{user_id}/drafts/{_safe_name}_{request_id}.docx"
+                    _docx_uri = await loop.run_in_executor(
+                        None,
+                        lambda: gcs.upload_bytes(
+                            _docx_bytes,
+                            _docx_dest,
+                            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            bucket_type="output",
+                        ),
+                    )
+                    _draft_download_url = await loop.run_in_executor(
+                        None, lambda: gcs.signed_read_url(_docx_uri, expiration_minutes=1440)
+                    )
+                    _draft_filename = f"{_safe_name}_draft.docx"
+                    logger.info(
+                        "[Route:intelligent_chat_stream] folder=%s draft DOCX exported bytes=%d uri=%s",
+                        folder_name, len(_docx_bytes), _docx_uri,
+                    )
+                except Exception as _docx_exc:
+                    logger.warning(
+                        "[Route:intelligent_chat_stream] folder=%s draft DOCX export failed: %s",
+                        folder_name, _docx_exc,
+                    )
+            if is_draft and (answer or "").strip() and locals().get("_draft_tiptap_json") is None:
+                try:
+                    from app.services.tiptap_render import markdown_to_tiptap_content
+                    _draft_tiptap_json = {"type": "doc", "content": markdown_to_tiptap_content(answer)}
+                    _draft_tiptap_sections = []
+                    _draft_legal_section_doc = None
+                except Exception as _tiptap_exc:
+                    logger.debug("[Route:intelligent_chat_stream] fallback TipTap render skipped: %s", _tiptap_exc)
+
             yield _sse({
                 "type": "done",
                 "session_id": session_id,
-                "method": "gemini_direct",
+                "method": ("template_draft" if is_draft else "gemini_direct"),
                 "routing_decision": "db_text_fallback",
                 "answer": answer,
                 "learning_mode": learning_mode,
@@ -3057,6 +5159,11 @@ async def intelligent_chat_stream(
                 "used_chunk_ids": [],
                 "prompt_label": display_question if (chat_request.secret_id or "").strip() else None,
                 "used_secret_prompt": bool((chat_request.secret_id or "").strip()),
+                "draft_download_url": _draft_download_url,
+                "draft_filename": _draft_filename,
+                "draft_tiptap_json": locals().get("_draft_tiptap_json"),
+                "draft_tiptap_sections": locals().get("_draft_tiptap_sections"),
+                "draft_legal_section_doc": locals().get("_draft_legal_section_doc"),
             })
 
         except Exception as exc:
@@ -3097,7 +5204,7 @@ def list_folder_chats(
                 # while chat_count/last_activity aggregate the whole session so the
                 # sidebar can group and sort conversations by recency.
                 user_filter = "AND user_id::text = %s" if user_id else ""
-                params = [folder_name, str(user_id)] if user_id else [folder_name]
+                params = [folder_name, user_id] if user_id else [folder_name]
                 cur.execute(
                     f"""
                     SELECT * FROM (

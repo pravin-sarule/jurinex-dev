@@ -15,6 +15,7 @@ from utils.pricing import (
     CLAUDE_INPUT_PER_1M_INR,
     CLAUDE_OUTPUT_PER_1M_INR,
     DOCUMENT_AI_PER_1000_PAGES_INR,
+    GEMINI_EMBED_PER_1M_INR,
     GEMINI_GROUNDING_PER_CALL_INR,
     GEMINI_INPUT_PER_1M_INR,
     GEMINI_OUTPUT_PER_1M_INR,
@@ -163,6 +164,28 @@ def record_gemini(
         metadata={"model": model, "tokens_in": tokens_in, "tokens_out": tokens_out},
     )
     _log_shared_token_pool(uid, model, tokens_in, tokens_out, f"citation:{operation or 'generate'}")
+
+
+def record_gemini_embedding(
+    run_id: Optional[str],
+    user_id: str,
+    tokens_in: int,
+    model: Optional[str] = None,
+    operation: str = "embedding",
+) -> None:
+    """Record Gemini embedding usage (semantic ranking). Input-token cost only."""
+    cost_inr = (max(0, int(tokens_in)) / 1_000_000) * GEMINI_EMBED_PER_1M_INR
+    record(
+        run_id=run_id,
+        user_id=user_id or "anonymous",
+        service="gemini",
+        operation=operation,
+        quantity=max(0, int(tokens_in)),
+        unit="tokens",
+        cost_inr=cost_inr,
+        cost_usd=inr_to_usd(cost_inr),
+        metadata={"model": model or "models/gemini-embedding-001", "tokens_in": int(tokens_in), "tokens_out": 0},
+    )
 
 
 def record_claude(

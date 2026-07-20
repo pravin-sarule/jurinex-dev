@@ -23,7 +23,7 @@ logger = logging.getLogger("agentic_document_service.secret_prompt_display")
 
 
 def _normalize_prompt_text(value: str | None) -> str:
-    return " ".join(str(value or "").strip().lower().split())
+    return " ".join((value or "").strip().lower().split())
 
 
 def _fetch_secret_row_local(secret_id: str) -> dict[str, Any] | None:
@@ -44,7 +44,7 @@ def _fetch_secret_row_local(secret_id: str) -> dict[str, Any] | None:
                 WHERE s.id::text = %s::text
                 LIMIT 1
                 """,
-                (str(secret_id),),
+                (secret_id,),
             )
             row = cur.fetchone()
             return dict(row) if row else None
@@ -54,7 +54,7 @@ def _fetch_secret_row_local(secret_id: str) -> dict[str, Any] | None:
 
 
 def _fetch_template_text_local(template_id: str | None) -> str | None:
-    tid = str(template_id or "").strip()
+    tid = (template_id or "").strip()
     if not tid or not is_db_available():
         return None
     try:
@@ -95,7 +95,7 @@ def _fetch_template_text_local(template_id: str | None) -> str | None:
 
 def resolve_secret_prompt_llm_name(secret_id: str | None) -> str | None:
     """Return the model assigned to a selected secret prompt in the database."""
-    sid = str(secret_id or "").strip()
+    sid = (secret_id or "").strip()
     if not sid or not is_db_available():
         return None
     try:
@@ -127,8 +127,8 @@ def resolve_secret_display_label(
 ) -> str:
     """User-visible label: prompt_label from client, else local DB secret name."""
     _ = authorization
-    if prompt_label and str(prompt_label).strip():
-        return str(prompt_label).strip()
+    if prompt_label and prompt_label.strip():
+        return prompt_label.strip()
     row = _fetch_secret_row_local(secret_id)
     if row and row.get("name"):
         return str(row["name"]).strip()
@@ -136,7 +136,7 @@ def resolve_secret_display_label(
 
 
 def _fetch_secret_value_from_gcp(secret_manager_id: str, version: str | int | None) -> str | None:
-    sid = str(secret_manager_id or "").strip()
+    sid = (secret_manager_id or "").strip()
     if not sid:
         return None
     ver = str(version or "latest").strip() or "latest"
@@ -174,7 +174,7 @@ def _fetch_secret_value_from_gcp(secret_manager_id: str, version: str | int | No
 
 
 def _fetch_secret_value_from_gcp_rest(secret_manager_id: str, version: str | int | None) -> str | None:
-    sid = str(secret_manager_id or "").strip()
+    sid = (secret_manager_id or "").strip()
     if not sid:
         return None
     ver = str(version or "latest").strip() or "latest"

@@ -48,6 +48,7 @@
     "katex": "^0.16.11",
     "lucide-react": "^0.536.0",
     "mammoth": "^1.10.0",
+    "marked": "^18.0.5",
     "mermaid": "^11.12.1",
     "pdfmake": "^0.2.20",
     "pdfmake-font-generator": "^1.0.1",
@@ -56,6 +57,7 @@
     "react-dom": "^19.1.0",
     "react-hot-toast": "^2.5.2",
     "react-markdown": "^10.1.0",
+    "react-pdf": "^10.4.1",
     "react-router-dom": "^7.7.1",
     "react-syntax-highlighter": "^15.6.6",
     "react-toastify": "^11.0.5",
@@ -69,6 +71,8 @@
     "sweetalert2": "^11.26.3",
     "tailwind-scrollbar": "^4.0.2",
     "tiptap-extension-font-size": "^1.0.0",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2",
     "zustand": "^5.0.10"
   },
   "devDependencies": {

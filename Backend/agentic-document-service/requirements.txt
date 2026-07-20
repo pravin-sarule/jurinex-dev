@@ -1,6 +1,12 @@
 fastapi>=0.115.0
 PyJWT>=2.8.0
 pypdf>=4.0.0
+# Reads a PDF's RULING LINES, so a template grid whose cells are blank (a LIST OF DOCUMENTS
+# schedule with empty "Original / Copy" columns) is still recovered as a real table. Plain text
+# extraction flattens such a grid into a vertical dump with the empty cells missing entirely,
+# which is why template tables used to be drafted as flat numbered lists.
+pdfplumber>=0.11.0
+python-docx>=1.1.0
 anthropic>=0.40.0
 openai>=1.60.0
 uvicorn[standard]>=0.30.0

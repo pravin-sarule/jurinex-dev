@@ -140,7 +140,75 @@ function dimensionGroups(reportFormat, citations, dimensionsOverride = []) {
     }
   });
 
+  // V2 Side-aware citation mapping
+  if (Array.isArray(reportFormat.recommended_citations) && reportFormat.recommended_citations.length > 0) {
+    groups.set('recommended', { id: 'recommended', name: 'Recommended Citations', reasoning: 'Supporting citations for the selected side.', ids: new Set(reportFormat.recommended_citations.map(c => c.canonical_id || c.canonicalId || c.id)), citations: [] });
+  }
+  if (Array.isArray(reportFormat.adverse_citations) && reportFormat.adverse_citations.length > 0) {
+    groups.set('adverse', { id: 'adverse', name: 'Adverse Citations / Opposite-side Risk', reasoning: 'These cases may support the opposite side or may need to be distinguished.', ids: new Set(reportFormat.adverse_citations.map(c => c.canonical_id || c.canonicalId || c.id)), citations: [] });
+  }
+  if (Array.isArray(reportFormat.use_with_caution) && reportFormat.use_with_caution.length > 0) {
+    groups.set('caution', { id: 'caution', name: 'Use With Caution', reasoning: 'Use for distinguishable cases, weak contextual cases.', ids: new Set(reportFormat.use_with_caution.map(c => c.canonical_id || c.canonicalId || c.id)), citations: [] });
+  }
+
+  // ── V2 category routing (recommended / adverse / caution) ───────────────────────
+  // V2 citations carry no keyword/dimension id, so without this every citation falls
+  // into a single "ungrouped" bucket and the Adverse / Use-With-Caution sections never
+  // appear (sidebar shows 0). Route each citation to its category bucket FIRST — by
+  // id-set membership, then by its classification — so the counts are correct and the
+  // adverse cases the client can be hit with (and the caution cases) are shown distinctly.
+  const CATEGORY_META = {
+    recommended: { name: 'Recommended Citations', reasoning: 'Supporting citations for the selected side.' },
+    adverse: { name: 'Adverse Citations / Opposite-side Risk', reasoning: 'Cases the opposite side can rely on — be prepared to distinguish them.' },
+    caution: { name: 'Use With Caution', reasoning: 'Distinguishable or weak-contextual cases — verify the fit before relying on them.' },
+  };
+  const ensureCategoryGroup = (cid) => {
+    if (!groups.has(cid)) {
+      groups.set(cid, { id: cid, name: CATEGORY_META[cid].name, reasoning: CATEGORY_META[cid].reasoning, ids: new Set(), citations: [] });
+    }
+    return groups.get(cid);
+  };
+  // Only a V2 (side-aware) report has these category arrays; legacy reports keep their
+  // keyword/dimension grouping untouched.
+  const hasV2Categories = ['recommended', 'adverse', 'caution'].some((cid) => groups.has(cid));
+  const categoryByCitationId = new Map();
+  ['recommended', 'adverse', 'caution'].forEach((cid) => {
+    const g = groups.get(cid);
+    if (g && g.ids) g.ids.forEach((idVal) => categoryByCitationId.set(String(idVal).trim(), cid));
+  });
+  const categoryFromClassification = (citation) => {
+    const cls = String(citation.classification || citation.classificationLabel || '').toUpperCase();
+    if (cls === 'SUPPORTING') return 'recommended';
+    if (cls === 'ADVERSE') return 'adverse';
+    if (cls === 'DISTINGUISHABLE' || cls === 'WEAK_CONTEXTUAL') return 'caution';
+    const party = String(citation.argumentParty || citation.argument_party || '').toLowerCase();
+    if (party === 'opposite_party' || party === 'opposite-party') return 'adverse';
+    return '';
+  };
+
   citations.forEach((citation) => {
+    const citationKeys = new Set(
+      [
+        citation.id,
+        citation.canonicalId,
+        citation.canonical_id,
+        citation.externalId,
+        citation.external_id,
+      ]
+        .filter(Boolean)
+        .map((v) => String(v).trim())
+    );
+
+    // Category routing takes precedence over keyword/dimension grouping (V2 reports only).
+    const catId = hasV2Categories
+      ? (Array.from(citationKeys).map((k) => categoryByCitationId.get(k)).find(Boolean)
+         || categoryFromClassification(citation))
+      : '';
+    if (catId && CATEGORY_META[catId]) {
+      ensureCategoryGroup(catId).citations.push(citation);
+      return;
+    }
+
     const rawDimId =
       citation.dimensionId ??
       citation.dimension_id ??
@@ -171,17 +239,6 @@ function dimensionGroups(reportFormat, citations, dimensionsOverride = []) {
       });
     }
     const group = groups.get(key);
-    const citationKeys = new Set(
-      [
-        citation.id,
-        citation.canonicalId,
-        citation.canonical_id,
-        citation.externalId,
-        citation.external_id,
-      ]
-        .filter(Boolean)
-        .map((v) => String(v).trim())
-    );
     // If the citation carries an explicit dimensionId from backend, always assign it to that
     // group — don't let the backward-compat ids set block it. The ids set is only consulted
     // for legacy payloads where citations have no dimensionId field.
@@ -191,6 +248,16 @@ function dimensionGroups(reportFormat, citations, dimensionsOverride = []) {
   });
   const ordered = Array.from(groups.values());
   ordered.sort((a, b) => {
+    const v2Order = {
+      'recommended': -3,
+      'adverse': -2,
+      'caution': -1,
+      'ungrouped': 1000
+    };
+    const aOrder = v2Order[a.id] ?? 0;
+    const bOrder = v2Order[b.id] ?? 0;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    
     if (a.id === 'ungrouped') return 1;
     if (b.id === 'ungrouped') return -1;
     const an = Number(a.id);
@@ -467,23 +534,45 @@ function extractCaseTitle(rawValue) {
   return cleaned;
 }
 
+/* ── clean IK text that leaked a Python list/string repr ──
+   Older reports stored fragment text as str(list), so it carries literal "\n", and
+   "['…', '…']" brackets/quotes. Convert escapes to spaces and strip the repr wrapping
+   so the headnote/excerpt read as clean prose. (New runs are already clean server-side.) */
+function cleanIkText(s) {
+  let t = String(s ?? '');
+  t = t.replace(/\\r\\n|\\n|\\r|\\t/g, ' ')   // literal \n \r \t -> space
+       .replace(/\\"/g, '"')
+       .replace(/\\'/g, "'");
+  t = t.replace(/^\s*\[\s*['"]?/, '')          // leading [ '
+       .replace(/['"]?\s*\]\s*$/, '')          // trailing ' ]
+       .replace(/['"]\s*,\s*['"]/g, ' ');       // ', ' element separators -> space
+  return t.replace(/\s{2,}/g, ' ').trim();
+}
+
 /* ── parse flat text into bullet-point array ── */
+// A judgment's paragraph number (e.g. "29.", "(3)", "30") — noise as a standalone bullet.
+const _isParaMarker = (s) => /^\(?\d{1,4}\)?[.)]?$/.test(String(s).trim());
+// Strip a leading paragraph number when it's glued to real content ("29. It is settled…").
+const _stripParaNum = (s) => String(s).trim().replace(/^\(?\d{1,4}\)?[.)]\s+/, '').trim();
+// Drop bare paragraph-number bullets and de-number the rest, so the headnote reads cleanly.
+const _cleanPoints = (arr) => arr.map(_stripParaNum).filter((s) => s && !_isParaMarker(s));
+
 function parseTextToPoints(text) {
   if (!text || typeof text !== 'string') return [];
   const t = text.trim();
   if (!t) return [];
   // "- Bullet 1: text - Bullet 2: text …"
   const bulletSplit = t.split(/\s*[-–]\s*Bullet\s*\d*\s*:\s*/i).map(s => s.trim()).filter(Boolean);
-  if (bulletSplit.length > 1) return bulletSplit;
+  if (bulletSplit.length > 1) return _cleanPoints(bulletSplit);
   // "1. text" / "1) text" on newlines
   const numberedSplit = t.split(/\n+/).map(s => s.replace(/^\d+[.)]\s*/, '').replace(/^[-•·]\s*/, '').trim()).filter(Boolean);
-  if (numberedSplit.length > 1) return numberedSplit;
+  if (numberedSplit.length > 1) return _cleanPoints(numberedSplit);
   // Sentence-split for very long single paragraphs (ratio decidendi)
   if (t.length > 400) {
     const sentences = t.match(/[^.!?]+[.!?]+["']?(?:\s|$)/g);
-    if (sentences && sentences.length > 1) return sentences.map(s => s.trim()).filter(Boolean);
+    if (sentences && sentences.length > 1) return _cleanPoints(sentences.map(s => s.trim()).filter(Boolean));
   }
-  return [t];
+  return _cleanPoints([t]);
 }
 
 const SECTION_ACCENTS = {
@@ -543,10 +632,17 @@ function citationContextItemToLink(item) {
   };
 }
 
-function CitationCard({ citation, onSelect, getCourtBadgeClass, getCourtLabel, dimensionLabel, isPriority }) {
+const CATEGORY_CARD_BADGE = {
+  recommended: { icon: '⭐', label: 'Recommended', bg: '#D1FAE5', color: '#065F46' },
+  adverse: { icon: '⚠️', label: 'Adverse — opposite side', bg: '#FEE2E2', color: '#991B1B' },
+  caution: { icon: '🤔', label: 'Use with caution', bg: '#FEF3C7', color: '#92400E' },
+};
+
+function CitationCard({ citation, onSelect, getCourtBadgeClass, getCourtLabel, dimensionLabel, isPriority, categoryId }) {
   const courtBadgeClass = getCourtBadgeClass(citation.court);
   const sourceMeta = getSourceMeta(citation);
   const isAdmin = isAdminUpload(citation);
+  const catBadge = CATEGORY_CARD_BADGE[categoryId];
   return (
     <div
       className={`cite-card ${isPriority ? 'sc-priority' : ''} ${isAdmin ? 'cite-card-admin' : ''}`}
@@ -555,7 +651,14 @@ function CitationCard({ citation, onSelect, getCourtBadgeClass, getCourtLabel, d
     >
       <div className="cc-top">
         <span className={`court-badge ${courtBadgeClass}`}>{getCourtLabel(citation.court)}</span>
-        <span className="dimension-badge" title={dimensionLabel}>🔑 {dimensionLabel}</span>
+        {catBadge ? (
+          <span className="dimension-badge" title={catBadge.label}
+            style={{ background: catBadge.bg, color: catBadge.color, fontWeight: 700 }}>
+            {catBadge.icon} {catBadge.label}
+          </span>
+        ) : (
+          <span className="dimension-badge" title={dimensionLabel}>🔑 {dimensionLabel}</span>
+        )}
         {isAdmin ? (
           <span style={{
             display: 'inline-flex', alignItems: 'center', gap: 4,
@@ -603,7 +706,12 @@ function DimensionGroup({
   return (
     <div className="dim-group">
       <button className="dim-header dim-toggle" onClick={() => onToggle(group.id)}>
-        <span className="dim-pill">🔑 Keyword</span>
+        <span className="dim-pill" style={{
+          background: group.id === 'recommended' ? '#D1FAE5' : group.id === 'adverse' ? '#FEE2E2' : group.id === 'caution' ? '#FEF3C7' : '#F1F5F9',
+          color: group.id === 'recommended' ? '#065F46' : group.id === 'adverse' ? '#991B1B' : group.id === 'caution' ? '#92400E' : '#334155'
+        }}>
+          {group.id === 'recommended' ? '⭐ Recommended' : group.id === 'adverse' ? '⚠️ Adverse Risk' : group.id === 'caution' ? '🤔 Caution' : '🔑 Keyword'}
+        </span>
         <span className="dim-title">{group.name}</span>
         <span className="dim-count">{group.citations.length} citations</span>
       </button>
@@ -617,6 +725,7 @@ function DimensionGroup({
               getCourtBadgeClass={getCourtBadgeClass}
               getCourtLabel={getCourtLabel}
               dimensionLabel={getDimensionDisplayLabel(group, index)}
+              categoryId={['recommended', 'adverse', 'caution'].includes(group.id) ? group.id : ''}
               isPriority={priorityIds.has(citation.id)}
             />
           ))}
@@ -687,10 +796,15 @@ export default function RedesignedCitationReportDoc({
     ].filter(Boolean).join(' ')),
   }));
 
-  const verified = all.filter((citation) => ['GREEN', 'YELLOW', 'STALE'].includes(citation.verificationStatus));
-  // DEBUG: log citation counts so we can diagnose 0-results issues
-  console.log('[CitationReport] all=', all.length, 'verified=', verified.length,
-    'statuses=', all.map(c => c.verificationStatus));
+  // Show citations that passed legacy verification (GREEN/YELLOW/STALE) OR carry a V2
+  // review status (SUGGESTED_FOR_REVIEW/NEEDS_REVIEW/ADVERSE). Without this, V2 reports
+  // render "0 citations" because their status vocabulary differs. Only REJECTED / no-result
+  // are hidden.
+  const SHOWABLE_STATUS = ['GREEN', 'YELLOW', 'STALE', 'SUGGESTED_FOR_REVIEW', 'NEEDS_REVIEW', 'ADVERSE', 'VERIFIED', 'APPROVED'];
+  const verified = all.filter((citation) => {
+    const s = String(citation.verificationStatus || citation.status || '').toUpperCase();
+    return s === '' || SHOWABLE_STATUS.includes(s);
+  });
   const extraDims = report?.dimensions_metadata || report?.dimensionsMeta || [];
   const groups = dimensionGroups(reportFormat, verified, extraDims);
   const sidebarGroups = groups.filter((group) => group.id !== 'ungrouped');
@@ -715,7 +829,11 @@ export default function RedesignedCitationReportDoc({
       if (courtFilter === 'sc' && !(citation.normalizedCourt.includes('supreme court'))) return false;
       if (courtFilter === 'hc' && !(citation.normalizedCourt.includes('high court'))) return false;
       if (courtFilter === 'admin' && !isAdminUpload(citation)) return false;
-      if (!matchesPerspective(citation, perspective)) return false;
+      // Category buckets already encode the side relationship: adverse = opposite_party,
+      // caution = neutral. Applying the perspective filter here would wrongly hide exactly
+      // the adverse / caution citations the user wants to see. Only filter keyword groups.
+      const isCategoryGroup = group.id === 'recommended' || group.id === 'adverse' || group.id === 'caution';
+      if (!isCategoryGroup && !matchesPerspective(citation, perspective)) return false;
       if (term && !citation.searchableText.includes(term)) return false;
       return true;
     }),
@@ -817,7 +935,9 @@ export default function RedesignedCitationReportDoc({
               ) ? 'active' : ''}`}
               onClick={() => { setDimension((group.name || '').trim() || normalizeDimensionKey(group.id) || group.id); setActiveId(null); }}
             >
-              <span className="chip-num">🔑</span>
+              <span className="chip-num">
+                {group.id === 'recommended' ? '⭐' : group.id === 'adverse' ? '⚠️' : group.id === 'caution' ? '🤔' : '🔑'}
+              </span>
               <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {getKeywordLabel(group, index)}
               </span>
@@ -837,7 +957,7 @@ export default function RedesignedCitationReportDoc({
             <>
               <div className="panel-header">
                 <div className="panel-title">Find Citations</div>
-                <div className="count-pill"><b>{verified.length}</b> citations across <b>{sidebarGroups.length}</b> keyword groups</div>
+                <div className="count-pill"><b>{verified.length}</b> citations across <b>{sidebarGroups.length}</b> groups</div>
               </div>
 
               <div className="filter-row">
@@ -919,7 +1039,15 @@ export default function RedesignedCitationReportDoc({
               {activeTab === 'rep' && (() => {
                 const relLevel = normalizeRelevance(active.relevanceBadge, active.relevanceTier);
                 const isHigh = relLevel === 'Strong';
-                const confidenceScore = active.confidenceScore ?? active.confidence_score ?? (isHigh ? 94.8 : 72.3);
+                // Per-citation confidence. The backend sends `confidence` as 0-1 (and now also
+                // a ready 0-100 `confidenceScore`); derive a real percentage from whichever is
+                // present so each citation shows ITS own score — only fall back to a constant
+                // when the backend gave nothing at all.
+                const rawConf = active.confidenceScore ?? active.confidence_score
+                  ?? (active.confidence != null ? Number(active.confidence) * 100 : undefined);
+                const confidenceScore = (rawConf != null && Number.isFinite(Number(rawConf)))
+                  ? Number(rawConf)
+                  : (isHigh ? 94.8 : 72.3);
                 const verStatus = String(active.verificationStatus || active.verification_status || 'VERIFIED').toUpperCase();
                 const isVerified = ['APPROVED','VERIFIED','GREEN','VERIFIED_WARN'].includes(verStatus);
                 const courtRaw = String(active.court || '').toUpperCase();
@@ -929,11 +1057,11 @@ export default function RedesignedCitationReportDoc({
                 const coramList = (active.coram || '').split(/[,;\n]+/).map(s => s.trim()).filter(Boolean);
                 const followedBy = (active.ikCitedByList || []);
                 const citeList   = (active.ikCiteList || []);
-                const excerptText = active.excerpt?.text || active.excerptText || '';
+                const excerptText = cleanIkText(active.excerpt?.text || active.excerptText || '');
                 const hasExcerpt = excerptText && excerptText.trim().toLowerCase() !== 'further research needed';
                 const ratioPoints = (active.ratio && active.ratio !== 'Ratio decidendi not extracted.')
-                  ? parseTextToPoints(active.ratio) : [];
-                const headnotePoints = active.headnote ? parseTextToPoints(active.headnote) : [];
+                  ? parseTextToPoints(cleanIkText(active.ratio)) : [];
+                const headnotePoints = active.headnote ? parseTextToPoints(cleanIkText(active.headnote)) : [];
                 const matchQuery = active.ikFragment?.formInput || active.ikFragment?.headline || '';
                 const ikScore = active.ikFragment?.matchScore ?? active.ikMatchScore ?? null;
                 const kwScore = (active.keywordScore !== undefined && active.keywordScore !== null) ? active.keywordScore : null;
@@ -1006,7 +1134,10 @@ export default function RedesignedCitationReportDoc({
                         <div className="ld-case-meta-row">
                           <div className="ld-case-meta-item">
                             <span className="ld-meta-lbl">PRIMARY CITATION</span>
-                            <span className="ld-meta-val ld-meta-teal">{active.primaryCitation || '—'}</span>
+                            <span className="ld-meta-val ld-meta-teal">{active.primaryCitation || 'Unreported — cite by case name & date'}</span>
+                            {active.neutralCitation && active.reporterCitation && active.neutralCitation !== active.reporterCitation && (
+                              <span className="ld-meta-lbl" style={{ marginTop: 2 }}>Neutral: {active.neutralCitation}</span>
+                            )}
                           </div>
                           <div className="ld-case-meta-divider" />
                           <div className="ld-case-meta-item">
@@ -1090,6 +1221,51 @@ export default function RedesignedCitationReportDoc({
                           </div>
                         )}
                       </div>
+
+                      {/* ── How to use this authority (usage-analysis memo) ── */}
+                      {Array.isArray(active.usage_analysis) && active.usage_analysis.length > 0 && (() => {
+                        const rv = String(active.relevance_verdict || active.relevanceVerdict || '').toUpperCase();
+                        const RVS = {
+                          RELEVANT:           { bg: '#DCFCE7', color: '#15803D', label: 'Relevant',           dot: '●' },
+                          PARTIALLY_RELEVANT: { bg: '#FEF3C7', color: '#92400E', label: 'Partially relevant', dot: '◆' },
+                          NOT_RELEVANT:       { bg: '#FEE2E2', color: '#991B1B', label: 'Not relevant',       dot: '▲' },
+                        };
+                        const rvs = RVS[rv];
+                        const verdict = active.usage_verdict || active.usageVerdict || '';
+                        const reason = active.relevance_reason || active.relevanceReason || '';
+                        return (
+                          <div className="ld-section">
+                            <div className="ld-section-hdr">
+                              <span className="ld-section-num" style={{ color: '#0f766e' }}>★</span>
+                              HOW TO USE THIS AUTHORITY
+                            </div>
+                            {(rvs || verdict) && (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', margin: '2px 0 14px' }}>
+                                {rvs && (
+                                  <span title={reason} style={{ padding: '3px 12px', borderRadius: 20, fontSize: 11, fontWeight: 800, background: rvs.bg, color: rvs.color, whiteSpace: 'nowrap' }}>
+                                    {rvs.dot} {rvs.label}
+                                  </span>
+                                )}
+                                {verdict && <span style={{ fontSize: 13, color: '#334155', fontWeight: 600, lineHeight: 1.5 }}>{verdict}</span>}
+                              </div>
+                            )}
+                            <div style={{ display: 'grid', gap: 14 }}>
+                              {active.usage_analysis.map((sec, i) => (
+                                <div key={i} style={{ borderLeft: '3px solid #0f766e', padding: '2px 0 2px 14px' }}>
+                                  {sec.heading && (
+                                    <div style={{ fontSize: 11.5, fontWeight: 800, letterSpacing: '0.05em', textTransform: 'uppercase', color: '#0f766e', marginBottom: 5 }}>
+                                      {sec.heading}
+                                    </div>
+                                  )}
+                                  {sec.body && (
+                                    <div style={{ fontSize: 13.5, lineHeight: 1.65, color: '#1f2937' }}>{sec.body}</div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })()}
 
                       {/* ── SECTION I: Legal Analysis & Ratio ── */}
                       <div className="ld-section">

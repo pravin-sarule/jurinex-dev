@@ -231,6 +231,7 @@ def run_pipeline(
     custom_keywords: Optional[List[str]] = None,
     selected_keywords: Optional[List[str]] = None,
     selected_case_names: Optional[List[str]] = None,
+    perspective: Optional[str] = None,
     run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -286,6 +287,11 @@ def run_pipeline(
     try:
         from agents.autonomous_citation_agent import run_citation_research
         print("[CITATION RUNNER]   mode: autonomous citation agent", flush=True)
+        # NOTE: run_citation_research takes no `perspective` (and no **kwargs) — passing it raises
+        # TypeError, which the `except Exception` below turns into a hard run failure rather than a
+        # fallback. `perspective` stays on run_pipeline's signature because pipeline/__init__.py
+        # passes it, but only the v2 orchestrator path actually honours it; the legacy agent ignores
+        # it. Re-add here only once run_citation_research accepts the argument.
         report_format = run_citation_research(
             query=query,
             case_context=case_context,

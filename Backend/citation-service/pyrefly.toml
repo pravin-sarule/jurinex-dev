@@ -1,0 +1,5 @@
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
+]
+python-interpreter-path = "/home/dell-3/Documents/Jurinex RBAC/jurinex-dev/Backend/citation-service/venv/bin/python"

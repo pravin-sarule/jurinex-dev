@@ -172,6 +172,23 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+skills/
+Frontend/
+OcrViewer/
+# Keep the frontend OCR viewer source tracked.
+!frontend/src/components/OcrViewer/
+!frontend/src/components/OcrViewer/**
 
 # Cursor / Claude local worktrees (must not be committed as submodules)
 .claude/
+
+# Local Gemma analysis report (kept on disk, not committed)
+/Gemma_Placement_Report.docx
+
+# Stray temp dir from docx verification (unzipped .docx internals)
+frontend/rz/
+
+# Office lock / owner files (auto-created while a doc is open; auto-deleted on close)
+~$*
+.~*
+.~lock.*#
