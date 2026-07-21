@@ -705,6 +705,10 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
    if (additionalInput) {
      body.additional_input = additionalInput;
    }
+ } else if (promptLabel) {
+   // Custom prompts have no secret_id, but still need a stored label so the
+   // thread and history show the prompt's name instead of its full body.
+   body.prompt_label = promptLabel;
  }
  if (llmName) {
    body.llm_name = llmName;

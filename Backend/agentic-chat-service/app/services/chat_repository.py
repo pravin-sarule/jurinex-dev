@@ -207,6 +207,7 @@ class FileChatRepository:
                            MAX(created_at) AS last_message_at,
                            COUNT(*)::int AS message_count,
                            (array_agg(question ORDER BY created_at ASC))[1] AS first_question,
+                           (array_agg(prompt_label ORDER BY created_at ASC))[1] AS first_prompt_label,
                            (array_agg(question ORDER BY created_at DESC))[1] AS last_question
                     FROM file_chats
                     WHERE user_id = %s AND file_id IS NULL AND chat_type = 'chat_model'
@@ -223,6 +224,9 @@ class FileChatRepository:
                 "last_message_at": r["last_message_at"],
                 "message_count": r["message_count"],
                 "first_question": r["first_question"],
+                # Session titles use this when set — a stored label means the
+                # question body is a prompt, not something the user typed.
+                "first_prompt_label": r.get("first_prompt_label"),
                 "last_question": r["last_question"],
                 "is_general_chat": True,
             }
@@ -271,6 +275,7 @@ class FileChatRepository:
                            MAX(fc.created_at) AS last_message_at,
                            COUNT(*)::int AS message_count,
                            (array_agg(fc.question ORDER BY fc.created_at ASC))[1] AS first_question,
+                           (array_agg(fc.prompt_label ORDER BY fc.created_at ASC))[1] AS first_prompt_label,
                            (array_agg(fc.question ORDER BY fc.created_at DESC))[1] AS last_question
                     FROM file_chats fc
                     LEFT JOIN user_files f ON f.id = fc.file_id

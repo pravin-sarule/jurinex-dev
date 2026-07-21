@@ -83,6 +83,12 @@ import { useDocumentMicTranscribe } from "../../hooks/useDocumentMicTranscribe";
 import PromptChipsBar from "../PromptChipsBar";
 import OcrViewer from "../OcrViewer";
 import { fetchSecretsList, peekSecretsList, fetchSecretById } from "../../services/secretsService";
+import CustomPromptBuilderModal from "../CustomPromptBuilder/CustomPromptBuilderModal";
+import {
+  fetchCustomPromptGroups,
+  deleteCustomPrompt,
+  deleteCustomPromptGroup,
+} from "../../services/customPromptsService";
 
 // Draft-from-template is hidden for now: a single draft costs a lot of tokens. The implementation is
 // left intact — flip this back to true once the token-cost optimisations land.
@@ -990,6 +996,8 @@ const ChatInterface = () => {
   const [hasResponse, setHasResponse] = useState(false);
   const [secrets, setSecrets] = useState([]);
   const [isLoadingSecrets, setIsLoadingSecrets] = useState(false);
+  const [customPromptGroups, setCustomPromptGroups] = useState([]);
+  const [showPromptBuilder, setShowPromptBuilder] = useState(false);
   const [selectedSecretId, setSelectedSecretId] = useState(null);
   const [selectedLlmName, setSelectedLlmName] = useState(null);
   const [activeDropdown, setActiveDropdown] = useState("Custom Query");
@@ -1490,6 +1498,32 @@ const ChatInterface = () => {
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
+
+  const loadCustomPromptGroups = useCallback(async () => {
+    try {
+      const groups = await fetchCustomPromptGroups();
+      setCustomPromptGroups(Array.isArray(groups) ? groups : []);
+    } catch {
+      /* custom prompts are optional */
+    }
+  }, []);
+
+  // Runs the prompt immediately; the thread shows only its name.
+  const handleCustomPromptSelect = (prompt) => {
+    if (!prompt?.prompt_text || loadingChat) return;
+    handleNewMessage(prompt.prompt_text, prompt.name).catch(console.error);
+  };
+
+  const handleDeleteCustomPrompt = async (prompt) => {
+    if (!window.confirm(`Delete the prompt "${prompt.name}"?`)) return;
+    try { await deleteCustomPrompt(prompt.id); await loadCustomPromptGroups(); } catch { /* ignore */ }
+  };
+
+  const handleDeleteCustomGroup = async (group) => {
+    const count = group.prompts?.length ?? 0;
+    if (!window.confirm(`Delete the group "${group.name}"${count ? ` and its ${count} prompt(s)` : ''}?`)) return;
+    try { await deleteCustomPromptGroup(group.id); await loadCustomPromptGroups(); } catch { /* ignore */ }
+  };
 
   const loadSecrets = async () => {
     const cached = peekSecretsList();
@@ -2350,7 +2384,7 @@ const ChatInterface = () => {
     }
   };
 
-  const handleNewMessage = async (forcedQuestion = null) => {
+  const handleNewMessage = async (forcedQuestion = null, displayLabel = null) => {
     if (!selectedFolder) return;
     if (isSecretPromptSelected) {
       if (!selectedSecretId) {
@@ -2396,7 +2430,7 @@ const ChatInterface = () => {
       setChatError(null);
       setLoadingChat(true);
       setIsGenerating(true);
-      setPendingQuestion(questionText);
+      setPendingQuestion(displayLabel || questionText);
       setPickedOption(null);
       setIsAnimatingResponse(false);
       panelStatesSetRef.current = false;
@@ -2441,6 +2475,7 @@ const ChatInterface = () => {
           },
           body: JSON.stringify({
             question: questionText,
+            ...(displayLabel ? { prompt_label: displayLabel } : {}),
             session_id: selectedChatSessionId || undefined,
             llm_name: 'gemini',
             learning_mode: learningModeActive,
@@ -2522,6 +2557,8 @@ const ChatInterface = () => {
             const newMessage = {
               id: messageId,
               question: questionText,
+              // Custom prompts display by name; the body stays in `question`.
+              prompt_label: displayLabel || null,
               response: finalResponse,
               timestamp: new Date().toISOString(),
               created_at: new Date().toISOString(),
@@ -2604,6 +2641,8 @@ const ChatInterface = () => {
               const newMessage = {
                 id: messageId,
                 question: questionText,
+                // Custom prompts display by name; the body stays in `question`.
+                prompt_label: displayLabel || null,
                 response: finalResponse,
                 timestamp: new Date().toISOString(),
                 created_at: new Date().toISOString(),
@@ -2714,6 +2753,8 @@ const ChatInterface = () => {
                 const newMessage = {
                   id: finalMetadata.message_id || finalMetadata.id || messageId,
                   question: questionText,
+                  // Custom prompts display by name; the body stays in `question`.
+                  prompt_label: displayLabel || null,
                   response: finalResponse,
                   timestamp: new Date().toISOString(),
                   created_at: new Date().toISOString(),
@@ -3417,6 +3458,7 @@ const ChatInterface = () => {
 
   useEffect(() => {
     loadSecrets();
+    loadCustomPromptGroups();
   }, []);
 
   // Auto-scroll when a new prompt starts or when chat history updates with a response.
@@ -3766,7 +3808,9 @@ const ChatInterface = () => {
                           <div className="chat-thread-card__body">
                             {(chat.used_secret_prompt || chat.isSecretPrompt) && (chat.prompt_label || chat.promptLabel)
                               ? `Analysis: ${chat.prompt_label || chat.promptLabel}`
-                              : (chat.question || chat.prompt_label || chat.promptLabel || chat.query || "Untitled")}
+                              // A stored label means the question body is a prompt —
+                              // show the name, never the prompt itself.
+                              : (chat.prompt_label || chat.promptLabel || chat.question || chat.query || "Untitled")}
                           </div>
                         </div>
 
@@ -3982,17 +4026,20 @@ const ChatInterface = () => {
                 {isRecording ? 'Recording - tap mic when done speaking' : 'Transcribing and sending your message...'}
               </div>
             )}
-            {(isLoadingSecrets || secrets.length > 0) && (
-              <PromptChipsBar
-                secrets={secrets}
-                isLoading={isLoadingSecrets}
-                selectedSecretId={selectedSecretId}
-                activeLabel={isSecretPromptSelected ? activeDropdown : null}
-                onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
-                disabled={loadingChat || isRecording || isTranscribing}
-                className="mb-1"
-              />
-            )}
+            <PromptChipsBar
+              secrets={secrets}
+              isLoading={isLoadingSecrets}
+              selectedSecretId={selectedSecretId}
+              activeLabel={isSecretPromptSelected ? activeDropdown : null}
+              onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
+              disabled={loadingChat || isRecording || isTranscribing}
+              className="mb-1"
+              onAddClick={() => setShowPromptBuilder(true)}
+              customGroups={customPromptGroups}
+              onSelectCustomPrompt={handleCustomPromptSelect}
+              onDeleteCustomPrompt={handleDeleteCustomPrompt}
+              onDeleteGroup={handleDeleteCustomGroup}
+            />
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -4604,6 +4651,13 @@ const ChatInterface = () => {
           }}
         />
       )}
+
+      <CustomPromptBuilderModal
+        isOpen={showPromptBuilder}
+        onClose={() => setShowPromptBuilder(false)}
+        groups={customPromptGroups}
+        onSaved={() => loadCustomPromptGroups()}
+      />
     </div>
   );
 };

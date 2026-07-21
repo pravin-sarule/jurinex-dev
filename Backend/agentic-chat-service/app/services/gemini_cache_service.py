@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 
 from app.core.config import get_settings
+from app.services.chat_helpers import is_valid_uuid
 from app.services.db import doc_conn
 from app.services.gemini_pricing import (
     DEFAULT_CACHE_MODEL,
@@ -34,6 +35,7 @@ from app.services.llm_service import (
     _looks_like_restart,
     _normalize_usage,
     _stream_round,
+    supports_frequency_penalty,
     _stream_tail_delta,
     _trim_overlap,
     build_model_list,
@@ -702,9 +704,14 @@ async def ask_with_context_cache(
             try:
                 rec_kwargs: dict[str, Any] = {
                     "temperature": max(0.7, float(gen_cfg["temperature"] or 0)),
-                    "frequency_penalty": 0.4,
                     "max_output_tokens": gen_cfg["max_output_tokens"],
                 }
+                # Gemini 2.5+ rejects penalty params outright (400 "Penalty is
+                # not enabled for models/…"), which would fail the whole direct
+                # recovery and force the weaker ADK fallback. The raised
+                # temperature above is what actually escapes the loop.
+                if supports_frequency_penalty(model):
+                    rec_kwargs["frequency_penalty"] = 0.4
                 if adk_cache_name:
                     # The system instruction lives inside the explicit cache;
                     # the API rejects passing both.
@@ -1030,17 +1037,24 @@ async def _upsert_adk_cache_session(
     files = _file_fingerprint([file_id])
     model = model_name or DEFAULT_CACHE_MODEL
 
+    # `chat_session_id` doubles as the ADK runner session key, which may be a
+    # synthetic marker rather than a real session — cache priming passes
+    # "prime-<file_id>". gemini_cache_sessions.session_id is a uuid column, so
+    # only use the value as a DB id when it actually is one; otherwise fall back
+    # to the per-file lookup and mint a fresh uuid for any new row.
+    db_chat_session_id = chat_session_id if is_valid_uuid(chat_session_id) else None
+
     # Look for existing active session for this specific chat
     session_id = None
     with doc_conn() as conn:
         with conn.cursor() as cur:
-            if chat_session_id:
+            if db_chat_session_id:
                 cur.execute(
                     """
-                    SELECT session_id FROM gemini_cache_sessions 
+                    SELECT session_id FROM gemini_cache_sessions
                     WHERE session_id=%s::uuid AND status='active' AND expires_at > NOW()
                     """,
-                    (chat_session_id,)
+                    (db_chat_session_id,)
                 )
                 row = cur.fetchone()
                 if row:
@@ -1086,7 +1100,7 @@ async def _upsert_adk_cache_session(
         return session_id
 
     # No active session — create one using ADK-provided metadata
-    new_session_id = chat_session_id or str(uuid.uuid4())
+    new_session_id = db_chat_session_id or str(uuid.uuid4())
     created_at = _now()
     expires_at: datetime | None = None
     if adk_expire_time:

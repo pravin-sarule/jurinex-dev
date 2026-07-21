@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes.chat import router as chat_router
+from app.api.routes.custom_prompts import router as custom_prompts_router
 from app.api.routes.drafting import router as drafting_router
 from app.core.config import get_settings
 from app.middleware.payment_token_guard import PaymentTokenGuardMiddleware
@@ -106,6 +107,7 @@ def create_app() -> FastAPI:
             "adk_model": settings.adk_model,
         }
 
+    app.include_router(custom_prompts_router)
     app.include_router(chat_router)
     app.include_router(drafting_router)
     return app

@@ -4998,7 +4998,13 @@ async def intelligent_chat_stream(
                         session_id=session_id,
                         citations=citations_payload,
                         used_secret_prompt=bool(sec_id),
-                        prompt_label=display_question if sec_id else None,
+                        # Custom prompts have no secret_id but still carry a label —
+                        # store it so history shows the name, not the prompt body.
+                        prompt_label=(
+                            display_question
+                            if sec_id
+                            else ((chat_request.prompt_label or "").strip() or None)
+                        ),
                         secret_id=sec_id,
                     )
 
@@ -5011,7 +5017,11 @@ async def intelligent_chat_stream(
                 "session_id": session_id,
                 "method": ("template_draft" if is_draft else "gemini_direct"),
                 "routing_decision": "db_text_fallback",
-                "prompt_label": display_question if (chat_request.secret_id or "").strip() else None,
+                "prompt_label": (
+                    display_question
+                    if (chat_request.secret_id or "").strip()
+                    else ((chat_request.prompt_label or "").strip() or None)
+                ),
                 "used_secret_prompt": bool((chat_request.secret_id or "").strip()),
                 "turn_count": learning_state.turn_count if learning_state else None,
                 "turn_threshold": LearningAgentController.TURN_THRESHOLD if learning_mode else None,
@@ -5157,7 +5167,11 @@ async def intelligent_chat_stream(
                 "turn_threshold": LearningAgentController.TURN_THRESHOLD if learning_mode else None,
                 "citations": citations_payload,
                 "used_chunk_ids": [],
-                "prompt_label": display_question if (chat_request.secret_id or "").strip() else None,
+                "prompt_label": (
+                    display_question
+                    if (chat_request.secret_id or "").strip()
+                    else ((chat_request.prompt_label or "").strip() or None)
+                ),
                 "used_secret_prompt": bool((chat_request.secret_id or "").strip()),
                 "draft_download_url": _draft_download_url,
                 "draft_filename": _draft_filename,

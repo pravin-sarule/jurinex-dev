@@ -396,17 +396,34 @@ def build_recovery_prompt(delivered: str) -> str:
     return f'{CHAT_RECOVERY_PROMPT} The answer broke while writing: "…{snippet}".'
 
 
-def _recovery_sampling(config: Any) -> Any:
-    """Recovery-round config: raise temperature and add a frequency penalty.
+def supports_frequency_penalty(model_name: str | None) -> bool:
+    """True only for Gemini families that accept penalty sampling params.
+
+    Gemini 2.5+ rejects them outright with
+    ``400 INVALID_ARGUMENT: Penalty is not enabled for models/<model>``, which
+    kills the whole recovery attempt. Raising temperature is what actually
+    breaks a repetition loop; the penalty is a bonus, so when in doubt omit it
+    rather than risk a hard 400.
+    """
+    tail = _normalize_model(model_name or "").lower()
+    if "/" in tail:
+        tail = tail.split("/")[-1]
+    return tail.startswith("gemini-1.5") or tail.startswith("gemini-2.0")
+
+
+def _recovery_sampling(config: Any, model_name: str | None = None) -> Any:
+    """Recovery-round config: raise temperature and, where supported, add a
+    frequency penalty.
 
     Low-temperature runs recreate the exact same repetition loop
     deterministically; changed sampling is what actually escapes it.
     """
     try:
         base_temp = float(getattr(config, "temperature", None) or 0.0)
-        return config.model_copy(
-            update={"temperature": max(0.7, base_temp), "frequency_penalty": 0.4}
-        )
+        update: dict[str, Any] = {"temperature": max(0.7, base_temp)}
+        if supports_frequency_penalty(model_name):
+            update["frequency_penalty"] = 0.4
+        return config.model_copy(update=update)
     except Exception:
         return config
 
@@ -533,10 +550,20 @@ class _RepetitionGuard:
             # Ignore short lines (bullets, table borders, etc.)
             if len(clean) < 30:
                 continue
-            # Use a normalized key for comparison
-            # We remove numbers too, as looping models often increment counts
-            # or dates while repeating the same text.
-            key = re.sub(r"[^a-z]", "", clean.lower())
+            # Use a normalized key for comparison.
+            # Digits are normally stripped, as looping models often increment
+            # counts or dates while repeating the same text.
+            #
+            # Markdown table rows are the exception: in a chronology or ledger
+            # the digits ARE the content, and rows legitimately share every word
+            # ("| 01-09-2005 | receipt for rent/advance | Page 72 |" repeated
+            # per receipt). Stripping digits collapses those to one key and
+            # trips the guard on a perfectly healthy table. A genuine loop
+            # repeats rows verbatim, so it still trips with digits kept.
+            if clean.startswith("|"):
+                key = re.sub(r"[^a-z0-9]", "", clean.lower())
+            else:
+                key = re.sub(r"[^a-z]", "", clean.lower())
             if len(key) < 20:
                 continue
 
@@ -801,7 +828,7 @@ async def _stream_with_continuation(
         if round_i > 0:
             if use_recovery:
                 follow_up = build_recovery_prompt(full)
-                round_config = _recovery_sampling(config)
+                round_config = _recovery_sampling(config, model)
             else:
                 follow_up = CHAT_CONTINUATION_PROMPT
             convo.append(gt.Content(role="model", parts=[gt.Part(text=full.rstrip())]))

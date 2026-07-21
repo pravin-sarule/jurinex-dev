@@ -362,6 +362,11 @@ def resolve_query_and_display(
     if not sid:
         if not q:
             return "", ""
+        # A custom prompt has no secret_id but still ships a label: the model
+        # gets the full prompt body, the UI and DB store only the name.
+        label = (prompt_label or "").strip()
+        if label:
+            return q, label
         return q, q
 
     display = resolve_secret_display_label(sid, prompt_label, authorization)

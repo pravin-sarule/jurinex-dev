@@ -1,6 +1,12 @@
 import '../styles/AnalysisPage.css';
 import PromptChipsBar from '../components/PromptChipsBar';
 import { fetchSecretsList, peekSecretsList } from '../services/secretsService';
+import CustomPromptBuilderModal from '../components/CustomPromptBuilder/CustomPromptBuilderModal';
+import {
+  fetchCustomPromptGroups,
+  deleteCustomPrompt,
+  deleteCustomPromptGroup,
+} from '../services/customPromptsService';
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { flushSync } from 'react-dom';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
@@ -334,6 +340,8 @@ const AnalysisPage = () => {
   const [isAnimatingResponse, setIsAnimatingResponse] = useState(false);
   const [showMergeModal, setShowMergeModal] = useState(false);
   const [chatInput, setChatInput] = useState('');
+  const [customPromptGroups, setCustomPromptGroups] = useState([]);
+  const [showPromptBuilder, setShowPromptBuilder] = useState(false);
   const [showSplitView, setShowSplitView] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedMessageId, setSelectedMessageId] = useState(null);
@@ -589,6 +597,49 @@ const AnalysisPage = () => {
     } catch (error) {
       throw error;
     }
+  };
+
+  const loadCustomPromptGroups = useCallback(async () => {
+    try {
+      const groups = await fetchCustomPromptGroups();
+      setCustomPromptGroups(Array.isArray(groups) ? groups : []);
+    } catch {
+      /* custom prompts are optional — keep the current list on failure */
+    }
+  }, []);
+
+  const handleDeleteCustomPrompt = useCallback(async (prompt) => {
+    if (!window.confirm(`Delete the prompt "${prompt.name}"?`)) return;
+    try {
+      await deleteCustomPrompt(prompt.id);
+      await loadCustomPromptGroups();
+    } catch (err) {
+      setError(err?.message || 'Failed to delete the prompt.');
+    }
+  }, [loadCustomPromptGroups]);
+
+  const handleDeleteCustomGroup = useCallback(async (group) => {
+    const count = group.prompts?.length ?? 0;
+    const warning = count
+      ? `Delete the group "${group.name}" and the ${count} prompt(s) inside it?`
+      : `Delete the empty group "${group.name}"?`;
+    if (!window.confirm(warning)) return;
+    try {
+      await deleteCustomPromptGroup(group.id);
+      await loadCustomPromptGroups();
+    } catch (err) {
+      setError(err?.message || 'Failed to delete the group.');
+    }
+  }, [loadCustomPromptGroups]);
+
+  // Clicking a saved custom prompt runs it straight away. The thread shows only
+  // the prompt's name — the body is sent to the model but never displayed,
+  // matching how preset prompts behave.
+  // Deliberately not memoized: it must call the current render's handleSend so
+  // the send picks up the live fileId / sessionId.
+  const handleCustomPromptSelect = (prompt) => {
+    if (!prompt?.prompt_text || isLoading || isGeneratingInsights) return;
+    void handleSend({ preventDefault: () => {} }, null, prompt);
   };
 
   const loadSecrets = async () => {
@@ -1390,11 +1441,11 @@ const AnalysisPage = () => {
     return <Send className={baseClass} />;
   };
 
-  const chatWithDocument = async (file_id, question, currentSessionId, llm_name = null) => {
+  const chatWithDocument = async (file_id, question, currentSessionId, llm_name = null, displayLabel = null) => {
     // Create message BEFORE streaming starts with a unique ID
     const messageId = Date.now();
     const questionText = question.trim();
-    
+
     // Create placeholder message immediately
     const placeholderChat = {
       id: messageId,
@@ -1402,7 +1453,9 @@ const AnalysisPage = () => {
       session_id: currentSessionId,
       question: questionText,
       answer: '', // Will be updated when streaming completes
-      display_text_left_panel: questionText,
+      // Custom prompts are shown by name only — the body goes to the model but
+      // is never displayed, matching how preset prompts behave.
+      display_text_left_panel: displayLabel || questionText,
       timestamp: new Date().toISOString(),
       used_chunk_ids: [],
       confidence: 0.8,
@@ -1446,6 +1499,9 @@ const AnalysisPage = () => {
       const body = useFolderChat
         ? {
             question: questionText,
+            // Custom prompts send their name so the thread and history show the
+            // label instead of the prompt body.
+            ...(displayLabel ? { prompt_label: displayLabel } : {}),
             session_id: currentSessionId,
             llm_name: llm_name || 'gemini',
           }
@@ -1453,7 +1509,7 @@ const AnalysisPage = () => {
             file_id: file_id,
             question: questionText,
             used_secret_prompt: false,
-            prompt_label: null,
+            prompt_label: displayLabel || null,
             session_id: currentSessionId,
             ...(llm_name ? { llm_name } : {}),
           };
@@ -1936,7 +1992,7 @@ const AnalysisPage = () => {
     }
   };
 
-  const handleSend = async (e, secretOverride = null) => {
+  const handleSend = async (e, secretOverride = null, customPrompt = null) => {
     if (e?.preventDefault) e.preventDefault();
 
     const secretPromptMode = Boolean(secretOverride?.secretId) || isSecretPromptSelected;
@@ -2363,7 +2419,9 @@ const AnalysisPage = () => {
         streamReaderRef.current = null;
       }
     } else {
-      if (!chatInput.trim()) {
+      // A custom prompt sends its full body to the model but is shown by name.
+      const questionText = (customPrompt?.prompt_text || chatInput).trim();
+      if (!questionText) {
         setError('Please enter a question.');
         return;
       }
@@ -2386,7 +2444,9 @@ const AnalysisPage = () => {
 
       try {
         console.log('[handleSend] Using custom query. LLM:', selectedLlmName || 'default (backend)');
-        await chatWithDocument(fileId || null, chatInput, sessionId, selectedLlmName);
+        await chatWithDocument(
+          fileId || null, questionText, sessionId, selectedLlmName, customPrompt?.name || null,
+        );
       } catch (error) {
         console.error('[handleSend] Chat error:', error);
       }
@@ -2615,6 +2675,7 @@ const AnalysisPage = () => {
 
   useEffect(() => {
     loadSecrets();
+    loadCustomPromptGroups();
   }, []);
 
 
@@ -3324,17 +3385,20 @@ const AnalysisPage = () => {
             )}
             <UpgradePlanBanner className="mx-auto mt-4 mb-2 max-w-3xl w-full" />
             <form onSubmit={handleSend} className="mx-auto mt-2">
-              {(isLoadingSecrets || secrets.length > 0) && (
-                <PromptChipsBar
-                  secrets={secrets}
-                  isLoading={isLoadingSecrets}
-                  selectedSecretId={selectedSecretId}
-                  activeLabel={isSecretPromptSelected ? activeDropdown : null}
-                  onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
-                  disabled={isLoading || isGeneratingInsights}
-                  className="mb-1"
-                />
-              )}
+              <PromptChipsBar
+                secrets={secrets}
+                isLoading={isLoadingSecrets}
+                selectedSecretId={selectedSecretId}
+                activeLabel={isSecretPromptSelected ? activeDropdown : null}
+                onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
+                disabled={isLoading || isGeneratingInsights}
+                className="mb-1"
+                onAddClick={() => setShowPromptBuilder(true)}
+                customGroups={customPromptGroups}
+                onSelectCustomPrompt={handleCustomPromptSelect}
+                onDeleteCustomPrompt={handleDeleteCustomPrompt}
+                onDeleteGroup={handleDeleteCustomGroup}
+              />
 
               <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-3 bg-gray-50 rounded-xl px-3 sm:px-5 py-4 sm:py-6 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
                 <UploadOptionsMenu
@@ -3642,18 +3706,21 @@ const AnalysisPage = () => {
               )}
               <UpgradePlanBanner className="mb-2" />
               <form onSubmit={handleSend}>
-                  {(isLoadingSecrets || secrets.length > 0) && (
-                    <PromptChipsBar
-                      secrets={secrets}
-                      isLoading={isLoadingSecrets}
-                      selectedSecretId={selectedSecretId}
-                      activeLabel={isSecretPromptSelected ? activeDropdown : null}
-                      onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
-                      disabled={isLoading || isGeneratingInsights}
-                      size="compact"
-                      className="mb-1"
-                    />
-                  )}
+                  <PromptChipsBar
+                    secrets={secrets}
+                    isLoading={isLoadingSecrets}
+                    selectedSecretId={selectedSecretId}
+                    activeLabel={isSecretPromptSelected ? activeDropdown : null}
+                    onSelect={(s) => handleDropdownSelect(s.name, s.id, s.llm_name)}
+                    disabled={isLoading || isGeneratingInsights}
+                    size="compact"
+                    className="mb-1"
+                    onAddClick={() => setShowPromptBuilder(true)}
+                    customGroups={customPromptGroups}
+                    onSelectCustomPrompt={handleCustomPromptSelect}
+                    onDeleteCustomPrompt={handleDeleteCustomPrompt}
+                    onDeleteGroup={handleDeleteCustomGroup}
+                  />
                 <div className="flex items-center space-x-1.5 bg-gray-50 rounded-xl px-2.5 py-2 focus-within:border-[#21C1B6] focus-within:bg-white focus-within:shadow-sm analysis-input-container">
                   <UploadOptionsMenu
                     fileInputRef={fileInputRef}
@@ -3796,6 +3863,13 @@ const AnalysisPage = () => {
           </div>
         </>
       )}
+
+      <CustomPromptBuilderModal
+        isOpen={showPromptBuilder}
+        onClose={() => setShowPromptBuilder(false)}
+        groups={customPromptGroups}
+        onSaved={() => loadCustomPromptGroups()}
+      />
 
       <MergeAnswersModal
         isOpen={showMergeModal}

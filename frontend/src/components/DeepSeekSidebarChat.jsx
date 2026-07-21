@@ -2,9 +2,12 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
-import { X, Send, ChevronDown, Loader2, Bot, Zap, Search, RotateCcw, BookOpen } from 'lucide-react';
+import { X, Send, ChevronDown, Loader2, Bot, Zap, Search, RotateCcw, BookOpen, Plus, FolderHeart } from 'lucide-react';
 import { useIntelligentFolderChat } from '../hooks/useIntelligentFolderChat';
 import { fetchSecretsList } from '../services/secretsService';
+import { fetchCustomPromptGroups, deleteCustomPrompt, deleteCustomPromptGroup } from '../services/customPromptsService';
+import CustomPromptBuilderModal from './CustomPromptBuilder/CustomPromptBuilderModal';
+import CustomPromptGroups from './CustomPromptBuilder/CustomPromptGroups';
 import documentApi from '../services/documentApi';
 import { normalizeMarkdownFormatting, ensureTableSeparators, markdownTableComponents, markdownRehypePlugins } from '../utils/markdownUtils';
 
@@ -66,6 +69,10 @@ export default function DeepSeekSidebarChat({ isOpen, onClose, sidebarCollapsed 
   const [presetsLoading, setPresetsLoading] = useState(false);
   const [presetSearch, setPresetSearch] = useState('');
 
+  const [customGroups, setCustomGroups] = useState([]);
+  const [customGroupsLoading, setCustomGroupsLoading] = useState(false);
+  const [showPromptBuilder, setShowPromptBuilder] = useState(false);
+
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
 
@@ -96,6 +103,19 @@ export default function DeepSeekSidebarChat({ isOpen, onClose, sidebarCollapsed 
       .catch(() => setPresets([]))
       .finally(() => setPresetsLoading(false));
   }, [isOpen]);
+
+  const loadCustomGroups = useCallback((showSpinner = false) => {
+    if (showSpinner) setCustomGroupsLoading(true);
+    fetchCustomPromptGroups()
+      .then((list) => setCustomGroups(Array.isArray(list) ? list : []))
+      .catch(() => {})
+      .finally(() => setCustomGroupsLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    loadCustomGroups(true);
+  }, [isOpen, loadCustomGroups]);
 
   useEffect(() => {
     if (!caseDropdownOpen) return;
@@ -147,6 +167,33 @@ export default function DeepSeekSidebarChat({ isOpen, onClose, sidebarCollapsed 
     if (!selectedCase) { setCaseDropdownOpen(true); return; }
     handleSend(null, preset.id);
   };
+
+  const handleCustomPromptClick = useCallback((prompt) => {
+    if (!selectedCase) { setCaseDropdownOpen(true); return; }
+    if (isStreaming || !prompt?.prompt_text) return;
+    setMessages((prev) => [
+      ...prev,
+      { role: 'user', text: `[My Prompt] ${prompt.name}`, id: Date.now(), isPreset: true },
+    ]);
+    void sendMessage(prompt.prompt_text, null, { llm_name: 'deepseek' });
+  }, [selectedCase, isStreaming, sendMessage]);
+
+  const handleDeleteCustomPrompt = useCallback(async (prompt) => {
+    if (!window.confirm(`Delete prompt "${prompt.name}"?`)) return;
+    try {
+      await deleteCustomPrompt(prompt.id);
+      loadCustomGroups();
+    } catch { /* keep list as-is on failure */ }
+  }, [loadCustomGroups]);
+
+  const handleDeleteCustomGroup = useCallback(async (group) => {
+    const count = group.prompts?.length ?? 0;
+    if (!window.confirm(`Delete group "${group.name}"${count ? ` and its ${count} prompt(s)` : ''}?`)) return;
+    try {
+      await deleteCustomPromptGroup(group.id);
+      loadCustomGroups();
+    } catch { /* keep list as-is on failure */ }
+  }, [loadCustomGroups]);
 
   const handleClearChat = () => { setMessages([]); clear(); };
 
@@ -225,6 +272,14 @@ export default function DeepSeekSidebarChat({ isOpen, onClose, sidebarCollapsed 
               <BookOpen size={14} />
               <span>Preset Prompts</span>
               {presets.length > 0 && <span className="ds-tab__badge">{presets.length}</span>}
+              <button
+                className="ds-presets__add"
+                onClick={() => setShowPromptBuilder(true)}
+                title="Create your own custom prompt"
+                aria-label="Create custom prompt"
+              >
+                <Plus size={14} />
+              </button>
             </div>
             <div className="ds-presets__search">
               <Search size={14} className="ds-presets__search-icon" />
@@ -257,6 +312,36 @@ export default function DeepSeekSidebarChat({ isOpen, onClose, sidebarCollapsed 
                   </button>
                 ))
               )}
+            </div>
+
+            {/* user's own prompt groups */}
+            <div className="ds-custom-section">
+              <div className="ds-presets__header ds-custom-section__header">
+                <FolderHeart size={14} />
+                <span>My Prompts</span>
+                {customGroups.length > 0 && (
+                  <span className="ds-tab__badge">
+                    {customGroups.reduce((n, g) => n + (g.prompts?.length ?? 0), 0)}
+                  </span>
+                )}
+                <button
+                  className="ds-presets__add"
+                  onClick={() => setShowPromptBuilder(true)}
+                  title="Create your own custom prompt"
+                  aria-label="Create custom prompt"
+                >
+                  <Plus size={14} />
+                </button>
+              </div>
+              <div className="ds-custom-section__body">
+                <CustomPromptGroups
+                  groups={customGroups}
+                  loading={customGroupsLoading}
+                  onPromptClick={handleCustomPromptClick}
+                  onDeletePrompt={handleDeleteCustomPrompt}
+                  onDeleteGroup={handleDeleteCustomGroup}
+                />
+              </div>
             </div>
           </div>
 
@@ -329,6 +414,13 @@ export default function DeepSeekSidebarChat({ isOpen, onClose, sidebarCollapsed 
 
         </div>
       </div>
+
+      <CustomPromptBuilderModal
+        isOpen={showPromptBuilder}
+        onClose={() => setShowPromptBuilder(false)}
+        groups={customGroups}
+        onSaved={() => loadCustomGroups()}
+      />
     </>
   );
 }

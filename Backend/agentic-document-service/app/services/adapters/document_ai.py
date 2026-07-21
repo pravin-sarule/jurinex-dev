@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -1349,16 +1350,36 @@ def _generation_config(
 
 # ── Thinking level → token budget ─────────────────────────────────────────────
 
-_THINKING_BUDGET_GEMINI = {"low": 1024,  "medium": 8192,  "high": 16384}
-_THINKING_BUDGET_CLAUDE = {"low": 5000,  "medium": 10000, "high": 16000}
+_THINKING_BUDGET_GEMINI = {"low": 512,   "medium": 1024,  "high": 1200}
+_THINKING_BUDGET_CLAUDE = {"low": 1024,  "medium": 1100,  "high": 1200}
 # Providers reject out-of-range budgets with 400 INVALID_ARGUMENT, which kills
 # the whole request (Gemini 2.5: 128–32768; Anthropic: >= 1024).
 _THINKING_BUDGET_RANGE = {"gemini": (128, 32768), "claude": (1024, 32000)}
+
+# Hard ceiling on thinking tokens. Thinking is billed as output, and the higher
+# tiers (previously 8192/16384) dominated the cost of an answer without a
+# matching quality gain on these tasks. Applies to admin-configured budgets too,
+# so no single model config can blow past it. Override with THINKING_BUDGET_CEILING.
+_THINKING_BUDGET_CEILING_DEFAULT = 1200
+
+
+def _thinking_budget_ceiling() -> int:
+    raw = str(os.environ.get("THINKING_BUDGET_CEILING", "")).strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return _THINKING_BUDGET_CEILING_DEFAULT
 
 
 def _resolve_thinking_budget(llm_params: dict, provider: str) -> int:
     budget_map = _THINKING_BUDGET_GEMINI if provider == "gemini" else _THINKING_BUDGET_CLAUDE
     lo, hi = _THINKING_BUDGET_RANGE.get(provider, (128, 32768))
+    # Never clamp below the provider's own minimum — Anthropic 400s under 1024.
+    hi = min(hi, max(lo, _thinking_budget_ceiling()))
     raw = llm_params.get("thinking_budget")
     # NOTE: bool is a subclass of int — an admin-UI toggle stored as
     # thinking_budget=true must not become budget_tokens=1 (Gemini 400s on it).

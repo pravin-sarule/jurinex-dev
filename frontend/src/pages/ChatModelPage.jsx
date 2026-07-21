@@ -1,6 +1,12 @@
 import '../styles/AnalysisPage.css';
 import PromptChipsBar from '../components/PromptChipsBar';
 import { fetchSecretsList, peekSecretsList } from '../services/secretsService';
+import CustomPromptBuilderModal from '../components/CustomPromptBuilder/CustomPromptBuilderModal';
+import {
+  fetchCustomPromptGroups,
+  deleteCustomPrompt,
+  deleteCustomPromptGroup,
+} from '../services/customPromptsService';
 import React, { useState, useEffect, useRef, useMemo, useCallback, startTransition } from 'react';
 import { flushSync } from 'react-dom';
 import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE } from '../config/apiConfig';
@@ -1039,6 +1045,8 @@ const ChatModelPage = () => {
 
   const [secrets, setSecrets] = useState([]);
   const [isLoadingSecrets, setIsLoadingSecrets] = useState(false);
+  const [customPromptGroups, setCustomPromptGroups] = useState([]);
+  const [showPromptBuilder, setShowPromptBuilder] = useState(false);
   const promptChips = useMemo(
     () => [
       ...BUILTIN_PROMPT_CHIPS,
@@ -1775,7 +1783,7 @@ const ChatModelPage = () => {
         if (response.success && Array.isArray(response.data?.sessions)) {
           const generalSessions = response.data.sessions.map((session) => ({
             session_id: session.session_id,
-            name: session.title || generateSessionName(session.first_question || session.first_message),
+            name: session.title || generateSessionName(session.first_prompt_label || session.first_question || session.first_message),
             first_question: session.first_question || session.first_message || '',
             created_at: session.last_message_at || session.created_at,
             message_count: session.message_count || 0,
@@ -1794,7 +1802,7 @@ const ChatModelPage = () => {
         if (docResponse.success && Array.isArray(docResponse.data?.sessions)) {
           const docSessions = docResponse.data.sessions.map((session) => ({
             session_id: session.session_id,
-            name: generateSessionName(session.first_question),
+            name: generateSessionName(session.first_prompt_label || session.first_question),
             first_question: session.first_question || '',
             created_at: session.last_message_at || session.first_message_at,
             message_count: session.message_count || 0,
@@ -1895,9 +1903,12 @@ const ChatModelPage = () => {
           session_id: item.session_id || sessionId,
           question: item.question,
           answer: item.answer,
+          // A stored prompt_label means the question body is a prompt, not
+          // something the user typed — show the label (custom prompts store one
+          // without used_secret_prompt).
           display_text_left_panel: item.used_secret_prompt
             ? `Analysis: ${item.prompt_label || 'Secret Prompt'}`
-            : item.question,
+            : (item.prompt_label || item.question),
           timestamp: item.created_at,
           type: 'chat',
           used_secret_prompt: item.used_secret_prompt || false,
@@ -2408,9 +2419,9 @@ const ChatModelPage = () => {
             )
           );
         },
-        null,
-        false,
-        null,
+        null,           // secretId
+        false,          // usedSecretPrompt
+        displayLabel,   // promptLabel — persists a custom prompt's name
         null,
         selectedLlmName,
         {
@@ -2460,6 +2471,50 @@ const ChatModelPage = () => {
         );
       }
     }
+  };
+
+  const loadCustomPromptGroups = useCallback(async () => {
+    try {
+      const groups = await fetchCustomPromptGroups();
+      setCustomPromptGroups(Array.isArray(groups) ? groups : []);
+    } catch {
+      /* custom prompts are optional — keep the current list on failure */
+    }
+  }, []);
+
+  const handleDeleteCustomPrompt = useCallback(async (prompt) => {
+    if (!window.confirm(`Delete the prompt "${prompt.name}"?`)) return;
+    try {
+      await deleteCustomPrompt(prompt.id);
+      await loadCustomPromptGroups();
+    } catch (err) {
+      setError(err?.message || 'Failed to delete the prompt.');
+    }
+  }, [loadCustomPromptGroups]);
+
+  const handleDeleteCustomGroup = useCallback(async (group) => {
+    const count = group.prompts?.length ?? 0;
+    const warning = count
+      ? `Delete the group "${group.name}" and the ${count} prompt(s) inside it?`
+      : `Delete the empty group "${group.name}"?`;
+    if (!window.confirm(warning)) return;
+    try {
+      await deleteCustomPromptGroup(group.id);
+      await loadCustomPromptGroups();
+    } catch (err) {
+      setError(err?.message || 'Failed to delete the group.');
+    }
+  }, [loadCustomPromptGroups]);
+
+  // Clicking a saved custom prompt runs it straight away. The thread shows only
+  // the prompt's name — the body is sent to the model but never displayed,
+  // matching how preset prompts behave.
+  // Deliberately not memoized: it must call the current render's handleSend so
+  // the send picks up the live fileId / sessionId.
+  const handleCustomPromptSelect = (prompt) => {
+    if (!prompt?.prompt_text || isLoading || isGeneratingInsights) return;
+    setChatMode('chat');
+    void handleSend({ preventDefault: () => {} }, null, prompt);
   };
 
   const loadSecrets = async () => {
@@ -3608,7 +3663,7 @@ const ChatModelPage = () => {
     }
   };
 
-  const handleSend = async (e, secretOverride = null) => {
+  const handleSend = async (e, secretOverride = null, customPrompt = null) => {
     if (e?.preventDefault) e.preventDefault();
 
     // Prevent double-submission while a request is in flight
@@ -3913,7 +3968,9 @@ const ChatModelPage = () => {
         streamReaderRef.current = null;
       }
     } else {
-      let question = chatInput.trim();
+      // A custom prompt sends its full body to the model but is shown in the
+      // thread by name only — same as a preset prompt.
+      let question = (customPrompt?.prompt_text || chatInput).trim();
       if (!question) {
         if (citationMode) {
           question = "Find relevant judgements and case law for this matter.";
@@ -3947,7 +4004,9 @@ const ChatModelPage = () => {
 
       try {
         const currentFileId = uploadedFileId || fileId;
-        const displayLabel = (citationMode && !chatInput.trim()) ? "Citation Search" : null;
+        const displayLabel =
+          customPrompt?.name
+          || ((citationMode && !chatInput.trim()) ? "Citation Search" : null);
         
         if (currentFileId) {
           const attachmentIds =
@@ -4190,6 +4249,7 @@ const ChatModelPage = () => {
 
   useEffect(() => {
     loadSecrets();
+    loadCustomPromptGroups();
     fetchChatSessions();
   }, []);
 
@@ -4214,7 +4274,7 @@ const ChatModelPage = () => {
         const currentSid = sessionId;
         const exists = prev.some((s) => s.session_id === currentSid);
         const firstMsg = sessionMessages[0];
-        const sessionName = generateSessionName(firstMsg?.display_text_left_panel || firstMsg?.question || '');
+        const sessionName = generateSessionName(firstMsg?.prompt_label || firstMsg?.display_text_left_panel || firstMsg?.question || '');
         if (!exists && currentSid) {
           const newSession = {
             session_id: currentSid,
@@ -5034,6 +5094,11 @@ const ChatModelPage = () => {
           }}
           disabled={isLoading || isGeneratingInsights}
           className="mb-2 w-full"
+          onAddClick={() => setShowPromptBuilder(true)}
+          customGroups={customPromptGroups}
+          onSelectCustomPrompt={handleCustomPromptSelect}
+          onDeleteCustomPrompt={handleDeleteCustomPrompt}
+          onDeleteGroup={handleDeleteCustomGroup}
         />
       )}
 
@@ -5241,6 +5306,12 @@ const ChatModelPage = () => {
   return (
     <div className="flex flex-col lg:flex-row h-[90vh] bg-white overflow-hidden">
       <DraftingModal open={showDraftingModal} onClose={() => setShowDraftingModal(false)} />
+      <CustomPromptBuilderModal
+        isOpen={showPromptBuilder}
+        onClose={() => setShowPromptBuilder(false)}
+        groups={customPromptGroups}
+        onSaved={() => loadCustomPromptGroups()}
+      />
       <ChatQuotaErrorModal
         error={error}
         onDismiss={() => setError(null)}
@@ -5509,7 +5580,7 @@ const ChatModelPage = () => {
                     </>
                   ) : (
                     sessionMessages.length > 0
-                      ? generateSessionName(sessionMessages[0]?.display_text_left_panel || sessionMessages[0]?.question || '')
+                      ? generateSessionName(sessionMessages[0]?.prompt_label || sessionMessages[0]?.display_text_left_panel || sessionMessages[0]?.question || '')
                       : 'New Conversation'
                   )}
                 </span>
@@ -5648,10 +5719,15 @@ const ChatModelPage = () => {
                       )
                       .map((msg, idx, arr) => {
                         const assistantContent = getAssistantDisplayForMessage(msg, idx);
+                        const storedLabel = msg.prompt_label || msg.promptLabel;
                         const questionLabel =
-        (msg.used_secret_prompt || msg.isSecretPrompt) && (msg.prompt_label || msg.promptLabel)
-          ? `Analysis: ${msg.prompt_label || msg.promptLabel}`
-          : sanitizeVisibleChatText(msg.display_text_left_panel || msg.question, 'Your question');
+        (msg.used_secret_prompt || msg.isSecretPrompt) && storedLabel
+          ? `Analysis: ${storedLabel}`
+          // A custom prompt stores its name without used_secret_prompt — never
+          // render the prompt body itself in the thread.
+          : storedLabel
+            ? sanitizeVisibleChatText(storedLabel, 'Your question')
+            : sanitizeVisibleChatText(msg.display_text_left_panel || msg.question, 'Your question');
                         const isCurrentStreaming = msg.isStreaming && msg.id === selectedMessageId;
                         // content-visibility:auto tells the browser to skip layout + paint for
                         // messages that are well off-screen. We leave the last 2 entries and

@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from app.api.routes.speech import router as speech_router
 from app.api.routes.cases import router as cases_router
 from app.api.routes.content import router as content_router
+from app.api.routes.custom_prompts import router as custom_prompts_router
 from app.api.routes.files import router as files_router
 from app.api.routes.health import router as health_router
 from app.api.routes.rbac import router as rbac_router
@@ -99,6 +100,9 @@ def create_app() -> FastAPI:
     app.include_router(cases_router)
     app.include_router(content_router)
     app.include_router(rbac_router)
+    # Static /api/files/custom-prompts prefix must register before the files
+    # router's /api/files/{folder_name} wildcard routes.
+    app.include_router(custom_prompts_router)
     app.include_router(files_router)
     if settings.enable_legacy_proxy:
         from app.api.routes.legacy_proxy import router as legacy_proxy_router
