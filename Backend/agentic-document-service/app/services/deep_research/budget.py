@@ -10,7 +10,8 @@ so the user is never left with nothing after paying.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 try:  # reuse the app-wide pricing so the rupee figure is consistent everywhere
     from app.services.token_usage_log import _model_cost_usd, _USD_TO_INR
@@ -26,8 +27,10 @@ class BudgetTracker:
     input_tokens: int = 0
     output_tokens: int = 0
     calls: int = 0
+    # Per-call breakdown for the end-of-run token/cost table (one entry per model call).
+    steps: list[dict[str, Any]] = field(default_factory=list)
 
-    def add(self, model: str, input_tokens: int, output_tokens: int) -> float:
+    def add(self, model: str, input_tokens: int, output_tokens: int, label: str = "") -> float:
         """Record one model call's usage; returns the rupee cost of THIS call."""
         it = max(0, int(input_tokens or 0))
         ot = max(0, int(output_tokens or 0))
@@ -41,6 +44,15 @@ class BudgetTracker:
             if usd is not None:
                 inr = usd * float(_USD_TO_INR)
         self.spent_inr += inr
+
+        self.steps.append({
+            "label": label or f"call {self.calls}",
+            "model": model,
+            "input": it,
+            "output": ot,
+            "total": it + ot,
+            "cost_inr": inr,
+        })
         return inr
 
     @property

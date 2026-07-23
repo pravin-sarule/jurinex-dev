@@ -14,11 +14,12 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any, AsyncGenerator
 
 from app.core.config import get_settings
 
-from . import events, gemini, prompts
+from . import events, gemini, prompts, report
 from .budget import BudgetTracker
 from .config import DeepResearchConfig
 
@@ -76,6 +77,11 @@ async def run_deep_research(
     settings = get_settings()
     cfg = DeepResearchConfig.from_settings(settings, llm_config)
     budget = BudgetTracker(limit_inr=cfg.budget_inr)
+    # Current date anchors the prompts (e.g. "23 July 2026") so the models can flag
+    # renumbered/replaced provisions (IPC/CrPC/Evidence Act -> BNS/BNSS/BSA) and state
+    # what is currently in force. Non-zero-padded day to match the template example.
+    _now = datetime.now()
+    today = f"{_now.day} {_now:%B %Y}"
 
     question = (question or "").strip()
     if not question:
@@ -98,10 +104,12 @@ async def run_deep_research(
     try:
         plan_text, it, ot = await asyncio.to_thread(
             gemini.reason, cfg.reasoning_model,
-            prompts.planner(question, cfg.max_rounds, document_context, cfg.plan_context_chars),
+            prompts.planner(question, cfg.max_rounds, document_context, cfg.plan_context_chars, today),
             temperature=0.1, max_output_tokens=1024,
         )
-        budget.add(cfg.reasoning_model, it, ot)
+        _cost = budget.add(cfg.reasoning_model, it, ot, label="Plan")
+        logger.info("[DeepResearch] plan · model=%s · in=%d out=%d · ₹%.2f",
+                    cfg.reasoning_model, it, ot, _cost)
     except Exception as exc:  # planning is best-effort; fall back to the raw question
         logger.warning("[DeepResearch] planning failed: %s", exc)
         plan_text = ""
@@ -133,7 +141,7 @@ async def run_deep_research(
         try:
             text, cites, it, ot = await asyncio.to_thread(
                 gemini.search, cfg.search_model,
-                prompts.round_search(question, subq, findings, document_context, cfg.round_context_chars),
+                prompts.round_search(question, subq, findings, document_context, cfg.round_context_chars, today),
                 temperature=cfg.temperature, max_output_tokens=min(cfg.max_output_tokens, 8192),
             )
         except Exception as exc:
@@ -141,7 +149,13 @@ async def run_deep_research(
             yield events.thinking(f"Round {round_no}: search failed ({exc}); continuing.")
             continue
 
-        budget.add(cfg.search_model, it, ot)
+        _cost = budget.add(cfg.search_model, it, ot, label=f"Round {round_no} search")
+        logger.info(
+            "[DeepResearch] round %d search · model=%s · in=%d out=%d · ₹%.2f · "
+            "cumulative in=%d out=%d ₹%.2f",
+            round_no, cfg.search_model, it, ot, _cost,
+            budget.input_tokens, budget.output_tokens, budget.spent_inr,
+        )
         findings.append({"query": subq, "text": text, "citations": cites})
         all_citations.extend(cites)
         yield events.thinking(
@@ -154,10 +168,12 @@ async def run_deep_research(
             try:
                 gap_text, it, ot = await asyncio.to_thread(
                     gemini.reason, cfg.reasoning_model,
-                    prompts.gap_check(question, findings),
+                    prompts.gap_check(question, findings, round_no, cfg.max_rounds),
                     temperature=0.0, max_output_tokens=256,
                 )
-                budget.add(cfg.reasoning_model, it, ot)
+                _cost = budget.add(cfg.reasoning_model, it, ot, label=f"Round {round_no} gap-check")
+                logger.info("[DeepResearch] round %d gap-check · model=%s · in=%d out=%d · ₹%.2f",
+                            round_no, cfg.reasoning_model, it, ot, _cost)
             except Exception as exc:
                 logger.warning("[DeepResearch] gap check failed: %s", exc)
                 gap_text = "DONE"
@@ -183,7 +199,7 @@ async def run_deep_research(
         # event loop. The generator keeps the genai client alive for the whole stream.
         it_stream = gemini.synthesis_stream(
             cfg.synthesis_model,
-            prompts.synthesis(question, findings, document_context, cfg.synth_context_chars),
+            prompts.synthesis(question, findings, document_context, cfg.synth_context_chars, today),
             temperature=cfg.temperature, max_output_tokens=cfg.max_output_tokens,
         )
         while True:
@@ -206,9 +222,20 @@ async def run_deep_research(
             yield events.error(f"Deep Research synthesis failed: {exc}")
             return
 
-    budget.add(cfg.synthesis_model, last_it, last_ot)
+    _cost = budget.add(cfg.synthesis_model, last_it, last_ot, label="Synthesis")
+    logger.info("[DeepResearch] synthesis · model=%s · in=%d out=%d · ₹%.2f",
+                cfg.synthesis_model, last_it, last_ot, _cost)
     answer = "".join(answer_parts).strip()
     citations_payload = _dedupe_citations(all_citations)
+
+    # ── Per-step token & cost table for this Deep Research run (console + logs) ───
+    report.log_usage_table(
+        budget, cfg,
+        rounds=round_no,
+        session_id=session_id or "",
+        answer_length=len(answer),
+        sources=len(citations_payload),
+    )
 
     _record_usage_best_effort(cfg, budget)
 

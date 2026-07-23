@@ -54,7 +54,8 @@ export default function IntelligentFolderChat({
   const [learningMode, setLearningMode] = useState(() => localStorage.getItem('learning_mode_enabled') === 'true');
   const [researchMode, setResearchMode] = useState(() => localStorage.getItem('research_mode_enabled') === 'true');
   // Deep Research: bounded agentic loop (plan → web-search rounds → synthesize) under a ₹10 budget.
-  const [deepResearchMode, setDeepResearchMode] = useState(() => localStorage.getItem('deep_research_enabled') === 'true');
+  // Session-only (NOT persisted): it is a sub-toggle of Research, so it must never outlive it.
+  const [deepResearchMode, setDeepResearchMode] = useState(false);
   const [adversarialMode, setAdversarialMode] = useState(() => localStorage.getItem('learning_adversarial_mode') === 'true');
   const [learningSessionId, setLearningSessionId] = useState(null);
   const [turnCount, setTurnCount] = useState(0);
@@ -127,7 +128,7 @@ export default function IntelligentFolderChat({
     }
     o.learning_mode = !!learningMode;
     o.research_mode = !!researchMode;
-    o.deep_research = !!deepResearchMode;
+    o.deep_research = !!(researchMode && deepResearchMode);
     if (learningMode) {
       o.adversarial_mode = !!adversarialMode;
       if (relationshipHint) o.context_selection = relationshipHint;
@@ -343,9 +344,6 @@ export default function IntelligentFolderChat({
   useEffect(() => {
     localStorage.setItem('research_mode_enabled', String(researchMode));
   }, [researchMode]);
-  useEffect(() => {
-    localStorage.setItem('deep_research_enabled', String(deepResearchMode));
-  }, [deepResearchMode]);
   useEffect(() => {
     localStorage.setItem('learning_adversarial_mode', String(adversarialMode));
   }, [adversarialMode]);
@@ -650,23 +648,13 @@ export default function IntelligentFolderChat({
       setMessages([]);
       setCurrentMessageId(null);
       finalizedMessageIds.current.clear();
-    } else if (style === 'deep_research') {
-      if (learningMode) {
-        setLearningMode(false);
-        setLearningSessionId(null);
-        setTurnCount(0);
-      }
-      setResearchMode(false);
-      setDeepResearchMode(true);
-      setMessages([]);
-      setCurrentMessageId(null);
-      finalizedMessageIds.current.clear();
     } else {
       if (learningMode) await handleLearningModeToggle(false);
       setResearchMode(false);
       setDeepResearchMode(false);
     }
-    setShowStyleDropdown(false);
+    // Keep the menu open when Research is picked so its nested Deep Research toggle shows.
+    if (style !== 'research') setShowStyleDropdown(false);
   };
 
   const getProcessedMsgText = (text) => {
@@ -826,10 +814,25 @@ export default function IntelligentFolderChat({
                 <Search className="h-3.5 w-3.5" />
                 Research
               </button>
-              <button type="button" className="style-dropdown-item" onClick={() => handleSelectStyle("deep_research")} disabled={!String(folderName || "").trim()} title="Bounded agentic research: plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹10 budget).">
-                <Search className="h-3.5 w-3.5" />
-                Deep Research · ₹10
-              </button>
+              {/* Deep Research is a sub-toggle of Research: shown only while Research is active;
+                  toggling keeps the menu open so its ON/OFF state stays visible. */}
+              {researchMode && (
+                <button
+                  type="button"
+                  className="style-dropdown-item"
+                  style={{ paddingLeft: '1.75rem', justifyContent: 'space-between' }}
+                  onClick={(e) => { e.stopPropagation(); setDeepResearchMode((v) => !v); }}
+                  title="Bounded agentic research: plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹10 budget)."
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <Search className="h-3.5 w-3.5" />
+                    Deep Research · ₹10
+                  </span>
+                  <span style={{ fontSize: '10px', fontWeight: 700, color: deepResearchMode ? '#21C1B6' : '#9ca3af' }}>
+                    {deepResearchMode ? 'ON' : 'OFF'}
+                  </span>
+                </button>
+              )}
             </div>
           )}
         </div>
