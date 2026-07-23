@@ -73,7 +73,11 @@ async def run_deep_research(
     document_context: str,
     session_id: str,
     llm_config: dict | None = None,
+    on_result=None,
 ) -> AsyncGenerator[str, None]:
+    """Yields SSE strings for the whole run. If `on_result` is given it is AWAITED with
+    (answer, citations) right BEFORE the terminal `done` event is emitted — so the caller can
+    persist the chat to history before the client sees `done` (and refreshes its session list)."""
     settings = get_settings()
     cfg = DeepResearchConfig.from_settings(settings, llm_config)
     budget = BudgetTracker(limit_inr=cfg.budget_inr)
@@ -240,6 +244,14 @@ async def run_deep_research(
     )
 
     _record_usage_best_effort(cfg, budget)
+
+    # Persist the chat BEFORE emitting `done` (the client refreshes its session list on
+    # `done`, so the row must already exist). Without this the run streams but is never saved.
+    if on_result is not None and answer:
+        try:
+            await on_result(answer, citations_payload)
+        except Exception as exc:
+            logger.warning("[DeepResearch] on_result persist hook failed: %s", exc)
 
     yield events.thinking(
         f"Done · {round_no} search round(s) · ₹{budget.spent_inr:.2f} of ₹{cfg.budget_inr:.0f} spent."

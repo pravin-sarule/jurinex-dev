@@ -3604,14 +3604,47 @@ async def intelligent_chat_stream(
                     # ── Deep Research short-circuit ──────────────────────────────────────────────
                     # Hand off to the bounded agentic loop: it runs plan → web-search rounds →
                     # synthesize under a hard rupee budget and streams the SAME SSE shapes
-                    # (status/thinking/chunk/done), so nothing downstream here needs to run.
+                    # (status/thinking/chunk/done). We generate/keep a stable session_id and,
+                    # after the stream, persist the Q&A to folder_chats so it shows in history and
+                    # the browser keeps this chat (instead of opening a fresh one).
                     if deep_research:
                         from app.services.deep_research import run_deep_research
+                        _dr_session_id = str((chat_request.session_id or "").strip() or uuid.uuid4())
+                        _dr_sec = (chat_request.secret_id or "").strip() or None
+                        _dr_q = str(getattr(chat_request, "question", "") or effective_query_text or "").strip()
+
+                        async def _dr_persist(_answer: str, _citations: list) -> None:
+                            _a = str(_answer or "").strip()
+                            if not _a:
+                                return
+
+                            def _save() -> None:
+                                folder_service._save_folder_chat_to_db(  # noqa: SLF001
+                                    user_id=user_id,
+                                    folder_name=folder_name,
+                                    question=_dr_q,
+                                    answer=_a,
+                                    session_id=_dr_session_id,
+                                    citations=[],
+                                    used_secret_prompt=bool(_dr_sec),
+                                    prompt_label=(chat_request.prompt_label or "").strip() or None,
+                                    secret_id=_dr_sec,
+                                )
+
+                            try:
+                                await _run_blocking(_save, timeout_s=20.0, timeout_message="deep_research_persist")
+                            except Exception as _dr_persist_exc:
+                                logger.warning(
+                                    "[Route:intelligent_chat_stream] deep_research persist failed folder=%s err=%s",
+                                    folder_name, _dr_persist_exc,
+                                )
+
                         async for _dr_evt in run_deep_research(
                             question=effective_query_text,
                             document_context=context,
-                            session_id=(chat_request.session_id or ""),
+                            session_id=_dr_session_id,
                             llm_config=llm_config,
+                            on_result=_dr_persist,
                         ):
                             yield _dr_evt
                         return
