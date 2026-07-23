@@ -653,8 +653,7 @@ export default function IntelligentFolderChat({
       setResearchMode(false);
       setDeepResearchMode(false);
     }
-    // Keep the menu open when Research is picked so its nested Deep Research toggle shows.
-    if (style !== 'research') setShowStyleDropdown(false);
+    setShowStyleDropdown(false);
   };
 
   const getProcessedMsgText = (text) => {
@@ -814,25 +813,6 @@ export default function IntelligentFolderChat({
                 <Search className="h-3.5 w-3.5" />
                 Research
               </button>
-              {/* Deep Research is a sub-toggle of Research: shown only while Research is active;
-                  toggling keeps the menu open so its ON/OFF state stays visible. */}
-              {researchMode && (
-                <button
-                  type="button"
-                  className="style-dropdown-item"
-                  style={{ paddingLeft: '1.75rem', justifyContent: 'space-between' }}
-                  onClick={(e) => { e.stopPropagation(); setDeepResearchMode((v) => !v); }}
-                  title="Bounded agentic research: plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹15 budget)."
-                >
-                  <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <Search className="h-3.5 w-3.5" />
-                    Deep Research · ₹15
-                  </span>
-                  <span style={{ fontSize: '10px', fontWeight: 700, color: deepResearchMode ? '#21C1B6' : '#9ca3af' }}>
-                    {deepResearchMode ? 'ON' : 'OFF'}
-                  </span>
-                </button>
-              )}
             </div>
           )}
         </div>
@@ -1120,12 +1100,37 @@ export default function IntelligentFolderChat({
               <button type="button" className="learning-chip-close" onClick={() => setResearchMode(false)} disabled={isStreaming}>×</button>
             </div>
           )}
-          {deepResearchMode && (
-            <div className="research-active-chip" title="Bounded agentic research: multiple live web-search rounds then a cited report. Hard ₹15 budget.">
-              <Search className="h-3.5 w-3.5" />
-              <span>Deep Research · ₹15</span>
-              <button type="button" className="learning-chip-close" onClick={() => setDeepResearchMode(false)} disabled={isStreaming}>×</button>
-            </div>
+          {/* Deep Research toggle: appears on the prompt card once Research is selected.
+              OFF by default (reset whenever Research is (re)selected) — the user opts in
+              per-message by clicking the switch. */}
+          {researchMode && (
+            <button
+              type="button"
+              onClick={() => setDeepResearchMode((v) => !v)}
+              disabled={isStreaming}
+              className="research-active-chip"
+              style={{ cursor: isStreaming ? 'default' : 'pointer', gap: '6px' }}
+              title="Deep Research: bounded agentic loop — plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹15 budget)."
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              <span>Deep Research</span>
+              <span
+                style={{
+                  position: 'relative', display: 'inline-flex', alignItems: 'center',
+                  width: '28px', height: '16px', borderRadius: '9999px', flexShrink: 0,
+                  background: deepResearchMode ? '#21C1B6' : '#d1d5db', transition: 'background 0.15s',
+                }}
+              >
+                <span
+                  style={{
+                    display: 'block', width: '12px', height: '12px', borderRadius: '9999px',
+                    background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.25)',
+                    transform: deepResearchMode ? 'translateX(14px)' : 'translateX(2px)',
+                    transition: 'transform 0.15s',
+                  }}
+                />
+              </span>
+            </button>
           )}
           <input
             ref={inputRef}

@@ -4152,7 +4152,7 @@ const ChatInterface = () => {
                     </button>
                     <button
                       type="button"
-                      onClick={() => { setLearningModeActive(false); setResearchModeActive(true); setDeepResearchActive(false); closePanel(); }}
+                      onClick={() => { setLearningModeActive(false); setResearchModeActive(true); setDeepResearchActive(false); setShowStyleDropdown(false); closePanel(); }}
                       className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50"
                     >
                       <span className="flex items-center gap-2">
@@ -4161,27 +4161,36 @@ const ChatInterface = () => {
                       </span>
                       {researchModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
                     </button>
-                    {/* Deep Research is a sub-toggle of Research: shown only while Research is
-                        active, and toggling it keeps the menu open so the state is visible. */}
-                    {researchModeActive && (
-                      <button
-                        type="button"
-                        onClick={() => setDeepResearchActive((v) => !v)}
-                        className="w-full flex items-center justify-between pl-9 pr-3 py-2 text-xs text-gray-600 hover:bg-gray-50 border-t border-gray-50"
-                        title="Bounded agentic research: plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹15 budget)."
-                      >
-                        <span className="flex items-center gap-2">
-                          <Sparkles className="h-3 w-3 text-[#21C1B6]" />
-                          Deep Research · ₹15
-                        </span>
-                        <span className={`text-[10px] font-bold tracking-wide ${deepResearchActive ? 'text-[#21C1B6]' : 'text-gray-400'}`}>
-                          {deepResearchActive ? 'ON' : 'OFF'}
-                        </span>
-                      </button>
-                    )}
                   </div>
                 )}
               </div>
+
+              {/* Deep Research toggle: appears directly on the prompt card once Research is
+                  selected. OFF by default (deepResearchActive resets to false whenever Research
+                  mode is (re)selected) — the user opts in per-message. */}
+              {researchModeActive && (
+                <button
+                  type="button"
+                  onClick={() => setDeepResearchActive((v) => !v)}
+                  className={`flex-shrink-0 flex items-center gap-1.5 pl-2.5 pr-1.5 py-1.5 rounded-xl text-[11px] font-semibold transition-colors ${
+                    deepResearchActive ? 'bg-teal-50 text-[#0f766e]' : 'bg-gray-50 text-gray-500 hover:text-gray-700'
+                  }`}
+                  title="Deep Research: bounded agentic loop — plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹15 budget)."
+                >
+                  Deep Research
+                  <span
+                    className={`relative inline-flex h-4 w-7 flex-shrink-0 items-center rounded-full transition-colors ${
+                      deepResearchActive ? 'bg-[#21C1B6]' : 'bg-gray-300'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${
+                        deepResearchActive ? 'translate-x-3.5' : 'translate-x-0.5'
+                      }`}
+                    />
+                  </span>
+                </button>
+              )}
 
               {/* Divider */}
               <div className="w-px h-5 bg-gray-200 flex-shrink-0" />
