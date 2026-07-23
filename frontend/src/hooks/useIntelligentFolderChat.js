@@ -408,6 +408,9 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
         if (streamOpts.learning_mode != null) {
           requestBody.learning_mode = !!streamOpts.learning_mode;
         }
+        if (streamOpts.research_mode != null) {
+          requestBody.research_mode = !!streamOpts.research_mode;
+        }
         if (streamOpts.adversarial_mode != null) {
           requestBody.adversarial_mode = !!streamOpts.adversarial_mode;
         }

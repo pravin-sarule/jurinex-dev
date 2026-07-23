@@ -133,6 +133,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("EMBEDDING_MODEL"),
     )
     gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY"))
+    research_model_name: str = Field(
+        default="gemini-2.5-pro",
+        validation_alias=AliasChoices("RESEARCH_MODEL_NAME"),
+    )
     # Dedicated key for Gemma models (gemma-*). Falls back to GEMINI_API_KEY when blank.
     gemma_api_key: str = Field(default="", validation_alias=AliasChoices("GEMMA_API_KEY"))
     # Dedicated model for draft-from-template mode. A stronger model (e.g. gemini-3.1-pro-preview)

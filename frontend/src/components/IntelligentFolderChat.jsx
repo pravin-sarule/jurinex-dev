@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useIntelligentFolderChat } from '../hooks/useIntelligentFolderChat';
-import { BookOpen, ChevronDown, Mic, MicOff, Send, Sparkles, Copy, Download, FileText, Printer, Code } from 'lucide-react';
+import { BookOpen, ChevronDown, Mic, MicOff, Send, Sparkles, Copy, Download, FileText, Printer, Code, Search } from 'lucide-react';
 import { getCleanText, downloadAsPdf, downloadAsHtml, printResponse } from '../utils/responseExportUtils';
 import BrandingDownloadModal from './BrandingDownload/BrandingDownloadModal';
 import './IntelligentFolderChat.css';
@@ -52,6 +52,7 @@ export default function IntelligentFolderChat({
   const [isListening, setIsListening] = useState(false);
   const [recognition, setRecognition] = useState(null);
   const [learningMode, setLearningMode] = useState(() => localStorage.getItem('learning_mode_enabled') === 'true');
+  const [researchMode, setResearchMode] = useState(() => localStorage.getItem('research_mode_enabled') === 'true');
   const [adversarialMode, setAdversarialMode] = useState(() => localStorage.getItem('learning_adversarial_mode') === 'true');
   const [learningSessionId, setLearningSessionId] = useState(null);
   const [turnCount, setTurnCount] = useState(0);
@@ -123,12 +124,13 @@ export default function IntelligentFolderChat({
       if (Number.isFinite(t)) o.model_temperature = t;
     }
     o.learning_mode = !!learningMode;
+    o.research_mode = !!researchMode;
     if (learningMode) {
       o.adversarial_mode = !!adversarialMode;
       if (relationshipHint) o.context_selection = relationshipHint;
     }
     return Object.keys(o).length ? o : null;
-  }, [learningMode, adversarialMode, relationshipHint]);
+  }, [learningMode, researchMode, adversarialMode, relationshipHint]);
 
   const {
     text,
@@ -335,6 +337,9 @@ export default function IntelligentFolderChat({
   useEffect(() => {
     localStorage.setItem('learning_mode_enabled', String(learningMode));
   }, [learningMode]);
+  useEffect(() => {
+    localStorage.setItem('research_mode_enabled', String(researchMode));
+  }, [researchMode]);
   useEffect(() => {
     localStorage.setItem('learning_adversarial_mode', String(adversarialMode));
   }, [adversarialMode]);
@@ -625,9 +630,21 @@ export default function IntelligentFolderChat({
 
   const handleSelectStyle = async (style) => {
     if (style === 'learning') {
+      setResearchMode(false);
       await handleLearningModeToggle(true);
+    } else if (style === 'research') {
+      if (learningMode) {
+        setLearningMode(false);
+        setLearningSessionId(null);
+        setTurnCount(0);
+      }
+      setResearchMode(true);
+      setMessages([]);
+      setCurrentMessageId(null);
+      finalizedMessageIds.current.clear();
     } else {
-      await handleLearningModeToggle(false);
+      if (learningMode) await handleLearningModeToggle(false);
+      setResearchMode(false);
     }
     setShowStyleDropdown(false);
   };
@@ -757,17 +774,18 @@ export default function IntelligentFolderChat({
         <h3>
           Intelligent Folder Chat
           {learningMode ? <span className="learning-mode-tag">📖 Learning Mode</span> : null}
+          {researchMode ? <span className="research-mode-tag">Research Mode · Live web</span> : null}
         </h3>
         <div className="style-dropdown-wrap" ref={styleDropdownRef}>
           <button
             type="button"
-            className={`learning-pill-toggle ${learningMode ? 'active' : ''}`}
+            className={`learning-pill-toggle ${learningMode || researchMode ? 'active' : ''}`}
             onClick={() => setShowStyleDropdown((s) => !s)}
             disabled={isStreaming || !String(folderName || '').trim()}
             title={!String(folderName || '').trim() ? 'Select a folder first' : 'Choose response style'}
           >
             <span className="learning-pill-knob" />
-            <span className="learning-pill-label">{learningMode ? 'Learning' : 'Normal'}</span>
+            <span className="learning-pill-label">{learningMode ? 'Learning' : researchMode ? 'Research' : 'Normal'}</span>
             <ChevronDown className="h-3 w-3" />
           </button>
           {showStyleDropdown && (
@@ -782,6 +800,10 @@ export default function IntelligentFolderChat({
                 disabled={!String(folderName || '').trim()}
               >
                 Learning
+              </button>
+              <button type="button" className="style-dropdown-item" onClick={() => handleSelectStyle("research")} disabled={!String(folderName || "").trim()}>
+                <Search className="h-3.5 w-3.5" />
+                Research
               </button>
             </div>
           )}
@@ -984,7 +1006,6 @@ export default function IntelligentFolderChat({
                       <div className="status-spinner"></div>
                       <div className="status-content">
                         <div className="status-label">
-                          {msg.status.status}
                         </div>
                         <div className="status-message">
                           {msg.status.message}
@@ -1002,6 +1023,12 @@ export default function IntelligentFolderChat({
                           <span className="method-tooltip">
                             Using Gemini Eyeball - analyzing all folder documents
                           </span>
+                        </>
+                      ) : msg.method === 'gemini_research' ? (
+                        <>
+                          <span className="method-icon">🌐</span>
+                          <span className="method-label">Live Research</span>
+                          <span className="method-tooltip">Gemini with Google Search grounding and case documents</span>
                         </>
                       ) : (
                         <>
@@ -1052,12 +1079,19 @@ export default function IntelligentFolderChat({
               </button>
             </div>
           )}
+          {researchMode && (
+            <div className="research-active-chip" title="Gemini research with live Google Search grounding">
+              <Search className="h-3.5 w-3.5" />
+              <span>Research</span>
+              <button type="button" className="learning-chip-close" onClick={() => setResearchMode(false)} disabled={isStreaming}>×</button>
+            </div>
+          )}
           <input
             ref={inputRef}
             type="text"
             value={input}
             onChange={handleInputChange}
-            placeholder={isSecretPromptSelected ? `Using: ${activeDropdown}` : "Ask a question about your documents..."}
+            placeholder={isSecretPromptSelected ? `Using: ${activeDropdown}` : researchMode ? "Research this topic using case documents and the live web..." : "Ask a question about your documents..."}
             disabled={isStreaming || (learningMode && !!learningPopupQuestion)}
             className="flex-grow bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 text-sm font-medium py-2 min-w-0"
             autoFocus

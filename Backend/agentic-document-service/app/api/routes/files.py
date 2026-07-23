@@ -3051,6 +3051,10 @@ async def intelligent_chat_stream(
         _rag_chunks_used: int | None = None
 
         learning_mode = bool(getattr(chat_request, "learning_mode", False))
+        research_mode = bool(getattr(chat_request, "research_mode", False))
+        if learning_mode and research_mode:
+            yield _sse({"type": "error", "message": "Choose either Learning Mode or Research Mode, not both."})
+            return
         learning_agent_name = "learning_mode_agent" if learning_mode else None
         learning_state = None
         if learning_mode:
@@ -3285,6 +3289,8 @@ async def intelligent_chat_stream(
             max_context_documents = max(1, int(llm_config.get("max_context_documents") or default_cap))
             if learning_mode or _draft_req:
                 max_context_documents = min(len(eligible_docs), max(max_context_documents, 24))
+            elif research_mode:
+                max_context_documents = min(len(eligible_docs), max(max_context_documents, 12))
             doc_texts = [
                 {
                     "name": d.get("name") or d.get("originalname") or "document",
@@ -3491,8 +3497,8 @@ async def intelligent_chat_stream(
                         _chunk_exc,
                     )
 
-            yield _sse({"type": "status", "status": "generating", "message": "Generating answer from documents..."})
-            yield _sse({"type": "thinking", "text": f"Loaded {len(doc_texts)} document(s). Generating answer now...\n"})
+            yield _sse({"type": "status", "status": "researching" if research_mode else "generating", "message": "Researching with Gemini and live Google Search..." if research_mode else "Generating answer from documents..."})
+            yield _sse({"type": "thinking", "text": (f"Loaded {len(doc_texts)} document(s). Searching the live web and cross-checking sources...\n" if research_mode else f"Loaded {len(doc_texts)} document(s). Generating answer now...\n")})
 
             non_stream_timeout_s = min(
                 600.0,
@@ -3882,6 +3888,18 @@ async def intelligent_chat_stream(
                             f"=== USER INSTRUCTION ===\n{query_text}\n\n"
                             "=== COMPLETED DRAFT ==="
                         )
+                    elif research_mode:
+                        prompt = (
+                            "You are Jurinex Research Agent, a careful legal and factual researcher. "
+                            "Use Google Search for current or externally verifiable information and the supplied case documents as private context. "
+                            "Clearly distinguish document-supported claims from web-supported claims. Never invent a source, URL, quotation, date, holding, or case fact. "
+                            "Prefer primary authoritative sources such as courts, legislation, regulators, and government publications. Explain reliable-source conflicts. "
+                            "For material current claims include inline Markdown links and finish with a ## Sources section of the most important links. State the research date. "
+                            "Do not treat search snippets alone as conclusive evidence.\n\n"
+                            f"=== PRIVATE CASE DOCUMENTS ===\n{context}\n\n"
+                            f"=== RESEARCH QUESTION ===\n{effective_query_text}\n\n"
+                            "=== RESEARCH REPORT ==="
+                        )
                     elif is_deep:
                         # Deep/extreme asks (e.g. multi-section court-ready briefs): ONE single
                         # streaming call with the FULL document and a no-ceiling, follow-the-user's-
@@ -4020,6 +4038,18 @@ async def intelligent_chat_stream(
                     )
                     # Store for token-usage logging below
                     actual_model_name = resolved_model_name
+
+                    if research_mode:
+                        resolved_model_name = str(getattr(settings, "research_model_name", "") or "").strip() or "gemini-2.5-pro"
+                        actual_model_name = resolved_model_name
+                        stream_provider = "gemini"
+                        from google.genai import types as _research_types
+                        _research_max = int((llm_config or {}).get("max_summarization_output_tokens") or (llm_config or {}).get("max_output_tokens") or 32768)
+                        stream_cfg = _research_types.GenerateContentConfig(
+                            temperature=0.2,
+                            max_output_tokens=min(_research_max, 65536),
+                            tools=[_research_types.Tool(google_search=_research_types.GoogleSearch())],
+                        )
 
                     # Draft-from-template: force the selected draft engine (frontend dropdown, else the
                     # .env default) instead of the admin-selected chat model. Both Gemini-3.x and Claude
@@ -5020,8 +5050,8 @@ async def intelligent_chat_stream(
             yield _sse({
                 "type": "metadata",
                 "session_id": session_id,
-                "method": ("template_draft" if is_draft else "gemini_direct"),
-                "routing_decision": "db_text_fallback",
+                "method": ("template_draft" if is_draft else "gemini_research" if research_mode else "gemini_direct"),
+                "routing_decision": "google_search_grounded" if research_mode else "db_text_fallback",
                 "prompt_label": (
                     display_question
                     if (chat_request.secret_id or "").strip()
