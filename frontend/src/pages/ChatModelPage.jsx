@@ -36,6 +36,7 @@ import {
 import { ensureTableSeparators, normalizeMarkdownFormatting, extractTableData } from '../utils/markdownUtils';
 import InteractiveTable from '../components/InteractiveTable';
 import { buildSuggestedQuestions } from '../utils/suggestedQuestions';
+import { notifyResponseComplete, ensureNotificationPermission } from '../utils/responseNotifier';
 
 import { formatFileSize } from '../utils/planUtils';
 import { useLlmChatLimits } from '../hooks/useLlmChatLimits';
@@ -2023,6 +2024,7 @@ const ChatModelPage = () => {
 
   const askGeneralQuestionToChat = async (question, displayLabel = null) => {
     try {
+      ensureNotificationPermission();
       setIsLoading(true);
       setIsGeneratingInsights(true);
       setError(null);
@@ -2137,6 +2139,7 @@ const ChatModelPage = () => {
           setIsLoading(false);
           setIsGeneratingInsights(false);
           setSuccess('Legal question answered!');
+          notifyResponseComplete();
         },
         (errorMessage, details, code) => {
           console.error('[General Chat] Stream error:', errorMessage, { code, details });
@@ -2178,6 +2181,7 @@ const ChatModelPage = () => {
   const askQuestionToChat = async (question, fileId, fileIdsOverride = null, displayLabel = null) => {
     let messageId = null;
     try {
+      ensureNotificationPermission();
       setIsLoading(true);
       setIsGeneratingInsights(true);
       setError(null);
@@ -2386,6 +2390,7 @@ const ChatModelPage = () => {
           setIsLoading(false);
           setIsGeneratingInsights(false);
           setSuccess('Question answered!');
+          notifyResponseComplete();
          
           setStreamingStatus(null);
           setStreamingMessage('');
@@ -3077,6 +3082,7 @@ const ChatModelPage = () => {
   };
 
   const chatWithDocument = async (file_id, question, currentSessionId, llm_name = null) => {
+    ensureNotificationPermission();
     setCurrentResponse('');
     streamBufferRef.current = '';
     setError(null);
@@ -3271,6 +3277,7 @@ const ChatModelPage = () => {
               setCurrentResponse(displayResponse);
               setIsLoading(false);
               showResponseImmediately(displayResponse);
+              notifyResponseComplete();
             } else if (parsed.type === 'error') {
               const errMsg = parsed.message ?? parsed.error;
               const synthetic = new Error(
@@ -3627,6 +3634,25 @@ const ChatModelPage = () => {
     );
   };
 
+  // Regenerate a past response: re-run the same question through the flow
+  // that produced it (secret prompt / file chat / general chat).
+  const handleRetryMessage = (msg) => {
+    if (isLoading || isGeneratingInsights || !msg) return;
+    if (msg.used_secret_prompt && msg.secret_id) {
+      void handleSend(
+        { preventDefault: () => {} },
+        { secretId: msg.secret_id, secretName: msg.prompt_label }
+      );
+      return;
+    }
+    if (!msg.question) return;
+    if (msg.file_id) {
+      askQuestionToChat(msg.question, msg.file_id, [msg.file_id], msg.display_text_left_panel || null).catch(() => {});
+    } else {
+      askGeneralQuestionToChat(msg.question, msg.display_text_left_panel || null).catch(() => {});
+    }
+  };
+
   const resizeChatInput = useCallback(() => {
     const ta = chatInputRef.current;
     if (!ta) return;
@@ -3668,6 +3694,7 @@ const ChatModelPage = () => {
 
     // Prevent double-submission while a request is in flight
     if (isLoading || isGeneratingInsights) return;
+    ensureNotificationPermission();
 
     const secretPromptMode = Boolean(secretOverride?.secretId) || isSecretPromptSelected;
     const effectiveSecretId = secretOverride?.secretId ?? selectedSecretId;
@@ -3918,6 +3945,7 @@ const ChatModelPage = () => {
             setHasResponse(true);
             setSuccess('Analysis completed successfully!');
             setIsGeneratingInsights(false);
+            notifyResponseComplete({ title: 'Analysis ready', body: 'JuriNex has finished your document analysis.' });
             setStreamingStatus(null);
             setStreamingMessage('');
             clearProcessingTimeline();
@@ -5063,7 +5091,7 @@ const ChatModelPage = () => {
   }, [sessionMessages, learningModeActive, pendingQuestion, animatedResponseContent, isAnimatingResponse]);
 
   const renderChatComposer = () => (
-    <div className="flex-shrink-0 border-t border-gray-100 px-4 py-3 bg-white overflow-visible relative z-20">
+    <div className="flex-shrink-0 px-4 py-3 bg-white overflow-visible relative z-20">
       <UpgradePlanBanner className="mb-2 w-full" />
 
       {/* ── Prompt chips ────────────────────────────────────────────── */}
@@ -5152,7 +5180,7 @@ const ChatModelPage = () => {
       {/* ── Main input card (Claude-style) ───────────────────────── */}
       <form onSubmit={handleSend} className="w-full">
         <div
-          className="flex flex-col bg-white rounded-2xl border border-gray-200 shadow-md overflow-visible transition-all focus-within:border-[#21C1B6] focus-within:shadow-lg"
+          className="flex flex-col bg-white rounded-2xl shadow-md overflow-visible transition-all focus-within:shadow-lg"
         >
           {/* Textarea */}
           <textarea
@@ -5477,7 +5505,7 @@ const ChatModelPage = () => {
                 </div>
               </div>
             )}
-            <div className="mt-4 rounded-2xl border border-gray-100 overflow-visible">
+            <div className="mt-4 rounded-2xl overflow-visible">
               {renderChatComposer()}
             </div>
             {learningModeActive && (
@@ -5635,12 +5663,12 @@ const ChatModelPage = () => {
             >
               <div
                 style={{
-                  maxWidth: '100%',
+                  maxWidth: '880px',
                   margin: '0 auto',
                   width: '100%',
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: learningModeActive ? undefined : '32px',
+                  gap: learningModeActive ? undefined : '48px',
                 }}
               >
                 {learningModeActive ? (
@@ -5749,7 +5777,7 @@ const ChatModelPage = () => {
                                 </div>
                               ) : (
                               <div
-                                className={`chat-thread-card ${assistantContent ? 'cursor-pointer hover:shadow-md transition-shadow' : ''} ${selectedMessageId === msg.id ? 'ring-2 ring-[#21C1B6]/35' : ''}`}
+                                className={`chat-thread-card ${assistantContent ? 'cursor-pointer hover:shadow-md transition-shadow' : ''}`}
                                 onClick={() => assistantContent && handleMessageClick(msg)}
                                 onKeyDown={(e) => {
                                   if (assistantContent && (e.key === 'Enter' || e.key === ' ')) {
@@ -5813,6 +5841,19 @@ const ChatModelPage = () => {
                                     </div>
                                     {assistantContent && (
                                       <div className="chat-thread-card__footer flex flex-wrap items-center gap-1.5">
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleRetryMessage(msg);
+                                          }}
+                                          disabled={isLoading || isGeneratingInsights}
+                                          className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                          title="Regenerate this response"
+                                        >
+                                          <RotateCcw className="h-3 w-3" />
+                                          Retry
+                                        </button>
                                         <button
                                           type="button"
                                           onClick={(e) => {
@@ -5918,7 +5959,7 @@ const ChatModelPage = () => {
                   className="w-1.5 flex-shrink-0 cursor-col-resize bg-gray-100 hover:bg-[#21C1B6]/25 transition-colors border-x border-gray-100"
                 />
                 <div
-                  className="flex flex-col min-w-0 h-full overflow-hidden bg-[#fafaf8]"
+                  className="flex flex-col min-w-0 h-full overflow-hidden bg-white"
                   style={{ width: `${100 - splitLeftWidth}%` }}
                 >
                   <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 flex-shrink-0 bg-white">

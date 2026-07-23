@@ -408,6 +408,22 @@ export function normalizeMarkdownFormatting(text) {
   // Strip chain-of-thought / <think> blocks first so reasoning never renders.
   let t = stripReasoning(text);
 
+  // Strip standalone placeholder lines (e.g. ":-----------------------" or "___________")
+  // that models sometimes emit as empty form-fillers.
+  t = t
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trim();
+      // Keep very short lines, thematic breaks (---), and lines with actual alphanumeric content.
+      if (trimmed.length < 10 || /^[=\-]{3,}$/.test(trimmed)) return true;
+      // If a long line is purely placeholder symbols, it's noise.
+      const hasContent = /[a-zA-Z0-9]/.test(trimmed);
+      if (hasContent) return true;
+      // If it's just symbols like :---___... it's a placeholder row/line.
+      return !!trimmed.replace(/[\s\-:=_.]/g, '');
+    })
+    .join('\n');
+
   // Convert model-emitted inline HTML to markdown — renderers escape HTML, so
   // <strong>…</strong> would otherwise display as literal tag text.
   t = t
@@ -754,12 +770,15 @@ export function ensureTableSeparators(text) {
     const isPipeDividerOnly = /^\|[\s\-:=|]+\|?$/.test(curr);
     const isLongDividerOnly = /^[\s\-:=|]{8,}$/.test(curr) && /[-=]/.test(curr);
     const isEmptyPipeRow =
-      curr.startsWith('|') &&
-      curr.endsWith('|') &&
+      (curr.startsWith('|') || curr.endsWith('|') || (curr.match(/\|/g) || []).length >= 2) &&
       curr
-        .slice(1, -1)
         .split('|')
-        .every((cell) => !cell.replace(/[\s\-:=]/g, ''));
+        .every((cell) => {
+          const trimmed = cell.trim();
+          if (!trimmed) return true;
+          // Row is "empty" if a cell is just dashes, colons, dots, underscores, or spaces
+          return !trimmed.replace(/[\s\-:=_.]/g, '');
+        });
 
     const isTableRow =
       (curr.startsWith('|') || (curr.endsWith('|') && (curr.match(/\|/g) || []).length >= 1)) &&
@@ -990,73 +1009,16 @@ export const markdownTableComponents = {
       );
     }
     return (
-      <div
-        className="md-table-scroll"
-        style={{
-          width: '100%',
-          overflowX: 'auto',
-          WebkitOverflowScrolling: 'touch',
-          border: '1px solid #d1d5db',
-          borderRadius: '8px',
-          margin: '1.5em 0',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-        }}
-      >
-        <table
-          style={{
-            borderCollapse: 'collapse',
-            width: 'max-content',
-            minWidth: '100%',
-            tableLayout: 'auto',
-            fontSize: '13px',
-            fontFamily: "'DM Sans', sans-serif",
-          }}
-          {...props}
-        />
+      <div className="md-table-scroll">
+        <table {...props} />
       </div>
     );
   },
-  thead: ({ node, ...props }) => (
-    <thead style={{ background: '#f8fafc' }} {...props} />
-  ),
-  th: ({ node, ...props }) => (
-    <th
-      style={{
-        padding: '10px 14px',
-        textAlign: 'left',
-        fontWeight: '600',
-        fontSize: '12px',
-        textTransform: 'uppercase',
-        letterSpacing: '0.05em',
-        color: '#334155',
-        borderBottom: '2px solid #e2e8f0',
-        borderRight: '1px solid #e2e8f0',
-        whiteSpace: 'nowrap',
-        background: '#f8fafc',
-      }}
-      {...props}
-    />
-  ),
+  thead: ({ node, ...props }) => <thead {...props} />,
+  th: ({ node, ...props }) => <th {...props} />,
   tbody: ({ node, ...props }) => <tbody {...props} />,
-  tr: ({ node, ...props }) => (
-    <tr style={{ borderBottom: '1px solid #f1f5f9' }} {...props} />
-  ),
-  td: ({ node, ...props }) => (
-    <td
-      style={{
-        padding: '10px 14px',
-        verticalAlign: 'top',
-        color: '#1e293b',
-        borderRight: '1px solid #f1f5f9',
-        lineHeight: '1.6',
-        minWidth: '120px', // Increased min-width for all columns
-        wordBreak: 'normal',
-        overflowWrap: 'break-word',
-        whiteSpace: 'pre-wrap',
-      }}
-      {...props}
-    />
-  ),
+  tr: ({ node, ...props }) => <tr {...props} />,
+  td: ({ node, ...props }) => <td {...props} />,
   // IMPORTANT: Override hr to prevent gray bars from --- separators
   hr: ({ node, ...props }) => (
     <hr className="content-divider" {...props} />

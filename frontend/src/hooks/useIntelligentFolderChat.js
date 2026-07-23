@@ -311,6 +311,7 @@ import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { DOCS_BASE_URL } from '../config/apiConfig';
 import { parseLlmPolicyErrorForUi, stringToChatErrorDisplay } from '../utils/llmQuotaMessages';
+import { notifyResponseComplete, ensureNotificationPermission } from '../utils/responseNotifier';
 
 const API_BASE = DOCS_BASE_URL;
 
@@ -385,6 +386,7 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
     }
 
     try {
+      ensureNotificationPermission();
       const token = authToken || getAuthToken();
       const endpoint = `${API_BASE}/${encodeURIComponent(folderName)}/intelligent-chat/stream`;
 
@@ -578,6 +580,7 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
 
               case 'done':
                 setIsStreaming(false);
+                notifyResponseComplete();
                 if (chunkDisplayTimeoutRef.current) {
                   clearTimeout(chunkDisplayTimeoutRef.current);
                   chunkDisplayTimeoutRef.current = null;

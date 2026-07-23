@@ -5,6 +5,7 @@ import DraftDocumentView, { DraftTiptapDocumentView } from './DraftDocumentView'
 import DraftEditor from './DraftEditor';
 import { downloadAsPdf, downloadAsWord, downloadAsHtml, printResponse, getCleanText } from '../../utils/responseExportUtils';
 import { canonicalizeFieldPlaceholders, fixInlineEmphasis, normalizeLegalDraftMarkdownForRender } from '../../utils/legalDraftRender';
+import { notifyResponseComplete, ensureNotificationPermission } from '../../utils/responseNotifier';
 
 function isTiptapDoc(value) {
   return !!(
@@ -100,6 +101,7 @@ export default function DraftStudioModal({
     const controller = new AbortController();
     abortRef.current = controller;
     try {
+      ensureNotificationPermission();
       const resp = await fetch(`${baseUrl}/${encodeURIComponent(folderName)}/intelligent-chat/stream`, {
         method: 'POST',
         headers: {
@@ -193,6 +195,7 @@ export default function DraftStudioModal({
       if (evt.draft_filename) setDownloadName(evt.draft_filename);
       setStatus('ready');
       setStatusText('Draft ready.');
+      notifyResponseComplete({ title: 'Draft ready', body: 'JuriNex has finished generating your draft.' });
       // Remember the resolved session id (the backend may have created a new session) so
       // editor auto-saves can target the correct chat row.
       const resolvedSid = evt.session_id || sessionId || null;

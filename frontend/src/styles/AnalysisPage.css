@@ -1,171 +1,156 @@
 /* Gemini-style font: DM Sans (loaded in index.html) is the closest open match to Google Sans */
 
 .analysis-page-ai-response {
-  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif !important;
-  font-size: 15px;
-  line-height: 1.75;
-  color: #1f1f1f;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+  font-size: 15.5px !important;
+  line-height: 1.6 !important;
+  color: #000000 !important;
 }
 
 /* Source / citation links must clearly read as links: highlighted + underlined */
 .analysis-page-ai-response a,
 .analysis-page-ai-response a:visited {
-  color: #0f766e !important;
+  color: #000000 !important;
   text-decoration: underline !important;
-  text-decoration-thickness: 2px !important;
+  text-decoration-thickness: 1px !important;
   text-underline-offset: 2px !important;
   font-weight: 600 !important;
-  background: #e6fbf9;
+  background: #f4f4f4;
   padding: 0 4px;
   border-radius: 4px;
   word-break: break-word;
 }
 .analysis-page-ai-response a:hover {
-  color: #1aa49b !important;
-  background: #d2f5f1;
+  color: #000000 !important;
+  background: #e5e5e5;
 }
 
 /* Scrollable table wrapper injected by markdownTableComponents */
 .analysis-page-ai-response .md-table-scroll {
   overflow-x: auto;
-  margin: 12px 0;
-  border-radius: 6px;
-  border: 1px solid #e5e7eb;
+  margin: 1.5em 0;
+  border-radius: 0;
+  border: none !important;
 }
 
 .analysis-page-ai-response table {
   border-collapse: collapse;
-  min-width: 480px;
-  width: max-content;
-  font-size: 13px;
-  font-family: 'DM Sans', sans-serif;
-  margin: 0;
+  width: 100% !important;
+  font-size: 15px !important;
+  font-family: 'Inter', sans-serif !important;
+  margin: 1.5em 0;
+  color: #000000 !important;
 }
 
 .analysis-page-ai-response table th {
-  background: #f8fafc;
-  font-weight: 600;
-  border: 1px solid #d1d5db;
-  padding: 7px 12px;
+  background: transparent !important;
+  font-weight: 500 !important;
+  border: none !important;
+  border-bottom: 1px solid #e5e7eb !important;
+  padding: 12px 14px !important;
   text-align: left;
   white-space: nowrap;
-  color: #1f2937;
+  color: #6b7280 !important;
+  font-size: 14px !important;
 }
 
 .analysis-page-ai-response table td {
-  border: 1px solid #e5e7eb;
-  padding: 6px 12px;
-  vertical-align: top;
+  border: none !important;
+  border-bottom: 1px solid #f3f4f6 !important;
+  padding: 14px 14px !important;
+  vertical-align: middle;
   word-break: normal;
   word-wrap: normal;
   white-space: normal;
   min-width: 70px;
-  color: #374151;
-  line-height: 1.55;
+  color: #000000 !important;
+  line-height: 1.5 !important;
+}
+
+.analysis-page-ai-response table tbody td:first-child {
+  font-weight: 600 !important;
+  color: #000000 !important;
+}
+
+.analysis-page-ai-response table tbody tr:last-child td {
+  border-bottom: none !important;
 }
 
 .analysis-page-ai-response table tbody tr:nth-child(even) td {
-  background: #f9fafb;
+  background: transparent !important;
 }
 
 .analysis-page-ai-response table tbody tr:hover td {
-  background: #eff6ff;
+  background: transparent !important;
 }
 
-
-
-
 .response-content h2 {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: #1a202c;
-  margin-top: 2rem;
-  margin-bottom: 1rem;
+  font-size: 18px !important;
+  font-weight: 700 !important;
+  color: #000000 !important;
+  margin-top: 1.4em !important;
+  margin-bottom: 0.7em !important;
 }
 
 .response-content h3 {
-  font-size: 1.3rem;
-  font-weight: 600;
-  color: #1a202c;
-  margin-top: 1.5rem;
-  margin-bottom: 0.75rem;
+  font-size: 16px !important;
+  font-weight: 600 !important;
+  color: #000000 !important;
+  margin-top: 1.2em !important;
+  margin-bottom: 0.6em !important;
 }
 
 .response-content p {
-  margin-bottom: 0.75rem;
-  font-size: 18px;
-  line-height: 1.6;
-  color: #111827;
+  margin-bottom: 1rem !important;
+  font-size: 15.5px !important;
+  line-height: 1.6 !important;
+  color: #000000 !important;
 }
 
-.analysis-table {
-  width: 100%;
-  margin: 1.5rem 0;
-  background-color: #ffffff;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-  overflow: hidden;
-}
-
-.analysis-table thead {
-}
-
-.analysis-table th {
-  padding: 0.9rem 1rem;
-  font-weight: 600;
-  text-align: left;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.analysis-table td {
-  padding: 0.8rem 1rem;
-  vertical-align: middle;
-  background-color: #ffffff;
-  transition: background-color 0.2s ease-in-out;
-}
-
-.analysis-table tbody tr:nth-child(even) td {
-  background-color: #fafafa;
-}
-
-.analysis-table tbody tr:hover td {
-  background-color: #f1f5f9;
-}
-
-.analysis-table tr:first-child th:first-child {
-  border-top-left-radius: 8px;
-}
-.analysis-table tr:first-child th:last-child {
-  border-top-right-radius: 8px;
-}
-.analysis-table tr:last-child td:first-child {
-  border-bottom-left-radius: 8px;
-}
-.analysis-table tr:last-child td:last-child {
-  border-bottom-right-radius: 8px;
-}
-
-.prose table,
-.prose th,
-.prose td {
-  font-family: "Times New Roman", Times, serif !important;
-}
-
+/* Consolidate extra analysis styles */
+.analysis-table,
 .prose table {
+  width: 100% !important;
+  border-collapse: collapse !important;
+  margin: 1.5em 0 !important;
+  font-family: "Inter", sans-serif !important;
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
 }
 
+.analysis-table th,
 .prose th {
-  font-weight: 600 !important;
+  padding: 12px 14px !important;
+  border: none !important;
+  border-bottom: 1px solid #e5e7eb !important;
+  font-weight: 500 !important;
+  color: #6b7280 !important;
+  text-align: left !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
 }
 
+.analysis-table td,
 .prose td {
+  padding: 14px 14px !important;
+  border: none !important;
+  border-bottom: 1px solid #f3f4f6 !important;
+  color: #000000 !important;
+  vertical-align: middle !important;
+}
+
+.analysis-table td:first-child,
+.prose td:first-child {
+  font-weight: 600 !important;
+  color: #000000 !important;
 }
 
 .analysis-table-wrapper {
-  overflow-x: auto;
-  margin: 1rem 0;
-  border-radius: 8px;
+  overflow-x: auto !important;
+  margin: 1.5em 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
 }
 
 .analysis-table td span {

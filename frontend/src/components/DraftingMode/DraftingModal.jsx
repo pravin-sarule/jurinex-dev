@@ -20,6 +20,7 @@ import {
 } from '../../services/draftingModeApi';
 import DraftStreamParser, { MONOLITHIC_DOCUMENT_ID } from './draftStreamParser';
 import DraftStreamingViewer from './DraftStreamingViewer';
+import { notifyResponseComplete, ensureNotificationPermission } from '../../utils/responseNotifier';
 
 const MODEL_OPTIONS = [
   { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash (Preview)', hint: 'LOWEST COST — fast frontier drafting ($0.50/M in, $3/M out) — default' },
@@ -302,6 +303,7 @@ const DraftingModal = ({ open, onClose }) => {
       },
       onDone: (evt) => {
         setPhase('finished');
+        notifyResponseComplete({ title: 'Draft ready', body: 'JuriNex has finished generating your draft.' });
         setDraftCost((prev) => (prev ? { ...prev, provisional: false, final: true } : prev));
         setStatusMessage(
           isMono || evt.drafting_strategy === 'monolithic'
@@ -319,6 +321,7 @@ const DraftingModal = ({ open, onClose }) => {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
+      ensureNotificationPermission();
       await streamDraftGeneration(
         sessionId,
         {

@@ -57,65 +57,67 @@
 /* Unified chat thread cards — same layout for user questions and AI responses */
 .chat-thread-card {
   width: 100%;
-  background: #fafafa;
-  border: 1px solid #e5e7eb;
+  background: #ffffff;
+  border: none !important;
   border-radius: 12px;
   overflow: hidden;
+  box-shadow: none !important;
 }
 
 .chat-thread-card--user {
-  background: #ffffff;
-  border-color: #d1fae5;
+  background: #f4f4f4;
+  border: none !important;
+  border-radius: 24px;
+  max-width: 85%;
+  align-self: flex-end;
+  margin-left: auto;
+  box-shadow: none !important;
 }
 
 .chat-thread-card__label {
-  padding: 10px 20px;
-  border-bottom: 1px solid #e5e7eb;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  color: #6b7280;
+  display: none !important;
 }
 
 .chat-thread-card--user .chat-thread-card__label {
-  color: #0d9488;
-  border-bottom-color: #d1fae5;
-  background: #f0fdfa;
+  display: none !important;
 }
 
 .chat-thread-card__body {
-  padding: 16px 24px;
-  font-size: 15px;
-  line-height: 1.7;
-  color: #1f1f1f;
-  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  padding: 16px 0;
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: #000000;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   word-break: break-word;
+}
+
+.chat-thread-card--user .chat-thread-card__body {
+  padding: 12px 20px;
+  font-size: 15px;
+  color: #000000;
 }
 
 .chat-thread-card__footer {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 16px;
-  border-top: 1px solid #e5e7eb;
+  padding: 8px 0;
+  border-top: 1px solid #f1f5f9;
   background: #fff;
 }
 
 /* Professional legal finding header (replaces ASCII box art) */
 .legal-response-banner {
   margin: 0 0 20px;
-  padding: 16px 20px;
-  border-radius: 10px;
-  border: 1px solid #99f6e4;
-  background: linear-gradient(135deg, #f0fdfa 0%, #ecfdf5 100%);
-  box-shadow: 0 1px 3px rgba(33, 193, 182, 0.12);
+  padding: 16px 0;
+  border: none !important;
+  background: transparent !important;
 }
 
 .legal-response-banner__title {
   font-size: 16px;
   font-weight: 700;
-  color: #0f766e;
+  color: #000000;
   letter-spacing: 0.01em;
   line-height: 1.4;
   margin-bottom: 6px;
@@ -124,15 +126,15 @@
 .legal-response-banner__meta {
   font-size: 13px;
   font-weight: 500;
-  color: #475569;
+  color: #000000;
   line-height: 1.5;
 }
 
 .formatted-assistant-html {
-  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  font-size: 15px;
-  line-height: 1.75;
-  color: #1f1f1f;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: #000000;
 }
 
 .formatted-assistant-html p {
@@ -150,20 +152,29 @@
 .formatted-assistant-html table {
   width: 100%;
   border-collapse: collapse;
-  margin: 12px 0;
-  font-size: 14px;
+  margin: 1.5em 0;
+  font-size: 15px;
+  font-family: 'Inter', sans-serif;
 }
 
 .formatted-assistant-html th,
 .formatted-assistant-html td {
-  border: 1px solid #e5e7eb;
-  padding: 8px 10px;
+  border: none;
+  border-bottom: 1px solid #f3f4f6;
+  padding: 14px 14px;
   text-align: left;
 }
 
 .formatted-assistant-html th {
-  background: #f8fafc;
+  background: transparent;
+  font-weight: 500;
+  color: #6b7280;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.formatted-assistant-html td:first-child {
   font-weight: 600;
+  color: #000000;
 }
 
 /* --- Rendering performance ------------------------------------------------
@@ -199,13 +210,13 @@
 
 .formatted-assistant-markdown strong,
 .formatted-assistant-html strong {
-  font-weight: 600;
-  color: #0f766e;
+  font-weight: 700;
+  color: #000000;
 }
 
 .formatted-assistant-markdown em {
   font-style: italic;
-  color: #374151;
+  color: #000000;
 }
 
 
@@ -321,157 +332,117 @@
 }
 
 .analysis-page-ai-response {
-  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif !important;
-  font-size: 15px !important;
-  line-height: 1.75 !important;
-  color: #1f1f1f !important;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+  font-size: 15.5px !important;
+  line-height: 1.6 !important;
+  color: #000000 !important;
 }
 
 .response-content h1 {
-  font-size: 2rem !important;
+  font-size: 21px !important;
   font-weight: 700 !important;
-  color: #1a202c !important;
-  margin-top: 2.5rem !important;
-  margin-bottom: 1.5rem !important;
-  border-bottom: 2px solid #e5e7eb !important;
-  padding-bottom: 0.5rem !important;
+  color: #000000 !important;
+  margin-top: 1.5em !important;
+  margin-bottom: 0.8em !important;
+  border: none !important;
 }
 
 .response-content h2 {
-  font-size: 1.85rem !important;
+  font-size: 18px !important;
   font-weight: 700 !important;
-  color: #1a202c !important;
-  margin-top: 2rem !important;
-  margin-bottom: 1rem !important;
+  color: #000000 !important;
+  margin-top: 1.4em !important;
+  margin-bottom: 0.7em !important;
 }
 
 .response-content h3 {
-  font-size: 1.5rem !important;
+  font-size: 16px !important;
   font-weight: 600 !important;
-  color: #1a202c !important;
-  margin-top: 1.5rem !important;
-  margin-bottom: 0.75rem !important;
-}
-
-.response-content h4 {
-  font-size: 1.3rem !important;
-  font-weight: 600 !important;
-  color: #1a202c !important;
-  margin-top: 1.25rem !important;
-  margin-bottom: 0.75rem !important;
+  color: #000000 !important;
 }
 
 .response-content p {
   margin-bottom: 1rem !important;
-  font-size: 22px !important;
-  line-height: 1.8 !important;
-  color: #111827 !important;
+  font-size: 15.5px !important;
+  line-height: 1.6 !important;
+  color: #000000 !important;
 }
 
 .response-content strong,
 .response-content b {
   font-weight: 700 !important;
-  color: #111827 !important;
-  font-size: inherit !important;
+  color: #000000 !important;
 }
 
-.analysis-table {
+/* Consolidated Table Style (Gemini look) */
+.analysis-table,
+.analysis-page-ai-response table,
+.prose table {
   width: 100% !important;
   border-collapse: collapse !important;
-  margin: 1.5rem 0 !important;
+  margin: 1.5em 0 !important;
   font-family: "Inter", sans-serif !important;
-  font-size: 18px !important;
-  background-color: #ffffff !important;
-  border: 1px solid #d1d5db !important;
-  border-radius: 8px !important;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08) !important;
-  overflow: hidden !important;
+  font-size: 14.5px !important;
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
 }
 
-.analysis-table thead {
-  background-color: #f9fafb !important;
-}
-
-.analysis-table th {
-  padding: 0.9rem 1rem !important;
-  border: 1px solid #e5e7eb !important;
-  font-weight: 600 !important;
-  color: #374151 !important;
-  font-size: 17px !important;
+.analysis-table th,
+.analysis-page-ai-response table th,
+.prose th {
+  padding: 12px 14px !important;
+  border: none !important;
+  border-bottom: 1px solid #e5e7eb !important;
+  font-weight: 500 !important;
+  color: #6b7280 !important;
+  font-size: 14px !important;
   text-align: left !important;
-  background-color: #f3f4f6 !important;
-  text-transform: uppercase !important;
-  letter-spacing: 0.04em !important;
+  background-color: transparent !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
 }
 
-.analysis-table td {
-  padding: 0.8rem 1rem !important;
-  border: 1px solid #e5e7eb !important;
-  color: #111827 !important;
+.analysis-table td,
+.analysis-page-ai-response table td,
+.prose td {
+  padding: 14px 14px !important;
+  border: none !important;
+  border-bottom: 1px solid #f3f4f6 !important;
+  color: #000000 !important;
   vertical-align: middle !important;
-  background-color: #ffffff !important;
-  transition: background-color 0.2s ease-in-out !important;
-  font-size: 17px !important;
+  background-color: transparent !important;
+  font-size: 15px !important;
+  line-height: 1.5 !important;
+}
+
+.analysis-table td:first-child,
+.analysis-page-ai-response table td:first-child,
+.prose td:first-child {
+  font-weight: 600 !important;
+  color: #000000 !important;
+}
+
+.analysis-table tr:last-child td,
+.analysis-page-ai-response table tr:last-child td,
+.prose tr:last-child td {
+  border-bottom: none !important;
 }
 
 .analysis-table tbody tr:nth-child(even) td {
-  background-color: #fafafa !important;
+  background-color: transparent !important;
 }
 
 .analysis-table tbody tr:hover td {
-  background-color: #f1f5f9 !important;
+  background-color: transparent !important;
 }
 
-.analysis-table tr:first-child th:first-child {
-  border-top-left-radius: 8px !important;
-}
-
-.analysis-table tr:first-child th:last-child {
-  border-top-right-radius: 8px !important;
-}
-
-.analysis-table tr:last-child td:first-child {
-  border-bottom-left-radius: 8px !important;
-}
-
-.analysis-table tr:last-child td:last-child {
-  border-bottom-right-radius: 8px !important;
-}
-
-.analysis-table-wrapper {
+.analysis-table-wrapper,
+.md-table-scroll {
   overflow-x: auto !important;
-  margin: 1rem 0 !important;
-  border-radius: 8px !important;
-}
-
-.analysis-table td span {
-  display: inline-block !important;
-  background-color: #fef2f2 !important;
-  color: #b91c1c !important;
-  padding: 3px 8px !important;
-  border-radius: 6px !important;
-  font-weight: 500 !important;
-  font-size: 16px !important;
-  line-height: 1.3 !important;
-}
-
-.prose table,
-.prose th,
-.prose td {
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
-}
-
-.prose table {
-  font-size: 14px !important;
-}
-
-.prose th {
-  font-size: 13px !important;
-  font-weight: 600 !important;
-}
-
-.prose td {
-  font-size: 14px !important;
+  margin: 1.5em 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
 }
 
 /* ── Markdown table (chat interface) ─────────────────────────────────────────
@@ -485,64 +456,72 @@
   width: 100%;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
-  margin: 1em 0;
-  border: 1px solid #d1d5db;
-  border-radius: 8px;
+  margin: 1.5em 0;
+  border: none;
+  border-radius: 0;
 }
 
 .formatted-assistant-markdown table,
 .analysis-page-response table {
   border-collapse: collapse;
-  width: max-content;
-  min-width: 100%;
+  width: 100%;
   table-layout: auto;
-  font-size: 13px;
-  font-family: 'DM Sans', sans-serif;
-  margin: 0;
+  font-size: 14.5px;
+  font-family: 'Inter', sans-serif;
+  margin: 1.5em 0;
+  color: #000000;
 }
 
 .formatted-assistant-markdown table th,
 .analysis-page-response table th {
-  background: #f8fafc;
-  font-weight: 600;
-  border: 1px solid #e2e8f0;
-  padding: 10px 14px;
+  background: transparent;
+  font-weight: 500;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 12px 14px;
   text-align: left;
-  white-space: nowrap;
-  color: #334155;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  min-width: 140px;
+  color: #6b7280;
+  font-size: 14px;
+  letter-spacing: 0.01em;
 }
 
 .formatted-assistant-markdown table td,
 .analysis-page-response table td {
-  border: 1px solid #f1f5f9;
-  padding: 10px 14px;
-  vertical-align: top;
+  border-bottom: 1px solid #f3f4f6;
+  padding: 14px 14px;
+  vertical-align: middle;
   word-break: normal;
   overflow-wrap: break-word;
-  min-width: 180px;
-  color: #1e293b;
-  line-height: 1.6;
-  font-size: 13px;
+  color: #000000;
+  line-height: 1.5;
+  font-size: 15px;
+}
+
+.formatted-assistant-markdown table tbody td:first-child,
+.analysis-page-response table tbody td:first-child {
+  font-weight: 600;
+  color: #000000;
+}
+
+.formatted-assistant-markdown table tbody tr:last-child td,
+.analysis-page-response table tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .formatted-assistant-markdown table tbody tr:nth-child(even) td,
 .analysis-page-response table tbody tr:nth-child(even) td {
-  background: #f8fafc;
+  background: transparent;
 }
 
 .formatted-assistant-markdown table tbody tr:hover td,
 .analysis-page-response table tbody tr:hover td {
-  background: #eff6ff;
+  background: transparent;
 }
 
 .formatted-assistant-markdown {
-  font-size: 15px;
-  line-height: 1.75;
-  color: #1f2a24;
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: #000000;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   word-break: break-word;
   overflow-wrap: anywhere;
 }
@@ -551,24 +530,30 @@
 .formatted-assistant-markdown h2,
 .formatted-assistant-markdown h3,
 .formatted-assistant-markdown h4 {
-  font-weight: 700;
-  line-height: 1.3;
-  margin: 1.2em 0 0.5em;
-  color: #143027;
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 1.5em 0 0.6em;
+  color: #000000;
 }
 
-.formatted-assistant-markdown h1 { font-size: 1.5em; }
-.formatted-assistant-markdown h2 { font-size: 1.3em; }
-.formatted-assistant-markdown h3 { font-size: 1.12em; }
-.formatted-assistant-markdown p { margin: 0 0 0.9em; }
+.formatted-assistant-markdown strong,
+.formatted-assistant-html strong {
+  font-weight: 700;
+  color: #000000;
+}
+
+.formatted-assistant-markdown p { margin: 0 0 1em; }
 
 .formatted-assistant-markdown ul,
 .formatted-assistant-markdown ol {
-  margin: 0 0 0.9em;
-  padding-left: 1.5em;
+  margin: 1.2em 0;
+  padding-left: 1.8em;
 }
 
-.formatted-assistant-markdown li { margin: 0.25em 0; }
+.formatted-assistant-markdown li {
+  margin: 0.6em 0;
+  line-height: 1.6;
+}
 
 .formatted-assistant-markdown blockquote {
   border-left: 4px solid #1f6b5f;

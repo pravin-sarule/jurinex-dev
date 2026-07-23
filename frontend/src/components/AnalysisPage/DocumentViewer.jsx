@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import FormattedAssistantContent from '../ChatInterface/FormattedAssistantContent';
-import { Bot, Copy, MessageSquare, FileDown } from 'lucide-react';
+import { Bot, Copy, MessageSquare, FileDown, RotateCcw } from 'lucide-react';
 import DownloadPdf from '../DownloadPdf/DownloadPdf';
 import { convertJsonToPlainText } from '../../utils/jsonToPlainText';
 import { AGENT_DRAFT_TEMPLATE_API } from '../../config/apiConfig.js';
@@ -255,6 +255,8 @@ const DocumentViewer = ({
   exportContentRef,
   suggestedQuestions = [],
   onSuggestedQuestionClick,
+  onRetryMessage,
+  retryDisabled = false,
 }) => {
   const horizontalScrollRef = useRef(null);
   const stickyScrollbarRef = useRef(null);
@@ -393,6 +395,17 @@ const DocumentViewer = ({
               </h2>
             </div>
             <div className="flex items-center gap-2 shrink-0">
+              {onRetryMessage && (
+                <button
+                  onClick={() => onRetryMessage(selectedMessage)}
+                  disabled={retryDisabled || !selectedMessage || isStreaming}
+                  className="inline-flex items-center px-3 py-2 text-xs font-medium text-[#4e4a41] hover:text-[#1d1d1b] bg-white border border-[#ddd6c8] rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Regenerate this response"
+                >
+                  <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
+                  Retry
+                </button>
+              )}
               <button
                 onClick={handleCopyResponse}
                 className="inline-flex items-center px-3 py-2 text-xs font-medium text-[#4e4a41] hover:text-[#1d1d1b] bg-white border border-[#ddd6c8] rounded-md transition-colors"
@@ -443,7 +456,7 @@ const DocumentViewer = ({
       {/* Light canvas background so the preview feels like a document workspace */}
       <div
         className="flex-1 min-h-0 overflow-y-auto overflow-x-auto"
-        style={{ background: '#f7f8fb', padding: '28px 24px' }}
+        style={{ background: '#ffffff', padding: '28px 24px' }}
         ref={responseContainerRef ?? null}
       >
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '24px' }}>
@@ -479,12 +492,11 @@ const DocumentViewer = ({
                     display: 'flex',
                     justifyContent: 'space-between',
                     alignItems: 'center',
-                    borderBottom: '1.5px solid #21C1B6',
                     paddingBottom: '8px',
                     marginBottom: '20px',
                   }}>
                     <div style={{ display: 'flex', alignItems: 'baseline', gap: '7px' }}>
-                      <span style={{ fontFamily: 'Arial, sans-serif', fontWeight: 800, fontSize: '15pt', color: '#21C1B6', letterSpacing: '-0.02em', lineHeight: 1 }}>JuriNex</span>
+                      <span style={{ fontFamily: 'Arial, sans-serif', fontWeight: 800, fontSize: '15pt', color: '#000000', letterSpacing: '-0.02em', lineHeight: 1 }}>JuriNex</span>
                       <span style={{ fontFamily: 'Arial, sans-serif', fontWeight: 600, fontSize: '8pt', color: '#6b7280', letterSpacing: '0.1em', textTransform: 'uppercase' }}>Analysis</span>
                     </div>
                     <span style={{ fontFamily: 'Arial, sans-serif', fontSize: '8pt', color: '#9ca3af' }}>

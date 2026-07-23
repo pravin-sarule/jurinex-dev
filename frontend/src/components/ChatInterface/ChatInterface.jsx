@@ -28,6 +28,7 @@ import {
   Printer,
   Code,
   Pencil,
+  RotateCcw,
 } from "lucide-react";
 import { getCleanText, stripMarkdown, downloadAsPdf, downloadAsHtml, printResponse } from "../../utils/responseExportUtils";
 import ReactMarkdown from "react-markdown";
@@ -44,6 +45,7 @@ import CitationsPanel from "../AnalysisPage/CitationsPanel";
 import apiService from "../../services/api";
 import { convertJsonToPlainText } from "../../utils/jsonToPlainText";
 import { renderSecretPromptResponse, isStructuredJsonResponse } from "../../utils/renderSecretPromptResponse";
+import { notifyResponseComplete, ensureNotificationPermission } from "../../utils/responseNotifier";
 
 /**
  * Final answer for a completed stream. Prefer the backend's `done.answer` —
@@ -2005,6 +2007,7 @@ const ChatInterface = () => {
   };
 
   const chatWithAI = async (folder, secretId, currentSessionId) => {
+    ensureNotificationPermission();
     setAnimatedResponseContent('');
     setThinkingContent('');
     setCurrentStatus(null);
@@ -2343,6 +2346,7 @@ const ChatInterface = () => {
               setAnimatedResponseContent(finalResponse);
               setIsAnimatingResponse(false);
               setIsGenerating(false);
+              notifyResponseComplete({ title: 'Analysis ready', body: 'JuriNex has finished your document analysis.' });
               // No auto-open panel - user manually opens split view if needed
               if (newSessionId) {
                 fetchChatSessions().catch(() => { });
@@ -2386,6 +2390,7 @@ const ChatInterface = () => {
 
   const handleNewMessage = async (forcedQuestion = null, displayLabel = null) => {
     if (!selectedFolder) return;
+    ensureNotificationPermission();
     if (isSecretPromptSelected) {
       if (!selectedSecretId) {
         setChatError(stringToChatErrorDisplay('Please select an analysis type.', 'Missing selection'));
@@ -2776,6 +2781,7 @@ const ChatInterface = () => {
                 setAnimatedResponseContent(finalResponse);
                 setIsAnimatingResponse(false);
                 setIsGenerating(false);
+                notifyResponseComplete();
                 if (doneSessionId) {
                   fetchChatSessions();
                 }
@@ -2817,6 +2823,31 @@ const ChatInterface = () => {
   useEffect(() => {
     handleNewMessageRef.current = handleNewMessage;
   }, [handleNewMessage]);
+
+  // Regenerate a past response: re-run the same question (or analysis prompt)
+  // through the normal streaming flow.
+  const handleRetryChat = (chat) => {
+    if (loadingChat || isGenerating || !chat) return;
+    if (chat.isSecretPrompt || chat.used_secret_prompt) {
+      const secret = secrets.find((s) => s.name === chat.prompt_label);
+      if (!secret) {
+        toast.error('This analysis prompt is no longer available, so it cannot be retried.');
+        return;
+      }
+      chatWithAI(selectedFolder, secret.id, selectedChatSessionId).catch(() => { });
+      return;
+    }
+    if (!chat.question) return;
+    if (isSecretPromptSelected) {
+      // Clear secret mode first so handleNewMessage takes the plain-question
+      // path; send through the ref so the post-update closure is used.
+      setIsSecretPromptSelected(false);
+      setSelectedSecretId(null);
+      setTimeout(() => handleNewMessageRef.current?.(chat.question, chat.prompt_label || null), 0);
+    } else {
+      handleNewMessage(chat.question, chat.prompt_label || null);
+    }
+  };
 
   const handleLearningOptionSelect = useCallback(async (optionText) => {
     if (!optionText || loadingChat || isGenerating) return;
@@ -3607,7 +3638,7 @@ const ChatInterface = () => {
   const showMainArea = !!(selectedChatSessionId || pendingQuestion || hasResponse || loadingChat || !hasSessions || newChatMode);
 
   /** Normal mode: wider reading column; learning mode stays compact. */
-  const messagesColumnMaxWidth = threadUsesLearningLayout ? '620px' : 'min(880px, 100%)';
+  const messagesColumnMaxWidth = threadUsesLearningLayout ? '820px' : '880px';
 
   return (
     <div className="flex h-full min-h-0 w-full overflow-hidden relative" style={{ background: '#fff' }}>
@@ -3621,7 +3652,7 @@ const ChatInterface = () => {
       {hasSessions && chatHistorySidebarOpen && (
         <div
           className={`flex-shrink-0 flex flex-col border-r border-gray-100 ${!showMainArea ? 'flex-1' : ''}`}
-          style={{ width: showMainArea ? '272px' : undefined, height: '100%', background: '#fafafa' }}
+          style={{ width: showMainArea ? '272px' : undefined, height: '100%', background: '#ffffff' }}
         >
           <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between gap-2" style={{ background: '#fff' }}>
             <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest flex items-center gap-2 min-w-0">
@@ -3860,13 +3891,22 @@ const ChatInterface = () => {
                                         download={chat.draftFilename || 'draft.docx'}
                                         target="_blank"
                                         rel="noopener noreferrer"
-                                        className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-semibold text-white bg-[#21C1B6] border border-[#21C1B6] rounded hover:bg-[#1aa79d] transition-colors cursor-pointer"
+                                        className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-semibold text-white bg-black rounded hover:bg-gray-800 transition-colors cursor-pointer"
                                         title="Download the court-formatted draft (Word .docx) — Times New Roman, A4, 1 inch margins"
                                       >
                                         <Download className="h-3 w-3" />
                                         Download draft (.docx)
                                       </a>
                                     )}
+                                    <button
+                                      onClick={() => handleRetryChat(chat)}
+                                      disabled={loadingChat || isGenerating}
+                                      className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50 hover:text-gray-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                      title="Regenerate this response"
+                                    >
+                                      <RotateCcw className="h-3 w-3" />
+                                      Retry
+                                    </button>
                                     <button
                                       onClick={() => handleCopyChatResponse(chat.id, chat.response)}
                                       className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-medium text-gray-500 border border-gray-200 rounded hover:bg-gray-50 hover:text-gray-700 transition-colors cursor-pointer"
@@ -3914,7 +3954,7 @@ const ChatInterface = () => {
                                         downloadUrl: chat.draftDownloadUrl || null,
                                         downloadName: chat.draftFilename || null,
                                       })}
-                                      className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-semibold text-[#0d9488] border border-[#9fe6df] bg-[#f0fdfa] rounded hover:bg-[#ccfbf1] transition-colors cursor-pointer"
+                                      className="inline-flex items-center gap-1 p-1 px-2 text-[11px] font-semibold text-black border border-gray-200 bg-gray-50 rounded hover:bg-gray-100 transition-colors cursor-pointer"
                                       title="Edit this response in the rich editor"
                                     >
                                       <Pencil className="h-3 w-3" />
@@ -4017,7 +4057,7 @@ const ChatInterface = () => {
           </div>
 
           {/* Input Area */}
-          <div className="flex-shrink-0 border-t border-gray-100 px-3 py-3" style={{ background: '#f8fafc' }}>
+          <div className="flex-shrink-0 px-3 py-3" style={{ background: '#ffffff' }}>
             {/* Voice session status bar */}
             {(isRecording || isTranscribing) && (
               <div className={`flex items-center gap-2 px-3 py-1.5 mb-2 rounded-xl text-xs font-medium
@@ -4046,14 +4086,14 @@ const ChatInterface = () => {
                 if (isGenerating) handleStopGeneration();
                 else handleNewMessage().catch(console.error);
               }}
-              className="flex items-center gap-2 bg-white rounded-2xl border border-gray-200 px-3 py-2.5 shadow-sm"
+              className="flex items-center gap-2 bg-white rounded-2xl px-3 py-2.5 shadow-sm"
               style={{ boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}
             >
               <div className="relative flex-shrink-0" ref={styleDropdownRef}>
                 <button
                   type="button"
                   onClick={() => setShowStyleDropdown(!showStyleDropdown)}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-gray-600 bg-gray-50 border border-gray-200 rounded-xl hover:border-[#21C1B6] hover:text-[#21C1B6] transition-colors"
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-gray-600 bg-gray-50 rounded-xl hover:text-[#21C1B6] transition-colors"
                   title="Mode settings"
                 >
                   <Settings2 className="h-3.5 w-3.5" />

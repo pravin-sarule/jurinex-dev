@@ -17,12 +17,12 @@ import { ChevronLeft, ChevronRight, Loader2, Plus, X, Trash2 } from 'lucide-reac
 // `band` is the row-2 container tint for that group. Every class is written out
 // in full so Tailwind's JIT scanner picks it up (no computed class strings).
 const GROUP_COLORS = [
-  { idle: 'bg-[#FBF7E8] text-[#8A6D1F] border-[#EFE3BE]', active: 'bg-white text-[#8A6D1F] border-[#D9C27E]', band: 'bg-[#FDFBF3] border-[#EFE3BE]' },
-  { idle: 'bg-[#E8F7F6] text-[#127a72] border-[#BDE7E3]', active: 'bg-white text-[#127a72] border-[#21C1B6]', band: 'bg-[#F4FBFA] border-[#BDE7E3]' },
-  { idle: 'bg-[#F0EDFB] text-[#5b4bab] border-[#D7CFF3]', active: 'bg-white text-[#5b4bab] border-[#9A88E0]', band: 'bg-[#F8F6FD] border-[#D7CFF3]' },
-  { idle: 'bg-[#EAF6EC] text-[#3d7a4a] border-[#C6E5CD]', active: 'bg-white text-[#3d7a4a] border-[#79BE89]', band: 'bg-[#F5FBF6] border-[#C6E5CD]' },
-  { idle: 'bg-[#FDEFEA] text-[#a35434] border-[#F5D6C7]', active: 'bg-white text-[#a35434] border-[#E19A78]', band: 'bg-[#FEF8F5] border-[#F5D6C7]' },
-  { idle: 'bg-[#EAF1FA] text-[#3a6291] border-[#CBDDF0]', active: 'bg-white text-[#3a6291] border-[#7FA8D6]', band: 'bg-[#F5F8FC] border-[#CBDDF0]' },
+  { idle: 'bg-[#FBF7E8] text-[#8A6D1F]', active: 'bg-white text-[#8A6D1F] border-[#D9C27E]', band: 'bg-[#FDFBF3]' },
+  { idle: 'bg-[#E8F7F6] text-[#127a72]', active: 'bg-white text-[#127a72] border-[#21C1B6]', band: 'bg-[#F4FBFA]' },
+  { idle: 'bg-[#F0EDFB] text-[#5b4bab]', active: 'bg-white text-[#5b4bab] border-[#9A88E0]', band: 'bg-[#F8F6FD]' },
+  { idle: 'bg-[#EAF6EC] text-[#3d7a4a]', active: 'bg-white text-[#3d7a4a] border-[#79BE89]', band: 'bg-[#F5FBF6]' },
+  { idle: 'bg-[#FDEFEA] text-[#a35434]', active: 'bg-white text-[#a35434] border-[#E19A78]', band: 'bg-[#FEF8F5]' },
+  { idle: 'bg-[#EAF1FA] text-[#3a6291]', active: 'bg-white text-[#3a6291] border-[#7FA8D6]', band: 'bg-[#F5F8FC]' },
 ];
 
 const groupColor = (index) => GROUP_COLORS[index % GROUP_COLORS.length];
@@ -117,7 +117,7 @@ const PromptChipsBar = ({
             type="button"
             onClick={() => scrollBy(-1)}
             disabled={disabled}
-            className="flex-shrink-0 p-0.5 rounded-md border border-gray-200 bg-white text-gray-500 hover:text-gray-800 hover:border-gray-300 disabled:opacity-40"
+            className="flex-shrink-0 p-0.5 rounded-md bg-white text-gray-500 hover:text-gray-800 disabled:opacity-40"
             aria-label="Scroll prompts left"
           >
             <ChevronLeft className="h-3.5 w-3.5" />
@@ -131,7 +131,7 @@ const PromptChipsBar = ({
             onClick={onAddClick}
             title="Build your own prompt"
             aria-label="Build your own prompt"
-            className={`flex-shrink-0 inline-flex items-center justify-center rounded-full border border-dashed border-[#21C1B6] text-[#21C1B6] bg-white hover:bg-[#E0F7F6] transition-colors ${chipClass} disabled:opacity-50 disabled:cursor-not-allowed`}
+            className={`flex-shrink-0 inline-flex items-center justify-center rounded-full text-[#21C1B6] bg-[#f0fdfa] hover:bg-[#E0F7F6] transition-colors ${chipClass} disabled:opacity-50 disabled:cursor-not-allowed`}
           >
             <Plus className="h-3 w-3" />
           </button>
@@ -152,10 +152,10 @@ const PromptChipsBar = ({
                 type="button"
                 disabled={disabled}
                 onClick={() => onSelect?.(secret)}
-                className={`flex-shrink-0 whitespace-nowrap font-medium rounded-full border transition-colors ${chipClass} ${
+                className={`flex-shrink-0 whitespace-nowrap font-medium rounded-full transition-colors ${chipClass} ${
                   isSelected
-                    ? 'bg-[#E0F7F6] border-[#21C1B6] text-[#11766f]'
-                    : 'bg-white border-gray-200 text-gray-700 hover:border-[#21C1B6] hover:text-[#21C1B6]'
+                    ? 'bg-[#E0F7F6] text-[#11766f]'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                 } disabled:opacity-50 disabled:cursor-not-allowed`}
               >
                 {secret.name}
@@ -173,8 +173,8 @@ const PromptChipsBar = ({
                 disabled={disabled}
                 onClick={() => setOpenGroupId(isOpen ? null : group.id)}
                 title={`${group.prompts?.length ?? 0} prompt(s)`}
-                className={`flex-shrink-0 whitespace-nowrap font-medium rounded-full border transition-colors ${chipClass} ${
-                  isOpen ? `${c.active} shadow-sm` : c.idle
+                className={`flex-shrink-0 whitespace-nowrap font-medium rounded-full transition-colors ${chipClass} ${
+                  isOpen ? `${c.active} shadow-sm border border-[#f1f5f9]` : c.idle
                 } disabled:opacity-50 disabled:cursor-not-allowed`}
               >
                 {group.name}
@@ -194,7 +194,7 @@ const PromptChipsBar = ({
             type="button"
             onClick={() => scrollBy(1)}
             disabled={disabled}
-            className="flex-shrink-0 p-0.5 rounded-md border border-gray-200 bg-white text-gray-500 hover:text-gray-800 hover:border-gray-300 disabled:opacity-40"
+            className="flex-shrink-0 p-0.5 rounded-md bg-white text-gray-500 hover:text-gray-800 disabled:opacity-40"
             aria-label="Scroll prompts right"
           >
             <ChevronRight className="h-3.5 w-3.5" />

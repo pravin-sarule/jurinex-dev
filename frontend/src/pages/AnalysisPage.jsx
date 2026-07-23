@@ -23,6 +23,7 @@ import UploadOptionsMenu from '../components/UploadOptionsMenu';
 import { convertJsonToPlainText } from '../utils/jsonToPlainText';
 import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/renderSecretPromptResponse';
 import { formatFileSize } from '../utils/planUtils';
+import { notifyResponseComplete, ensureNotificationPermission } from '../utils/responseNotifier';
 import {
   getChatModelQuotaUserMessage,
   getLlmPolicyErrorUserText,
@@ -1474,6 +1475,7 @@ const AnalysisPage = () => {
     let localStreamBuffer = '';
     streamBufferRef.current = '';
     setError(null);
+    ensureNotificationPermission();
     setIsLoading(true);
     setIsAnimatingResponse(false);
     
@@ -1730,6 +1732,7 @@ const AnalysisPage = () => {
                 animateResponse(plainTextResponse);
               }
               setIsLoading(false);
+              notifyResponseComplete();
             } else if (parsed.type === 'error') {
               const errMsg = parsed.error;
               const quota =
@@ -2105,6 +2108,7 @@ const AnalysisPage = () => {
           streamUpdateTimeoutRef.current = null;
         }
 
+        ensureNotificationPermission();
         const useFolderChat = Boolean(activeFolderName);
         const streamUrl = useFolderChat
           ? `${DOCS_BASE_URL}/${encodeURIComponent(activeFolderName)}/intelligent-chat/stream`
@@ -2373,6 +2377,7 @@ const AnalysisPage = () => {
                 setCurrentResponse(responseToDisplay);
                 animateResponse(responseToDisplay, true);
                 setIsGeneratingInsights(false);
+                notifyResponseComplete({ title: 'Analysis ready', body: 'JuriNex has finished your document analysis.' });
               } else if (parsed.type === 'error') {
                 const errMsg = parsed.error;
                 const quota =
@@ -2451,6 +2456,24 @@ const AnalysisPage = () => {
         console.error('[handleSend] Chat error:', error);
       }
     }
+  };
+
+  // Regenerate a past response: re-run the same question (or analysis prompt)
+  // through the normal streaming flow.
+  const handleRetryMessage = (msg) => {
+    if (isLoading || isGeneratingInsights || !msg) return;
+    if (msg.used_secret_prompt && msg.secret_id) {
+      const secret = secrets.find((s) => s.id === msg.secret_id);
+      void handleSend(
+        { preventDefault: () => {} },
+        { secretId: msg.secret_id, secretName: secret?.name || msg.prompt_label, llmName: secret?.llm_name }
+      );
+      return;
+    }
+    if (!msg.question) return;
+    chatWithDocument(
+      msg.file_id || null, msg.question, msg.session_id || sessionId, selectedLlmName, msg.prompt_label || null,
+    ).catch(() => {});
   };
 
   const handleMessageClick = async (message) => {
@@ -3857,6 +3880,8 @@ const AnalysisPage = () => {
                   formatDate={formatDate}
                   markdownComponents={markdownComponents}
                   responseContainerRef={responseRef}
+                  onRetryMessage={handleRetryMessage}
+                  retryDisabled={isLoading || isGeneratingInsights}
                 />
               </div>
             </div>

@@ -22,7 +22,7 @@
   top: 0;
   /* left + width set inline via sidebarCollapsed prop: fills remaining screen */
   height: 100vh;
-  background: #f8fafc;
+  background: #ffffff;
   border-left: 1px solid #e2e8f0;
   box-shadow: -4px 0 24px rgba(0, 0, 0, 0.08);
   z-index: 1001;
@@ -43,8 +43,8 @@
   align-items: center;
   justify-content: space-between;
   padding: 14px 16px;
-  background: linear-gradient(135deg, #0d1117 0%, #1a1d23 100%);
-  border-bottom: 1px solid #21C1B6;
+  background: #ffffff;
+  border-bottom: 1px solid #f1f5f9;
   flex-shrink: 0;
 }
 
@@ -54,7 +54,7 @@
   gap: 10px;
   font-size: 15px;
   font-weight: 700;
-  color: #ffffff;
+  color: #000000;
   letter-spacing: 0.02em;
 }
 
@@ -294,7 +294,7 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: #f8fafc;
+  background: #ffffff;
 }
 
 /* ── presets search ──────────────────────────────────────── */
@@ -396,10 +396,13 @@
 .ds-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  padding: 16px 24px;
   display: flex;
   flex-direction: column;
   gap: 14px;
+  max-width: 650px;
+  width: 100%;
+  margin: 0 auto;
 }
 
 .ds-messages__empty {
@@ -441,13 +444,13 @@
 }
 
 .ds-msg--user .ds-msg__body {
-  background: linear-gradient(135deg, #21C1B6, #0891b2);
-  color: #fff;
-  border-radius: 16px 16px 4px 16px;
-  padding: 10px 14px;
-  font-size: 13.5px;
+  background: #f4f4f4;
+  color: #000000;
+  border-radius: 20px;
+  padding: 10px 16px;
+  font-size: 15px;
   line-height: 1.5;
-  max-width: 82%;
+  max-width: 85%;
 }
 
 .ds-msg--preset .ds-msg__body {
@@ -482,13 +485,13 @@
 .ds-msg--assistant .ds-msg__body {
   /* document-style surface: clean white card, near-black legal text */
   background: #ffffff;
-  border: 1px solid #e5e7eb;
+  border: none;
   border-radius: 4px 16px 16px 16px;
   padding: 14px 18px;
-  font-size: 14px;
-  line-height: 1.7;
-  color: #1f1f1f;
-  font-family: -apple-system, 'Segoe UI', Roboto, Arial, 'Helvetica Neue', sans-serif;
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: #000000;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   /* Fill the full chat-pane width (minus the avatar) so wide tables are usable.
      flex-grow makes the card expand; min-width:0 lets very wide tables scroll
      inside it instead of overflowing the panel. */
@@ -505,17 +508,17 @@
 .ds-msg--assistant .ds-msg__body h3,
 .ds-msg--assistant .ds-msg__body h4 {
   font-family: inherit;
-  font-weight: 700;
-  color: #111111;
-  line-height: 1.3;
-  margin: 18px 0 10px;
+  font-weight: 600;
+  color: #000000;
+  line-height: 1.4;
+  margin: 1.5em 0 0.6em;
 }
 
 .ds-msg--assistant .ds-msg__body h1 { font-size: 21px; }
 .ds-msg--assistant .ds-msg__body h2 {
   font-size: 18px;
   padding-bottom: 5px;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid #f1f5f9;
 }
 .ds-msg--assistant .ds-msg__body h3 { font-size: 15.5px; }
 
@@ -534,7 +537,7 @@
   line-height: 1.6;
 }
 
-.ds-msg--assistant .ds-msg__body strong { font-weight: 700; color: #111111; }
+.ds-msg--assistant .ds-msg__body strong { font-weight: 700; color: #000000; }
 .ds-msg--assistant .ds-msg__body em { font-style: italic; }
 
 .ds-msg--assistant .ds-msg__body hr {
@@ -583,10 +586,13 @@
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  padding: 12px 14px;
+  padding: 12px 24px;
   background: #ffffff;
   border-top: 1px solid #f1f5f9;
   flex-shrink: 0;
+  max-width: 650px;
+  width: 100%;
+  margin: 0 auto;
 }
 
 .ds-input-bar__clear {
@@ -613,25 +619,25 @@
 
 .ds-input-bar__textarea {
   flex: 1;
-  border: 1.5px solid #e5e7eb;
+  border: none;
   border-radius: 10px;
   padding: 9px 12px;
   font-size: 13.5px;
   font-family: inherit;
-  background: #f9fafb;
-  color: #1f2937;
+  background: #f4f4f4;
+  color: #000000;
   resize: none;
   min-height: 38px;
   max-height: 120px;
   line-height: 1.5;
   outline: none;
-  transition: border-color 0.15s, background 0.15s;
+  transition: background 0.15s;
   overflow-y: auto;
 }
 
 .ds-input-bar__textarea:focus {
-  border-color: #21C1B6;
-  background: #fff;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px #e5e7eb;
 }
 
 .ds-input-bar__textarea:disabled {
@@ -764,29 +770,29 @@
 .ds-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 14px;
+  font-size: 14.5px;
   line-height: 1.6;
-  color: #374151;
+  color: #000000;
   background: transparent;
-  font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  font-family: 'Inter', -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
 }
 
 /* Header row — bold, left-aligned, single underline (no fill, no boxes) */
 .ds-table thead th {
   text-align: left;
-  font-weight: 600;
-  color: #111827;
+  font-weight: 500;
+  color: #6b7280;
   padding: 12px 18px;
-  border-bottom: 1.5px solid #d1d5db;
+  border-bottom: 1px solid #e5e7eb;
   vertical-align: top;
   white-space: nowrap;
 }
 
 /* Body cells — light horizontal divider only, roomy padding */
 .ds-table tbody td {
-  padding: 13px 18px;
-  border-bottom: 1px solid #ececf1;
-  vertical-align: top;
+  padding: 14px 18px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: middle;
   word-wrap: break-word;
   overflow-wrap: break-word;
   white-space: normal;
@@ -795,7 +801,7 @@
 /* First column = the "Field"/key column → bold, darker (DeepSeek look) */
 .ds-table tbody td:first-child {
   font-weight: 600;
-  color: #1f2937;
+  color: #000000;
 }
 
 .ds-table tbody tr:last-child td {

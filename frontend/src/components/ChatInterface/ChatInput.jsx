@@ -108,13 +108,13 @@ const ChatInput = ({
 
   return (
     <div>
-      <form onSubmit={handleSubmit} className="flex items-center space-x-3 bg-white rounded-xl border border-[#21C1B6] px-4 py-3 focus-within:ring-[#21C1B6] focus-within:shadow-sm">
+      <form onSubmit={handleSubmit} className="flex items-center space-x-3 bg-white rounded-xl border border-gray-200 px-4 py-3 focus-within:border-gray-400 focus-within:shadow-sm">
         <div className="relative flex-shrink-0" ref={dropdownRef}>
         <button
           type="button"
           onClick={() => setShowDropdown(!showDropdown)}
           disabled={disabled || isLoadingSecrets}
-          className="flex items-center space-x-2 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white border border-[#21C1B6] rounded-lg hover:bg-[#1AA49B] disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex items-center space-x-2 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <BookOpen className="h-3.5 w-3.5" />
           <span>{isLoadingSecrets ? 'Loading...' : activeDropdown}</span>
@@ -147,7 +147,7 @@ const ChatInput = ({
           <button
             type="button"
             onClick={() => setShowStyleDropdown((prev) => !prev)}
-            className="flex items-center space-x-2 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white border border-[#21C1B6] rounded-lg hover:bg-[#E0F7F6]"
+            className="flex items-center space-x-2 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50"
             title="Choose response style"
           >
             <Sparkles className="h-3.5 w-3.5" />
@@ -190,7 +190,7 @@ const ChatInput = ({
           className={`p-2 rounded-full transition-all duration-300 ${
             isListening 
               ? 'bg-red-500 text-white animate-pulse shadow-lg scale-110' 
-              : 'text-gray-400 hover:text-[#21C1B6] hover:bg-gray-100'
+              : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
           }`}
           disabled={disabled || isSecretPromptSelected}
           title={isListening ? "Stop listening" : "Start voice input"}
@@ -204,7 +204,7 @@ const ChatInput = ({
 
         <button
           type="submit"
-          className="p-2 bg-[#21C1B6] hover:bg-[#1AA49B] disabled:bg-gray-300 text-white rounded-lg transition-all duration-300 flex-shrink-0 flex items-center justify-center gap-2 px-4 shadow-sm active:scale-95"
+          className="p-2 bg-black hover:bg-gray-800 disabled:bg-gray-300 text-white rounded-lg transition-all duration-300 flex-shrink-0 flex items-center justify-center gap-2 px-4 shadow-sm active:scale-95"
           disabled={disabled || (!message.trim() && !isSecretPromptSelected)}
         >
           <Send className="h-4 w-4" />
@@ -213,13 +213,13 @@ const ChatInput = ({
         </div>
       </form>
       {learningModeActive && (
-        <div className="mt-2 inline-flex items-center gap-2 px-2 py-1 rounded-full border border-[#21C1B6] bg-[#E0F7F6] text-[#11766f] text-xs font-medium">
+        <div className="mt-2 inline-flex items-center gap-2 px-2 py-1 rounded-full border border-gray-200 bg-gray-50 text-gray-600 text-xs font-medium">
           <Sparkles className="h-3 w-3" />
           <span>Learning mode active</span>
           <button
             type="button"
             onClick={() => setLearningModeActive(false)}
-            className="text-[#11766f] hover:text-[#0e5f59]"
+            className="text-gray-600 hover:text-gray-800"
             title="Disable learning mode"
           >
             <X className="h-3 w-3" />
