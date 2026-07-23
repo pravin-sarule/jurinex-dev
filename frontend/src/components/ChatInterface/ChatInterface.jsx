@@ -1005,6 +1005,7 @@ const ChatInterface = () => {
   const [activeDropdown, setActiveDropdown] = useState("Custom Query");
   const [showStyleDropdown, setShowStyleDropdown] = useState(false);
   const [learningModeActive, setLearningModeActive] = useState(false);
+  const [researchModeActive, setResearchModeActive] = useState(false);
   // Panel state ? mirrors Claude's artifact panel
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelType, setPanelType] = useState(null); // 'learning' | 'response' | 'agentic'
@@ -2061,6 +2062,7 @@ const ChatInterface = () => {
           session_id: currentSessionId,
           llm_name: 'gemini',
           learning_mode: learningModeActive,
+          research_mode: researchModeActive,
         }),
       });
 
@@ -2130,6 +2132,7 @@ const ChatInterface = () => {
             citations: finalMetadata?.citations || null,
             chunk_details: finalMetadata?.chunk_details || null,
             learning_mode: !!learningModeActive,
+            research_mode: researchModeActive,
             learningPayload: learningModeActive
               ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
               : null,
@@ -2209,6 +2212,7 @@ const ChatInterface = () => {
               citations: finalMetadata?.citations || null,
               chunk_details: finalMetadata?.chunk_details || null,
               learning_mode: !!learningModeActive,
+              research_mode: researchModeActive,
               learningPayload: learningModeActive
                 ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                 : null,
@@ -2333,6 +2337,7 @@ const ChatInterface = () => {
                 citations: finalMetadata?.citations || null,
                 chunk_details: finalMetadata?.chunk_details || null,
                 learning_mode: !!learningModeActive,
+                research_mode: researchModeActive,
                 learningPayload: learningModeActive
                   ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                   : null,
@@ -2484,6 +2489,7 @@ const ChatInterface = () => {
             session_id: selectedChatSessionId || undefined,
             llm_name: 'gemini',
             learning_mode: learningModeActive,
+            research_mode: researchModeActive,
             // Draft-from-template: when a template is attached, tell the backend to fill it from the
             // case's documents (the backend attaches the template file to the model).
             ...(draftTemplate
@@ -2571,6 +2577,7 @@ const ChatInterface = () => {
               used_chunk_ids: usedChunkIds,
               citations: finalMetadata?.citations || null,
               learning_mode: !!learningModeActive,
+              research_mode: researchModeActive,
               learningPayload: learningModeActive
                 ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                 : null,
@@ -2656,6 +2663,7 @@ const ChatInterface = () => {
                 citations: finalMetadata?.citations || null,
                 chunk_details: finalMetadata?.chunk_details || null,
                 learning_mode: !!learningModeActive,
+                research_mode: researchModeActive,
                 learningPayload: learningModeActive
                   ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                   : null,
@@ -2768,6 +2776,7 @@ const ChatInterface = () => {
                   citations: finalMetadata?.citations || null,
                   chunk_details: finalMetadata?.chunk_details || null,
                   learning_mode: !!learningModeActive,
+                  research_mode: researchModeActive,
                   learningPayload: learningModeActive
                     ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                     : null,
@@ -4099,6 +4108,8 @@ const ChatInterface = () => {
                   <Settings2 className="h-3.5 w-3.5" />
                   {learningModeActive ? (
                     <Sparkles className="h-3.5 w-3.5 text-[#21C1B6]" />
+                  ) : researchModeActive ? (
+                    <Search className="h-3.5 w-3.5 text-[#21C1B6]" />
                   ) : (
                     <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" />
                   )}
@@ -4107,18 +4118,18 @@ const ChatInterface = () => {
                   <div className="absolute bottom-full left-0 mb-2 w-44 bg-white border border-gray-100 rounded-2xl shadow-xl z-20 overflow-hidden py-1">
                     <button
                       type="button"
-                      onClick={() => { setLearningModeActive(false); setShowStyleDropdown(false); closePanel(); }}
+                      onClick={() => { setLearningModeActive(false); setResearchModeActive(false); setShowStyleDropdown(false); closePanel(); }}
                       className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50"
                     >
                       <span className="flex items-center gap-2">
                         <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" />
                         Normal
                       </span>
-                      {!learningModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                      {!learningModeActive && !researchModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
                     </button>
                     <button
                       type="button"
-                      onClick={() => { setLearningModeActive(true); setShowStyleDropdown(false); }}
+                      onClick={() => { setLearningModeActive(true); setResearchModeActive(false); setShowStyleDropdown(false); }}
                       className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50"
                     >
                       <span className="flex items-center gap-2">
@@ -4126,6 +4137,17 @@ const ChatInterface = () => {
                         Learning
                       </span>
                       {learningModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setLearningModeActive(false); setResearchModeActive(true); setShowStyleDropdown(false); closePanel(); }}
+                      className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Search className="h-3.5 w-3.5 text-[#21C1B6]" />
+                        Research
+                      </span>
+                      {researchModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
                     </button>
                   </div>
                 )}
