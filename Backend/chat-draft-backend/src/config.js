@@ -28,6 +28,17 @@ module.exports = {
   ),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
   anthropicModel: process.env.CLAUDE_MODEL || "claude-sonnet-4-5",
+  // ── Free-tier DeepSeek routing ────────────────────────────────────────────
+  paymentServiceUrl: defaultServiceUrl(
+    process.env.PAYMENT_SERVICE_URL,
+    "http://localhost:5003",
+    "http://localhost:5003"
+  ),
+  freeTierDeepseekEnabled:
+    String(process.env.FREE_TIER_DEEPSEEK_ENABLED || "false").toLowerCase() === "true",
+  freePlanName: process.env.FREE_PLAN_NAME || "free",
+  deepseekApiKey: process.env.DEEPSEEK_API_KEY || "",
+  deepseekModel: process.env.DEEPSEEK_MODEL || "deepseek-v4-flash",
   maxFiles: toInt(process.env.CHAT_DRAFT_MAX_FILES, 20),
   maxFileSizeMb: toInt(process.env.CHAT_DRAFT_MAX_FILE_SIZE_MB, 30),
   chunkSize: toInt(process.env.CHAT_DRAFT_CHUNK_SIZE, 2400),

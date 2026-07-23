@@ -465,33 +465,72 @@ router.post("/session/:sessionId/message-stream", async (req, res) => {
       .filter((m) => m.role === "user" || m.role === "assistant")
       .map((m) => ({ role: m.role, content: m.content }));
 
-    const Anthropic = require("@anthropic-ai/sdk");
-    const client = new Anthropic({ apiKey: config.anthropicApiKey });
-
     const { SYSTEM_PROMPT, buildUserPrompt, stripCodeFence } = require("../services/templateGenerator");
+    const { getFreeTierDeepSeekModel } = require("../services/freeTierModel");
 
     const isFirstTurn = previousMessages.length === 0;
     const userContent = isFirstTurn
       ? buildUserPrompt({ templateText: session.templateText, contextText, userMessage: userMsg })
       : `REFINEMENT INSTRUCTION: ${userMsg}\n\nApply these changes. Output the complete updated document as clean HTML only.`;
 
-    const msgs = [...previousMessages, { role: "user", content: userContent }];
-
     let fullHtml = "";
 
-    const stream = client.messages.stream({
-      model: config.anthropicModel,
-      max_tokens: 16000,
-      system: SYSTEM_PROMPT,
-      messages: msgs,
-    });
+    // Free-tier → DeepSeek (payment-service decides centrally). Falls back to
+    // Claude if the DeepSeek call errors BEFORE any content has streamed.
+    const dsModel = await getFreeTierDeepSeekModel(req);
+    let usedDeepSeek = false;
+    if (dsModel) {
+      try {
+        const OpenAI = require("openai");
+        const dsClient = new OpenAI({
+          apiKey: config.deepseekApiKey,
+          baseURL: "https://api.deepseek.com",
+          timeout: 600000,
+          maxRetries: 2,
+        });
+        const dsMessages = [
+          { role: "system", content: SYSTEM_PROMPT },
+          ...previousMessages,
+          { role: "user", content: userContent },
+        ];
+        const dsStream = await dsClient.chat.completions.create({
+          model: dsModel.includes("/") ? dsModel.split("/").pop() : dsModel,
+          messages: dsMessages,
+          max_tokens: 16000,
+          stream: true,
+        });
+        usedDeepSeek = true;
+        for await (const chunk of dsStream) {
+          const choice = chunk.choices && chunk.choices[0];
+          const t = choice && choice.delta && choice.delta.content;
+          if (t) {
+            fullHtml += t;
+            send({ html_chunk: t });
+          }
+        }
+      } catch (dsErr) {
+        console.warn("[message-stream] DeepSeek failed:", dsErr.message);
+        if (fullHtml.length > 0) throw dsErr; // already streamed — cannot fall back
+        usedDeepSeek = false; // nothing streamed yet → fall back to Claude
+      }
+    }
 
-    stream.on("text", (text) => {
-      fullHtml += text;
-      send({ html_chunk: text });
-    });
-
-    await stream.finalMessage();
+    if (!usedDeepSeek) {
+      const Anthropic = require("@anthropic-ai/sdk");
+      const client = new Anthropic({ apiKey: config.anthropicApiKey });
+      const msgs = [...previousMessages, { role: "user", content: userContent }];
+      const stream = client.messages.stream({
+        model: config.anthropicModel,
+        max_tokens: 16000,
+        system: SYSTEM_PROMPT,
+        messages: msgs,
+      });
+      stream.on("text", (text) => {
+        fullHtml += text;
+        send({ html_chunk: text });
+      });
+      await stream.finalMessage();
+    }
 
     // Strip code fences and send the final clean HTML
     const cleanHtml = stripCodeFence(fullHtml.trim());

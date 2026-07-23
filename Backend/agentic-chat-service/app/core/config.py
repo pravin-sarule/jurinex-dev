@@ -57,6 +57,19 @@ class Settings(BaseSettings):
     gcp_location: str = Field(default="us-central1", validation_alias=AliasChoices("GCP_LOCATION"))
     gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY"))
     adk_model: str = Field(default="gemini-2.5-pro", validation_alias=AliasChoices("ADK_MODEL"))
+
+    # ── Free-tier DeepSeek routing ────────────────────────────────────────────
+    # When free_tier_deepseek_enabled is on, users on the named free plan have
+    # general (non-file) chat routed to a DeepSeek model, with Gemini fallback.
+    # Off by default → no behavior change. Mirrors the payment-service flag.
+    deepseek_api_key: str = Field(default="", validation_alias=AliasChoices("DEEPSEEK_API_KEY"))
+    deepseek_model: str = Field(
+        default="deepseek-v4-flash", validation_alias=AliasChoices("DEEPSEEK_MODEL")
+    )
+    free_tier_deepseek_enabled: bool = Field(
+        default=False, validation_alias=AliasChoices("FREE_TIER_DEEPSEEK_ENABLED")
+    )
+    free_plan_name: str = Field(default="free", validation_alias=AliasChoices("FREE_PLAN_NAME"))
     # Gemini explicit-cache lifetime. 5 minutes of inactivity auto-deletes the
     # cache; the next prompt transparently rebuilds it from the ADK session.
     context_cache_ttl_seconds: int = Field(

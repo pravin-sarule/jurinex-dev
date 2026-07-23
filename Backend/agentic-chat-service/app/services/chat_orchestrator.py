@@ -843,10 +843,13 @@ async def stream_general_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
             if captured_usage
             else None
         )
+        # Report the model ACTUALLY used (DeepSeek for free tier, or whatever the
+        # fallback chain landed on) — not the admin's configured model.
+        actual_model = (captured_usage.get("modelName") if captured_usage else None) or resolved_model
         log_token_usage_table(
             context="stream_general_chat",
             usage=token_usage_payload,
-            model_name=resolved_model,
+            model_name=actual_model,
             endpoint="/api/chat/ask/general/stream",
             session_id=final_session,
             user_id=user_id,

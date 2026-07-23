@@ -332,6 +332,42 @@ _DEEPSEEK_USER_ENFORCEMENT = (
 )
 
 
+# Used when the CALLER already assembled a complete prompt with its own system
+# instruction AND an authoritative "=== OUTPUT CONTRACT ===" (the intelligent-chat
+# route does this). Unlike _DEEPSEEK_USER_ENFORCEMENT this stays FORMAT-NEUTRAL: it
+# does NOT dictate a heading style, because the embedded OUTPUT CONTRACT already
+# specifies the correct one per intent (e.g. bold headings in comprehensive mode).
+# Imposing "use ## / never bold" here contradicted the prompt and made DeepSeek
+# ignore the requested format — the exact opposite of Gemini, which sees no such
+# wrapper. Keeps only the provider-agnostic guarantees (no HTML, no reasoning,
+# completeness) so DeepSeek follows the prompt instead of fighting it.
+_DEEPSEEK_LIGHT_ENFORCEMENT = (
+    "Follow the message below EXACTLY, including its '=== OUTPUT CONTRACT ===' and every "
+    "formatting rule it states — use the heading style IT specifies, do not substitute your "
+    "own. Output PURE GitHub-Flavored Markdown; never emit an HTML tag (no <br>, <table>, "
+    "<b>, <p>). If the user asked for ALL points or a specific number, output EVERY one — do "
+    "not stop early or merge items. "
+    "CRITICAL: Output ONLY the final answer. Do NOT include your reasoning, planning, or "
+    "meta-commentary. NEVER begin with 'We need to…', 'Let me…', 'We already have…', "
+    "'The user…', or '<think>'. Begin directly with the answer content."
+)
+
+
+# Markers that prove the caller already built a full system+contract prompt. When
+# present, _deepseek_messages must NOT re-inject PERMANENT_SYSTEM_PROMPT or the
+# heading-dictating enforcement (both would fight the embedded OUTPUT CONTRACT).
+_PREASSEMBLED_PROMPT_MARKERS = ("=== OUTPUT CONTRACT", "SYSTEM INSTRUCTION:")
+
+
+def _prompt_is_preassembled(prompt: str) -> bool:
+    """True when `prompt` already embeds a system instruction and/or an OUTPUT
+    CONTRACT (the intelligent-chat route assembles this). Such prompts are
+    authoritative — the DeepSeek adapter defers to them rather than wrapping them
+    in its own (potentially contradictory) system prompt + heading enforcement."""
+    p = str(prompt or "")
+    return any(marker in p for marker in _PREASSEMBLED_PROMPT_MARKERS)
+
+
 # JSON-first contract: for tabular/chronology/matrix answers DeepSeek emits a
 # validated JSON object (not markdown). The backend then renders it deterministically
 # into clean GFM, so the frontend never sees raw/broken markdown, `**`, or `<br>`.
@@ -876,9 +912,22 @@ def _deepseek_messages(
 ) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
     sys_instr = str(llm_params.get("system_instructions") or "").strip()
-    # Structured (tabular) requests use the JSON schema contract; everything else
-    # uses the existing markdown contract. Default stays markdown for back-compat.
-    rendering_contract = _STRUCTURED_SYSTEM_PROMPT if structured else _deepseek_output_contract(prompt, llm_params)
+    expects_json = _deepseek_expects_json(prompt, llm_params)
+    # When the caller already assembled a full system + OUTPUT CONTRACT prompt (the
+    # intelligent-chat route), do NOT re-inject PERMANENT_SYSTEM_PROMPT or the
+    # heading-dictating enforcement — both fight the embedded contract and make
+    # DeepSeek ignore the requested format (Gemini sees no such wrapper and obeys).
+    pre_assembled = not structured and not expects_json and _prompt_is_preassembled(prompt)
+
+    # Structured (tabular) requests use the JSON schema contract; a pre-assembled
+    # prompt carries its own system instruction, so we add nothing extra; everything
+    # else uses the existing markdown contract. Default stays markdown for back-compat.
+    if structured:
+        rendering_contract = _STRUCTURED_SYSTEM_PROMPT
+    elif pre_assembled:
+        rendering_contract = ""  # prompt already embeds its own system prompt + contract
+    else:
+        rendering_contract = _deepseek_output_contract(prompt, llm_params)
     combined_system = "\n\n".join(part for part in (sys_instr, rendering_contract) if part)
     if combined_system:
         messages.append({"role": "system", "content": combined_system})
@@ -889,7 +938,11 @@ def _deepseek_messages(
             "JSON only — no markdown, no prose, no code fences, NO INTERNAL MONOLOGUE.\n\n"
             f"{prompt}"
         )
-    elif not _deepseek_expects_json(prompt, llm_params):
+    elif pre_assembled:
+        # Format-neutral enforcement: defer to the prompt's own OUTPUT CONTRACT for
+        # heading style / structure, keep only no-HTML / no-reasoning / completeness.
+        user_content = f"{_DEEPSEEK_LIGHT_ENFORCEMENT}\n\n{prompt}"
+    elif not expects_json:
         # FIX 2: repeat the critical formatting constraint in the user turn so DeepSeek
         # cannot "forget" it when the document context is long (prompt leak prevention).
         user_content = (
@@ -2510,12 +2563,21 @@ def _generate_text(
         )
 
     if provider == "deepseek":
-        return _generate_text_deepseek(
-            prompt,
-            model_name=model_name,
-            gen_kwargs=gen_kwargs,
-            llm_params=llm_params,
-        )
+        try:
+            result = _generate_text_deepseek(
+                prompt,
+                model_name=model_name,
+                gen_kwargs=gen_kwargs,
+                llm_params=llm_params,
+            )
+            if result:
+                return result
+            logger.warning("[DocumentAI] DeepSeek returned empty — falling back to Gemini")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DocumentAI] DeepSeek generate failed (%s) — falling back to Gemini", exc)
+        # Never leave a (free-tier) user fully blocked on a DeepSeek outage.
+        model_name = "gemini-2.5-flash"
+        provider = "gemini"
 
     # ── Gemini ───────────────────────────────────────────────────────────────
     client = _gemini_client(model_name)

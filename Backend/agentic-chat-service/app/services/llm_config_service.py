@@ -167,7 +167,8 @@ async def get_llm_config(user_id: str | None = None) -> dict[str, Any]:
                             """
                             SELECT
                                 COALESCE(mp.id, sp.id) AS id,
-                                COALESCE(mp.name, sp.name) AS name
+                                COALESCE(mp.name, sp.name) AS name,
+                                COALESCE(mp.price, sp.price, 0) AS price
                             FROM user_subscriptions us
                             LEFT JOIN monthly_plans mp ON mp.id = us.monthly_plan_id AND mp.is_active = true
                             LEFT JOIN subscription_plans sp ON sp.id = us.plan_id
@@ -190,9 +191,37 @@ async def get_llm_config(user_id: str | None = None) -> dict[str, Any]:
             plan = dict(plan)
             cfg["_plan_id"] = plan.get("id")
             cfg["_plan_name"] = plan.get("name")
+            cfg["_plan_price"] = plan.get("price")
+
+    _apply_free_tier_model_override(cfg)
 
     _config_cache[cache_key] = (cfg, now)
     return cfg
+
+
+def _apply_free_tier_model_override(cfg: dict[str, Any]) -> None:
+    """Route free-tier users to a DeepSeek model for general chat.
+
+    Sets ``cfg["_llm_model_override"]`` to the configured DeepSeek model when the
+    user's plan is the free plan (priced ₹0) AND the feature is enabled AND a
+    DeepSeek key is configured. Only ``stream_llm_general`` consults this key, so
+    file-grounded (GCS/ADK/cache) chat stays on Gemini. Off by default → no-op.
+    """
+    try:
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        if not settings.free_tier_deepseek_enabled:
+            return
+        if not (settings.deepseek_api_key and settings.deepseek_model):
+            return
+        # Free = a ₹0-price plan (robust to renaming; matches payment-service).
+        price = cfg.get("_plan_price")
+        is_free = price is not None and float(price) == 0.0
+        if is_free:
+            cfg["_llm_model_override"] = settings.deepseek_model
+    except Exception as exc:  # never let model routing break config loading
+        logger.debug("free-tier override skipped: %s", exc)
 
 
 def merge_request_overrides(cfg: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:

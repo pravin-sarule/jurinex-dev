@@ -88,13 +88,24 @@ function normalizeUserId(userId) {
   return n;
 }
 
+// LEFT JOIN both plan tables so monthly-plan users (plan_id NULL, monthly_plan_id
+// set — e.g. the free plan) still resolve. eff_* are the effective values across
+// tables; sp.* is kept for the legacy chat_*/sum_* override columns (NULL for a
+// monthly-only plan → admin defaults apply, which is correct).
 const ACTIVE_SUBSCRIPTION_SQL = `
-  SELECT sp.*
+  SELECT
+    sp.*,
+    COALESCE(mp.id, sp.id)                          AS eff_plan_id,
+    COALESCE(mp.name, sp.name)                       AS eff_plan_name,
+    COALESCE(mp.price, sp.price, 0)                  AS eff_plan_price,
+    COALESCE(mp.monthly_tokens, sp.token_limit, 0)   AS eff_token_limit
   FROM user_subscriptions us
-  JOIN subscription_plans sp ON us.plan_id = sp.id
+  LEFT JOIN monthly_plans mp      ON mp.id = us.monthly_plan_id AND mp.is_active = true
+  LEFT JOIN subscription_plans sp ON sp.id = us.plan_id
   WHERE us.user_id = $1
     AND LOWER(COALESCE(us.status, 'active')) = 'active'
     AND (us.end_date IS NULL OR us.end_date >= CURRENT_DATE)
+    AND (mp.id IS NOT NULL OR sp.id IS NOT NULL)
   ORDER BY us.activated_at DESC NULLS LAST, us.start_date DESC NULLS LAST, us.updated_at DESC
   LIMIT 1
 `;
@@ -225,8 +236,26 @@ function applyPlanLimitsToConfig(cfg, plan, service = 'chat') {
     }
   }
 
-  cfg._plan_id = plan.id;
-  cfg._plan_name = plan.name;
+  cfg._plan_id = plan.eff_plan_id ?? plan.id;
+  cfg._plan_name = plan.eff_plan_name ?? plan.name;
+
+  // Free-tier → DeepSeek: expose a model override for the GENERAL/text streaming
+  // path only (file-grounded chat stays on Vertex/Gemini — DeepSeek can't read
+  // gs:// parts). llm_provider stays 'google' so assertSupportedProvider and the
+  // Vertex fallback path are untouched. Off by default → no behavior change.
+  // Free = a ₹0-price plan (robust to renaming; matches payment-service).
+  try {
+    const enabled = String(process.env.FREE_TIER_DEEPSEEK_ENABLED || 'false').toLowerCase() === 'true';
+    const dsModel = process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash';
+    const dsKey = process.env.DEEPSEEK_API_KEY || '';
+    const price = plan.eff_plan_price != null ? plan.eff_plan_price : plan.price;
+    const isFree = price != null && Number(price) === 0;
+    if (enabled && dsKey && isFree) {
+      cfg._llm_model_override = dsModel;
+    }
+  } catch (_e) {
+    /* never let model routing break config loading */
+  }
   return cfg;
 }
 

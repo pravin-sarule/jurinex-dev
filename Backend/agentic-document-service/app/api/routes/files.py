@@ -3046,6 +3046,9 @@ async def intelligent_chat_stream(
         learning_pedagogy_directive = ""
         learning_chunk_addon = ""
         learning_grounding_chunks: list[dict[str, Any]] = []
+        # Number of RAG passages actually fed to the model this request (for the
+        # final token-usage table). None until a retrieval path runs.
+        _rag_chunks_used: int | None = None
 
         learning_mode = bool(getattr(chat_request, "learning_mode", False))
         learning_agent_name = "learning_mode_agent" if learning_mode else None
@@ -3329,6 +3332,7 @@ async def intelligent_chat_stream(
                         )
                         if chs:
                             learning_grounding_chunks = chs
+                            _rag_chunks_used = len(chs)
                             learning_chunk_addon = format_chunks_for_prompt(chs, max_chars=14000)
                 except Exception as chunk_exc:
                     logger.warning(
@@ -3470,6 +3474,7 @@ async def intelligent_chat_stream(
                             _focused = [v for v in _by_file.values() if v["text"].strip()]
                             if _focused:
                                 doc_texts = _focused
+                                _rag_chunks_used = _added
                                 if _fixed_chunks > 0:
                                     _gemma_fixed_active = True
                                 logger.info(
@@ -5090,6 +5095,7 @@ async def intelligent_chat_stream(
                 model_name=actual_model_name,
                 answer_length=len(answer or ""),
                 routing="gemini_direct",
+                retrieved_chunks=_rag_chunks_used,
             ) or {
                 "inputTokens": input_tokens,
                 "outputTokens": output_tokens,

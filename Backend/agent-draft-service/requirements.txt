@@ -21,4 +21,5 @@ htmldocx
 premailer
 beautifulsoup4
 requests
+openai>=1.60.0  # free-tier DeepSeek routing (OpenAI-compatible client)
 # Multi-document ingestion uses in-memory queue + background thread (no Redis)

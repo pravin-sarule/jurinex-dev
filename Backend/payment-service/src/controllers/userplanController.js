@@ -10,6 +10,35 @@ exports.assignFreePlan = async (req, res) => {
     }
 
     try {
+        const endDate = new Date();
+        endDate.setFullYear(endDate.getFullYear() + 10); // 10-year far-future expiry for free plan
+        const endDateStr = endDate.toISOString().split('T')[0];
+
+        // Preferred: the admin-managed FREE monthly plan (price = 0). This makes the
+        // monthly_plans "free" row (e.g. "Free Trial", 300k tokens) authoritative, so
+        // billing/limits show exactly what the admin configured.
+        const monthlyFree = await db.query(
+            `SELECT id, monthly_tokens FROM monthly_plans
+             WHERE price = 0 AND is_active = true
+             ORDER BY (monthly_tokens > 0) DESC, sort_order ASC, id ASC
+             LIMIT 1`
+        );
+
+        if (monthlyFree.rows.length) {
+            const mp = monthlyFree.rows[0];
+            await db.query(
+                `INSERT INTO user_subscriptions
+                    (user_id, monthly_plan_id, status, current_token_balance, start_date, end_date,
+                     activated_at, last_reset_date, created_at, updated_at)
+                 VALUES ($1, $2, 'active', $3, CURRENT_DATE, $4, CURRENT_TIMESTAMP, CURRENT_DATE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 ON CONFLICT (user_id) DO NOTHING`,
+                [userId, mp.id, mp.monthly_tokens || 0, endDateStr]
+            );
+            return res.status(200).json({ success: true, message: 'Free monthly plan assigned.' });
+        }
+
+        // Legacy fallback: subscription_plans row named FREE_PLAN_NAME (older DBs
+        // without a price-0 monthly plan).
         const freePlanName = process.env.FREE_PLAN_NAME || 'free';
         const planResult = await db.query(
             `SELECT id, token_limit FROM subscription_plans WHERE LOWER(name) = LOWER($1) AND (is_active IS NOT FALSE) LIMIT 1`,
@@ -17,24 +46,21 @@ exports.assignFreePlan = async (req, res) => {
         );
 
         if (!planResult.rows.length) {
-            console.warn(`[assignFreePlan] No active free plan found with name="${freePlanName}" for user ${userId}`);
+            console.warn(`[assignFreePlan] No free monthly plan (price=0) and no subscription_plans "${freePlanName}" for user ${userId}`);
             return res.status(200).json({ success: false, message: 'Free plan not found; skipped.' });
         }
 
         const plan = planResult.rows[0];
-        const endDate = new Date();
-        endDate.setFullYear(endDate.getFullYear() + 10); // 10-year far-future expiry for free plan
-
         await db.query(
             `INSERT INTO user_subscriptions
                 (user_id, plan_id, status, current_token_balance, start_date, end_date,
                  activated_at, last_reset_date, created_at, updated_at)
              VALUES ($1, $2, 'active', $3, CURRENT_DATE, $4, CURRENT_TIMESTAMP, CURRENT_DATE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
              ON CONFLICT (user_id) DO NOTHING`,
-            [userId, plan.id, plan.token_limit || 0, endDate.toISOString().split('T')[0]]
+            [userId, plan.id, plan.token_limit || 0, endDateStr]
         );
 
-        return res.status(200).json({ success: true, message: 'Free plan assigned.' });
+        return res.status(200).json({ success: true, message: 'Free plan assigned (legacy).' });
     } catch (error) {
         console.error(`[assignFreePlan] Error for user ${userId}:`, error);
         return res.status(500).json({ success: false, message: 'Internal server error.', error: error.message });

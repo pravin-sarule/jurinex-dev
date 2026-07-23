@@ -133,6 +133,9 @@ def _quota_cors_headers(request: Request) -> dict:
 @app.middleware("http")
 async def payment_token_limit_middleware(request: Request, call_next):
     """Block LLM-consuming POST routes when payment-service reports no tokens available."""
+    from services.request_context import current_model_override
+
+    override_token = None
     if _is_llm_consuming_post(request.url.path, request.method):
         try:
             from services.payment_token_guard import (
@@ -155,6 +158,14 @@ async def payment_token_limit_middleware(request: Request, call_next):
                         media_type="application/json",
                         headers=_quota_cors_headers(request),
                     )
+                # Free-tier → DeepSeek: payment-service decides centrally and returns
+                # the override in `details`. Thread the model id into the request
+                # context so services/llm_service.call_llm routes to DeepSeek (with
+                # Gemini fallback). Absent/None for paid users → no behavior change.
+                details = result.get("details") or {}
+                model_override = details.get("llm_model_override")
+                if details.get("llm_provider_override") == "deepseek" and model_override:
+                    override_token = current_model_override.set(str(model_override))
         except Exception as exc:
             _draft_logger.warning("[PaymentTokenLimit] middleware error: %s", exc)
             if os.environ.get("TOKEN_CHECK_FAIL_OPEN", "false").lower() != "true":
@@ -169,7 +180,11 @@ async def payment_token_limit_middleware(request: Request, call_next):
                     media_type="application/json",
                     headers=_quota_cors_headers(request),
                 )
-    return await call_next(request)
+    try:
+        return await call_next(request)
+    finally:
+        if override_token is not None:
+            current_model_override.reset(override_token)
 
 
 @app.middleware("http")

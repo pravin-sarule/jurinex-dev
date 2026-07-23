@@ -14,6 +14,7 @@ _ACTIVE_SUBSCRIPTION_SQL = """
     SELECT
         COALESCE(mp.id, sp.id) AS id,
         COALESCE(mp.name, sp.name) AS name,
+        COALESCE(mp.price, sp.price, 0) AS price,
         COALESCE(mp.monthly_tokens, sp.token_limit, 0) AS token_limit
     FROM user_subscriptions us
     LEFT JOIN monthly_plans mp ON mp.id = us.monthly_plan_id AND mp.is_active = true

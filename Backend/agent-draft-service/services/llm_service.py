@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Union
 
-from config.gemini_models import is_claude_model, claude_api_model_id
+from config.gemini_models import is_claude_model, claude_api_model_id, is_deepseek_model
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,23 @@ def call_llm(
     Unified LLM call. system_prompt is sent as system_instruction (Gemini) or system prompt (Claude).
     Raises RuntimeError with the real error message on failure so callers can surface it to the user.
     """
+    # ── FREE-TIER DeepSeek override ───────────────────────────────────────────
+    # payment-service decides (centrally) that free-tier users should run on a
+    # DeepSeek model and threads the model id in via the request context. We only
+    # redirect Gemini-bound calls — explicit Claude models (paid drafting) are
+    # left untouched. Any DeepSeek failure falls through to the original Gemini
+    # path below, so a free user is never fully blocked.
+    if not is_claude_model(model):
+        override = _free_tier_model_override()
+        if override:
+            try:
+                text = _call_deepseek(prompt, system_prompt, override, temperature, response_mime_type)
+                if text is not None and text != "":
+                    return text
+                logger.warning("[LLM] DeepSeek returned empty; falling back to Gemini model=%r", model)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[LLM] DeepSeek call failed (%s); falling back to Gemini model=%r", e, model)
+
     if is_claude_model(model):
         return _call_claude(prompt, system_prompt, model, temperature)
     else:
@@ -75,6 +92,36 @@ def call_llm(
             response_mime_type, thinking_budget, use_google_search,
             temperature=temperature,
         )
+
+
+def _free_tier_model_override() -> Optional[str]:
+    """Return a DeepSeek model id when the current request is free-tier, else None."""
+    try:
+        from services.request_context import current_model_override
+
+        override = current_model_override.get()
+    except Exception:
+        override = None
+    return override if (override and is_deepseek_model(override)) else None
+
+
+def _call_deepseek(
+    prompt: str,
+    system_prompt: str,
+    model: str,
+    temperature: float = 0.7,
+    response_mime_type: Optional[str] = None,
+) -> Optional[str]:
+    from services.deepseek_client import complete as deepseek_complete
+
+    logger.info("[LLM] DeepSeek call → model=%r | temperature=%.2f", model, temperature)
+    return deepseek_complete(
+        system_prompt=system_prompt,
+        user_message=prompt,
+        model=model,
+        temperature=temperature,
+        response_mime_type=response_mime_type,
+    )
 
 def _call_claude(prompt: str, system_prompt: str, model: str, temperature: float = 0.7) -> Optional[str]:
     api_key = os.environ.get("ANTHROPIC_API_KEY")

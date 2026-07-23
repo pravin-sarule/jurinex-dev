@@ -103,6 +103,13 @@ def is_claude_model(model_name: str) -> bool:
     return False
 
 
+def is_deepseek_model(model_name: str) -> bool:
+    """Return True if model_name is a DeepSeek model (by prefix)."""
+    if not model_name or not isinstance(model_name, str):
+        return False
+    return model_name.strip().lower().startswith("deepseek")
+
+
 def is_valid_model(model_name: str) -> bool:
     """Return True if model_name is a supported Gemini or Claude model (including display names)."""
     if not model_name:

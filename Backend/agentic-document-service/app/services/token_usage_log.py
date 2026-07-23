@@ -217,6 +217,7 @@ def format_aggregated_token_usage_table(
     model_name: str | None = None,
     answer_length: int | None = None,
     routing: str | None = None,
+    retrieved_chunks: int | None = None,
 ) -> str:
     total_input = sum(int(e.get("inputTokens") or 0) for e in entries)
     total_output = sum(int(e.get("outputTokens") or 0) for e in entries)
@@ -256,6 +257,8 @@ def format_aggregated_token_usage_table(
     )
     if answer_length is not None:
         rows.append(("Answer Length", _fmt_int(answer_length)))
+    if retrieved_chunks is not None:
+        rows.append(("Retrieved Chunks (RAG)", _fmt_int(retrieved_chunks)))
 
     return _format_table(rows, title=title)
 
@@ -270,6 +273,7 @@ def flush_aggregated_token_usage_table(
     model_name: str | None = None,
     answer_length: int | None = None,
     routing: str | None = None,
+    retrieved_chunks: int | None = None,
 ) -> dict[str, int] | None:
     """Log one final table with summed input/output/total tokens for the whole request."""
     entries = _accumulators.pop(session_key, [])
@@ -299,6 +303,7 @@ def flush_aggregated_token_usage_table(
         model_name=model_name,
         answer_length=answer_length,
         routing=routing,
+        retrieved_chunks=retrieved_chunks,
     )
     # Print directly so the final totals table is easy to spot in the uvicorn console.
     print(table, flush=True)

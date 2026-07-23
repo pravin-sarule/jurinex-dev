@@ -438,6 +438,29 @@ def _merge_plan_limits(
     out["_plan_id"] = plan.get("id")
     out["_plan_name"] = plan.get("name")
     out["_plan_limit_mode"] = mode
+
+    # Free-tier → DeepSeek: force the text LLM model for users on the named free
+    # plan (reuses the existing DeepSeek adapter; _detect_provider routes on the
+    # model name). Off by default; the generate dispatch keeps a Gemini fallback.
+    try:
+        from app.core.config import get_settings
+
+        s = get_settings()
+        # Free = a ₹0-price plan (robust to renaming; matches payment-service).
+        _price = plan.get("price")
+        _is_free = _price is not None and float(_price) == 0.0
+        if (
+            s.free_tier_deepseek_enabled
+            and s.deepseek_api_key
+            and s.deepseek_model
+            and _is_free
+        ):
+            out["llm_model"] = s.deepseek_model
+            out["summarization_model"] = s.deepseek_model
+            out["llm_provider"] = "deepseek"
+    except Exception as exc:
+        logger.debug("[SummarizationConfig] free-tier override skipped: %s", exc)
+
     return out
 
 

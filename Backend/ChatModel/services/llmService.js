@@ -91,6 +91,10 @@ function assertSupportedProvider(llmConfig) {
   return provider;
 }
 
+function isDeepSeekModel(name) {
+  return String(name || '').trim().toLowerCase().startsWith('deepseek');
+}
+
 function getGCSProjectId() {
   try {
     if (process.env.GCP_PROJECT_ID) {
@@ -860,10 +864,105 @@ async function* streamLLMWithGCS(question, gcsUriOrUris, userContext = '', metad
   }
 }
 
+// DeepSeek (OpenAI-compatible) streaming for free-tier GENERAL/text chat only.
+// Yields the same event shapes as the Vertex path. `openai` is required lazily
+// so a missing package / key just throws → the caller falls back to Vertex.
+async function* streamDeepSeekGeneral(promptText, systemInstruction, llmConfig, metadata, modelName) {
+  let OpenAI;
+  try {
+    OpenAI = require('openai');
+  } catch (_e) {
+    throw new Error('openai package not installed — cannot use DeepSeek');
+  }
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
+
+  const client = new OpenAI({
+    apiKey,
+    baseURL: 'https://api.deepseek.com',
+    timeout: 600000,
+    maxRetries: 2,
+  });
+  const raw = String(modelName || '').trim();
+  const apiModel = raw.includes('/') ? raw.split('/').pop().trim() : raw;
+
+  const messages = [];
+  if (systemInstruction && systemInstruction.trim()) {
+    messages.push({ role: 'system', content: systemInstruction.trim() });
+  }
+  messages.push({ role: 'user', content: promptText });
+
+  const genCfg = buildGenerationConfig(llmConfig, modelName);
+  const maxTokens = Math.max(1, Number(genCfg.maxOutputTokens) || 8192);
+  let temperature = Number(genCfg.temperature);
+  if (!Number.isFinite(temperature)) temperature = 0.4;
+
+  console.log(`[General] Streaming with DeepSeek model: ${apiModel}`);
+  const stream = await client.chat.completions.create({
+    model: apiModel,
+    messages,
+    max_tokens: maxTokens,
+    temperature,
+    stream: true,
+    stream_options: { include_usage: true },
+  });
+
+  let streamedAnswer = '';
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let finishReason = null;
+  for await (const chunk of stream) {
+    if (chunk.usage) {
+      inputTokens = Number(chunk.usage.prompt_tokens || 0);
+      outputTokens = Number(chunk.usage.completion_tokens || 0);
+    }
+    const choice = chunk.choices && chunk.choices[0];
+    if (!choice) continue;
+    const text = choice.delta && choice.delta.content;
+    if (text) {
+      streamedAnswer += text;
+      yield { type: 'chunk', text };
+    }
+    if (choice.finish_reason && !finishReason) finishReason = choice.finish_reason;
+  }
+  if (outputTokens <= 0) outputTokens = Math.max(1, Math.floor(streamedAnswer.length / 4));
+  const totalTokens = inputTokens + outputTokens;
+
+  if (metadata.userId) {
+    logLLMUsage({
+      userId: Number(metadata.userId),
+      modelName: apiModel,
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      endpoint: metadata.endpoint || '/api/chat/ask/general/stream',
+      fileId: metadata.fileId ?? null,
+      sessionId: metadata.sessionId ?? null,
+    }).catch((err) => console.error('Failed to log LLM usage:', err.message));
+  }
+  yield {
+    type: 'usage',
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    modelName: apiModel,
+    finishReason: finishReason || null,
+    outputTruncated: finishReason === 'length',
+  };
+  console.log(`[General] Streamed DeepSeek answer (${streamedAnswer.length} chars) from ${apiModel}`);
+}
+
 async function* streamLLMGeneral(promptText, systemInstruction = '', llmConfig = null, metadata = {}) {
   try {
     const vertex_ai = initializeVertexAI();
-    const modelNames = buildModelList(llmConfig, metadata.modelName);
+    let modelNames = buildModelList(llmConfig, metadata.modelName);
+
+    // Free-tier users (set by applyPlanLimitsToConfig): try DeepSeek first for
+    // general text; the Vertex chain stays appended as the automatic fallback.
+    const dsOverride = llmConfig && llmConfig._llm_model_override;
+    if (dsOverride && isDeepSeekModel(dsOverride)) {
+      modelNames = [dsOverride, ...modelNames.filter((m) => m !== dsOverride)];
+    }
 
     console.log('\n[LLM streamLLMGeneral] Using DB config:');
     console.log(`   - primary model    : ${modelNames[0]}`);
@@ -874,6 +973,13 @@ async function* streamLLMGeneral(promptText, systemInstruction = '', llmConfig =
     for (const modelName of modelNames) {
       let hasYielded = false;
       try {
+        if (isDeepSeekModel(modelName)) {
+          for await (const ev of streamDeepSeekGeneral(promptText, systemInstruction, llmConfig, metadata, modelName)) {
+            if (ev.type === 'chunk') hasYielded = true;
+            yield ev;
+          }
+          return;
+        }
         const generationConfig = buildGenerationConfig(llmConfig, modelName);
         console.log(`[General] Streaming with Vertex AI model: ${modelName}`);
         console.log(`   - max_output_tokens: ${generationConfig.maxOutputTokens}`);

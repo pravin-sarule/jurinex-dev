@@ -32,6 +32,34 @@ function getCurrentMonthWindow() {
 }
 
 /**
+ * Free-tier model routing signal, attached to every token-check response so all
+ * downstream LLM services can decide model selection from ONE source of truth.
+ *
+ * When the user is on the free tier AND FREE_TIER_DEEPSEEK_ENABLED is on, we
+ * emit a DeepSeek override; otherwise the override fields are null and every
+ * service keeps its current (Gemini/Claude) behavior. This is the global kill
+ * switch for the free-tier → DeepSeek feature.
+ *
+ * @param {boolean} isFree
+ * @returns {{ model_tier: 'free'|'paid', llm_provider_override: string|null, llm_model_override: string|null }}
+ */
+function freeTierModelSignal(isFree) {
+  const enabled = String(process.env.FREE_TIER_DEEPSEEK_ENABLED || 'false').toLowerCase() === 'true';
+  if (isFree && enabled) {
+    return {
+      model_tier: 'free',
+      llm_provider_override: 'deepseek',
+      llm_model_override: process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash',
+    };
+  }
+  return {
+    model_tier: isFree ? 'free' : 'paid',
+    llm_provider_override: null,
+    llm_model_override: null,
+  };
+}
+
+/**
  * @param {number|string} userId
  * @param {{ estimatedTokens?: number, checkFirmCap?: boolean, service?: string, endpoint?: string }} opts
  */
@@ -80,6 +108,7 @@ async function checkUserTokenAvailability(userId, opts = {}) {
             ELSE 0
        END                                                AS monthly_tokens,
        COALESCE(mp.name, sp.name)                        AS plan_name,
+       COALESCE(mp.price, sp.price, 0)                   AS plan_price,
        mp.id                                             AS monthly_plan_id,
        COALESCE(us.plan_tokens_used, 0)                  AS plan_tokens_used
      FROM user_subscriptions us
@@ -96,8 +125,21 @@ async function checkUserTokenAvailability(userId, opts = {}) {
   const monthlyLimit = Number(sub.monthly_tokens || 0);
   const topupBalance = Number(sub.topup_token_balance || 0);
 
+  // Free-plan identity by PRICE (the admin's free plan is priced ₹0). Robust to
+  // renaming, and matches the assignment/backfill which key on price = 0. This is
+  // distinct from the zero-limit cost gate below, which ALSO catches expired /
+  // no-subscription users. We use price identity only additively:
+  //   • to tag model_tier:'free' (→ DeepSeek) for a free plan that has an
+  //     admin-configured token limit > 0 (metered by the standard monthly path);
+  //   • without stripping the ₹150 safety net from expired/no-plan users.
+  const isFreeByPrice = subResult.rows.length > 0 && Number(sub.plan_price || 0) === 0;
+
   // ── FREE TIER GATE (₹150 cumulative INR limit) ─────────────────────────────
-  // Applies when the user has no paid plan AND no top-up balance.
+  // Applies when the user has no paid plan AND no top-up balance. A free plan
+  // with an admin-set token_limit > 0 has monthlyLimit > 0, so isFreeTier is
+  // already false and it falls through to the standard monthly path below (which
+  // caps at token_limit) — the admin-set free limit is therefore authoritative,
+  // and ₹150 remains only the fallback for free plans with no configured limit.
   const FREE_TIER_LIMIT_INR = 150;
   const isFreeTier = !subResult.rows.length || (monthlyLimit === 0 && topupBalance === 0);
 
@@ -144,6 +186,7 @@ async function checkUserTokenAvailability(userId, opts = {}) {
           exhausted:       true,
         },
         firm_cap: { enforced: false, allowed: true },
+        ...freeTierModelSignal(true),
       };
     }
 
@@ -166,7 +209,7 @@ async function checkUserTokenAvailability(userId, opts = {}) {
       message:      null,
       block_reason: null,
       shared_pool:  true,
-      plan_name:    'Free',
+      plan_name:    sub.plan_name || 'Free',
       monthly_plan_id: null,
       tokens_used_today: tokensToday,
       tokens_used_this_period: 0,
@@ -182,6 +225,7 @@ async function checkUserTokenAvailability(userId, opts = {}) {
       reset_at_utc: nextUtcMidnight().toISOString(),
       free_tier: freeTierMeta,
       firm_cap: { enforced: false, allowed: true },
+      ...freeTierModelSignal(true),
     };
   }
   // ── END FREE TIER GATE ─────────────────────────────────────────────────────
@@ -277,6 +321,10 @@ async function checkUserTokenAvailability(userId, opts = {}) {
     endpoint: opts.endpoint || null,
     firm_cap:  { enforced: false, allowed: true },
     free_tier: null,
+    // model_tier:'free' + DeepSeek override when this is the admin's ₹0 free plan
+    // (metered by the monthly path above at its configured token limit);
+    // 'paid' + null overrides for every real paid plan (no behavior change).
+    ...freeTierModelSignal(isFreeByPrice),
   };
 
   if (checkFirmCap && allowed) {

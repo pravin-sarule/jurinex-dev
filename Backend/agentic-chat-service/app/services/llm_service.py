@@ -158,6 +158,10 @@ def _is_claude_model(model: str | None) -> bool:
     return (model or "").strip().lower().startswith("claude")
 
 
+def _is_deepseek_model(model: str | None) -> bool:
+    return (model or "").strip().lower().startswith("deepseek")
+
+
 def _claude_output_cap(model: str) -> int:
     """Hard output ceiling per Claude family — requesting more 400s the API."""
     return 32000 if "opus" in (model or "").lower() else 64000
@@ -1162,6 +1166,106 @@ async def _stream_claude_chat(
     yield usage_ev
 
 
+async def _stream_deepseek_chat(
+    *,
+    model: str,
+    system_instruction: str,
+    user_content: str,
+    llm_config: dict[str, Any],
+    metadata: dict[str, Any],
+    endpoint: str,
+) -> AsyncIterator[dict[str, Any]]:
+    """DeepSeek (OpenAI-compatible) chat streaming — free-tier general chat only.
+
+    Yields the same event shapes as the Gemini/Claude paths. `reasoning_content`
+    (deepseek-reasoner) is intentionally never surfaced — only visible answer
+    content streams, so there is no <think> leakage. Any failure raised here is
+    caught by stream_llm_general's per-model loop, which then degrades to Gemini.
+    """
+    settings = get_settings()
+    api_key = (settings.deepseek_api_key or os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY is not set — cannot use DeepSeek chat")
+
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=api_key, base_url="https://api.deepseek.com", timeout=600.0)
+    api_model = model.split("/")[-1].strip() if "/" in model else model.strip()
+    mot = max(1, int(llm_config.get("max_output_tokens") or 8192))
+    try:
+        temperature = float(llm_config.get("model_temperature"))
+    except (TypeError, ValueError):
+        temperature = 0.4
+
+    messages: list[dict[str, Any]] = []
+    if system_instruction and system_instruction.strip():
+        messages.append({"role": "system", "content": system_instruction.strip()})
+    messages.append({"role": "user", "content": user_content})
+
+    full = ""
+    agg_in = agg_out = 0
+    finish: str | None = None
+    guard = _RepetitionGuard()
+
+    stream = await client.chat.completions.create(
+        model=api_model,
+        messages=messages,
+        max_tokens=mot,
+        temperature=temperature,
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+    async for chunk in stream:
+        usage = getattr(chunk, "usage", None)
+        if usage:
+            agg_in = int(getattr(usage, "prompt_tokens", 0) or 0)
+            agg_out = int(getattr(usage, "completion_tokens", 0) or 0)
+        if not chunk.choices:
+            continue
+        choice = chunk.choices[0]
+        text = getattr(choice.delta, "content", None)
+        if text:
+            full += text
+            yield {"type": "chunk", "text": text}
+            if guard.feed(text):
+                logger.warning("Degenerate repetition in DeepSeek stream — aborting.")
+                finish = "REPETITION"
+                break
+        if getattr(choice, "finish_reason", None) and finish is None:
+            finish = choice.finish_reason
+
+    # Some DeepSeek models return HTTP 200 with NO content. Never let that become a
+    # blank answer — raise so stream_llm_general's loop falls back to the Gemini
+    # chain. Safe here because no chunks were yielded when `full` is empty.
+    if not full.strip():
+        raise RuntimeError("DeepSeek returned an empty response")
+
+    if agg_out <= 0:
+        agg_out = max(1, len(full) // 4)
+
+    usage_ev: dict[str, Any] = {
+        "type": "usage",
+        "inputTokens": agg_in,
+        "outputTokens": agg_out,
+        "totalTokens": agg_in + agg_out,
+        "finishReason": finish,
+        "outputTruncated": finish == "length",
+        "modelName": model,
+    }
+    if metadata.get("userId"):
+        await log_llm_usage(
+            user_id=int(metadata["userId"]),
+            model_name=model,
+            input_tokens=agg_in,
+            output_tokens=agg_out,
+            total_tokens=agg_in + agg_out,
+            endpoint=endpoint,
+            file_id=metadata.get("fileId"),
+            session_id=metadata.get("sessionId"),
+        )
+    yield usage_ev
+
+
 async def stream_llm_with_gcs(
     *,
     question: str,
@@ -1274,11 +1378,29 @@ async def stream_llm_general(
 
     last_err = None
     skip_claude = False
-    for model in build_model_list(llm_config, model_name):
+    models = build_model_list(llm_config, model_name)
+    # Free-tier users (set by get_llm_config) start on DeepSeek; the existing
+    # Gemini chain stays appended as the automatic fallback on any DeepSeek error.
+    free_override = llm_config.get("_llm_model_override")
+    if free_override and _is_deepseek_model(free_override):
+        models = [free_override] + [m for m in models if m != free_override]
+    for model in models:
         if skip_claude and _is_claude_model(model):
             continue
         try:
             meta["modelName"] = model
+            if _is_deepseek_model(model):
+                logger.info("General chat via DeepSeek model=%s (free tier)", model)
+                async for ev in _stream_deepseek_chat(
+                    model=model,
+                    system_instruction=system_instruction,
+                    user_content=prompt_text,
+                    llm_config=llm_config,
+                    metadata=meta,
+                    endpoint=meta.get("endpoint", "/api/chat/ask/general/stream"),
+                ):
+                    yield ev
+                return
             if _is_claude_model(model):
                 logger.info("General chat via Claude model=%s (no cache)", model)
                 async for ev in _stream_claude_chat(

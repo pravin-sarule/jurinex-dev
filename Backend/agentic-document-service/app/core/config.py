@@ -307,6 +307,13 @@ class Settings(BaseSettings):
         default="claude-sonnet-4-6",
         validation_alias=AliasChoices("CLAUDE_MODEL"),
     )
+    # ── Free-tier DeepSeek routing ────────────────────────────────────────────
+    # When enabled, users on the named free plan have their text LLM model forced
+    # to `deepseek_model` (with a Gemini fallback on failure). Off by default.
+    free_tier_deepseek_enabled: bool = Field(
+        default=False, validation_alias=AliasChoices("FREE_TIER_DEEPSEEK_ENABLED")
+    )
+    free_plan_name: str = Field(default="free", validation_alias=AliasChoices("FREE_PLAN_NAME"))
     cloud_speech_to_text_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("CLOUD_SPEECH_TO_TEXT_API_KEY"),
