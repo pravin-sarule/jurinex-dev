@@ -26,6 +26,7 @@ _MODEL_PRICING: dict[str, tuple[float, float]] = {
     "claude-mythos":     (10.00, 50.00),
     "gemini-3.1-pro":    (2.50, 15.00),   # preview — estimate, update on GA
     "gemini-3-pro":      (2.50, 15.00),   # estimate
+    "gemini-3.6-flash":  (1.50, 7.50),    # official (AI Studio, rel. 21 Jul 2026)
     "gemini-3.5-flash":  (1.50, 9.00),
     "gemini-2.5-pro":    (1.25, 10.00),
     "gemini-2.5-flash":  (0.30, 2.50),

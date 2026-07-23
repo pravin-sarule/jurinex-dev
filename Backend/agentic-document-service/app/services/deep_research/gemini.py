@@ -24,10 +24,14 @@ def _usage(resp: Any) -> tuple[int, int]:
     um = getattr(resp, "usage_metadata", None)
     if um is None:
         return 0, 0
-    return (
-        int(getattr(um, "prompt_token_count", 0) or 0),
-        int(getattr(um, "candidates_token_count", 0) or 0),
-    )
+    inp = int(getattr(um, "prompt_token_count", 0) or 0)
+    cand = int(getattr(um, "candidates_token_count", 0) or 0)
+    total = int(getattr(um, "total_token_count", 0) or 0)
+    # Thinking models (e.g. gemini-3.6-flash) emit hidden reasoning tokens billed at the
+    # OUTPUT rate but not counted in candidates_token_count. Fold them into output so the
+    # ₹ cost is accurate: Total = Input + Output.
+    out = total - inp if total > inp + cand else cand
+    return inp, max(0, out)
 
 
 def _text(resp: Any) -> str:
@@ -105,7 +109,9 @@ def search(model: str, prompt: str, *, temperature: float, max_output_tokens: in
     return _text(resp), _grounding_citations(resp), it, ot
 
 
-def synthesis_stream(model: str, prompt: str, *, temperature: float, max_output_tokens: int) -> Iterator[Any]:
+def synthesis_stream(
+    model: str, prompt: str, *, temperature: float, max_output_tokens: int, thinking_level: str = "",
+) -> Iterator[Any]:
     """Grounded streaming synthesis, yielded one chunk at a time.
 
     This MUST be a generator (not `return iter(stream)`): the genai Client owns the
@@ -113,19 +119,32 @@ def synthesis_stream(model: str, prompt: str, *, temperature: float, max_output_
     moment the function returns — the next streamed read then fails with "Cannot send a
     request, as the client has been closed". Keeping `client` in this generator's frame
     holds it alive for the whole stream.
+
+    `thinking_level` (low|medium|high) is applied for thinking models such as
+    gemini-3.6-flash; it is attached defensively so an SDK that lacks ThinkingConfig or
+    the field simply runs without it rather than erroring.
     """
     from google.genai import types
     client = _client(model)
     if client is None:
         return
+
+    cfg_kwargs: dict[str, Any] = dict(
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+    )
+    lvl = (thinking_level or "").strip().lower()
+    if lvl:
+        try:
+            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=lvl)
+        except Exception:
+            pass  # older SDK / unsupported field → run without an explicit thinking level
+
     stream = client.models.generate_content_stream(
         model=model,
         contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=temperature,
-            max_output_tokens=max_output_tokens,
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-        ),
+        config=types.GenerateContentConfig(**cfg_kwargs),
     )
     for chunk in stream:
         yield chunk

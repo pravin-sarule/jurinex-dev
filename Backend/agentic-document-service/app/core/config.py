@@ -150,8 +150,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DEEP_RESEARCH_SEARCH_MODEL"),
     )
     deep_research_synthesis_model: str = Field(
-        default="gemini-2.5-pro",
+        default="gemini-3.6-flash",
         validation_alias=AliasChoices("DEEP_RESEARCH_SYNTHESIS_MODEL"),
+    )
+    # Synthesis generation controls. gemini-3.6-flash is a thinking model with live
+    # Google Search grounding; medium thinking + temperature 1.0 is the tuned default.
+    deep_research_synthesis_temperature: float = Field(
+        default=1.0,
+        validation_alias=AliasChoices("DEEP_RESEARCH_SYNTHESIS_TEMPERATURE"),
+    )
+    deep_research_synthesis_thinking_level: str = Field(
+        default="low",
+        validation_alias=AliasChoices("DEEP_RESEARCH_SYNTHESIS_THINKING_LEVEL"),
     )
     # Hard ceiling on search rounds (each round = one grounded model call + a gap check).
     deep_research_max_rounds: int = Field(
@@ -161,7 +171,7 @@ class Settings(BaseSettings):
     # Hard rupee ceiling for the WHOLE run. The loop stops opening new rounds before this
     # is hit; the final report is always still written.
     deep_research_budget_inr: float = Field(
-        default=10.0,
+        default=15.0,
         validation_alias=AliasChoices("DEEP_RESEARCH_BUDGET_INR"),
     )
     # Fraction of the budget held back so the synthesis call can always complete.

@@ -3,10 +3,10 @@
 All knobs are read from the app Settings (env-overridable) so ops can tune the
 cost/quality trade-off without a code change. The defaults implement the deliberate
 cheap-gather / expensive-synthesize split that lets a full 4-round run fit inside the
-INR 10 budget:
+INR 15 budget:
 
     * reasoning + search rounds -> gemini-2.5-flash   (cheap, fast, still grounded)
-    * final synthesis           -> gemini-2.5-pro      (quality, streamed to the user)
+    * final synthesis           -> gemini-3.6-flash   (grounded, medium thinking, temp 1.0)
 """
 
 from __future__ import annotations
@@ -23,7 +23,10 @@ class DeepResearchConfig:
     budget_inr: float           # hard rupee ceiling for the WHOLE run
     synthesis_reserve_frac: float  # fraction of budget kept back for synthesis
     max_output_tokens: int      # ceiling for the synthesis output
-    temperature: float = 0.2
+    temperature: float = 0.2    # plan/search temperature (low = focused)
+    # Synthesis-specific generation controls (gemini-3.6-flash is a thinking model).
+    synthesis_temperature: float = 1.0
+    synthesis_thinking_level: str = "low"  # "" disables; else low|medium|high
 
     # Character caps on the private-context we feed each step. Feeding the whole case on
     # every round is what makes an agentic loop expensive; these keep spend predictable.
@@ -45,12 +48,16 @@ class DeepResearchConfig:
             search_model=(str(getattr(settings, "deep_research_search_model", "") or "").strip()
                           or "gemini-2.5-flash"),
             synthesis_model=(str(getattr(settings, "deep_research_synthesis_model", "") or "").strip()
-                             or "gemini-2.5-pro"),
+                             or "gemini-3.6-flash"),
             max_rounds=max(1, int(getattr(settings, "deep_research_max_rounds", 4) or 4)),
-            budget_inr=max(1.0, float(getattr(settings, "deep_research_budget_inr", 10.0) or 10.0)),
+            budget_inr=max(1.0, float(getattr(settings, "deep_research_budget_inr", 15.0) or 15.0)),
             synthesis_reserve_frac=min(0.9, max(0.1, float(
                 getattr(settings, "deep_research_synthesis_reserve_frac", 0.6) or 0.6))),
             max_output_tokens=min(_max, 65536),
+            synthesis_temperature=float(
+                getattr(settings, "deep_research_synthesis_temperature", 1.0) or 1.0),
+            synthesis_thinking_level=str(
+                getattr(settings, "deep_research_synthesis_thinking_level", "low") or "low").strip().lower(),
         )
 
     @property

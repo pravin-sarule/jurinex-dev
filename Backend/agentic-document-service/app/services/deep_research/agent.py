@@ -200,7 +200,9 @@ async def run_deep_research(
         it_stream = gemini.synthesis_stream(
             cfg.synthesis_model,
             prompts.synthesis(question, findings, document_context, cfg.synth_context_chars, today),
-            temperature=cfg.temperature, max_output_tokens=cfg.max_output_tokens,
+            temperature=cfg.synthesis_temperature,
+            max_output_tokens=cfg.max_output_tokens,
+            thinking_level=cfg.synthesis_thinking_level,
         )
         while True:
             chunk = await asyncio.to_thread(next, it_stream, None)

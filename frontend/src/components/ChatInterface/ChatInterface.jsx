@@ -1006,7 +1006,7 @@ const ChatInterface = () => {
   const [showStyleDropdown, setShowStyleDropdown] = useState(false);
   const [learningModeActive, setLearningModeActive] = useState(false);
   const [researchModeActive, setResearchModeActive] = useState(false);
-  // Deep Research: bounded agentic loop (plan → web-search rounds → synthesize) under a ₹10 budget.
+  // Deep Research: bounded agentic loop (plan → web-search rounds → synthesize) under a ₹15 budget.
   const [deepResearchActive, setDeepResearchActive] = useState(false);
   // Panel state ? mirrors Claude's artifact panel
   const [panelOpen, setPanelOpen] = useState(false);
@@ -4168,11 +4168,11 @@ const ChatInterface = () => {
                         type="button"
                         onClick={() => setDeepResearchActive((v) => !v)}
                         className="w-full flex items-center justify-between pl-9 pr-3 py-2 text-xs text-gray-600 hover:bg-gray-50 border-t border-gray-50"
-                        title="Bounded agentic research: plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹10 budget)."
+                        title="Bounded agentic research: plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹15 budget)."
                       >
                         <span className="flex items-center gap-2">
                           <Sparkles className="h-3 w-3 text-[#21C1B6]" />
-                          Deep Research · ₹10
+                          Deep Research · ₹15
                         </span>
                         <span className={`text-[10px] font-bold tracking-wide ${deepResearchActive ? 'text-[#21C1B6]' : 'text-gray-400'}`}>
                           {deepResearchActive ? 'ON' : 'OFF'}
