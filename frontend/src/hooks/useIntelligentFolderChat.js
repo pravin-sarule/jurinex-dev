@@ -411,6 +411,9 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
         if (streamOpts.research_mode != null) {
           requestBody.research_mode = !!streamOpts.research_mode;
         }
+        if (streamOpts.deep_research != null) {
+          requestBody.deep_research = !!streamOpts.deep_research;
+        }
         if (streamOpts.adversarial_mode != null) {
           requestBody.adversarial_mode = !!streamOpts.adversarial_mode;
         }

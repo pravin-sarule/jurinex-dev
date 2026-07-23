@@ -3055,6 +3055,12 @@ async def intelligent_chat_stream(
         if learning_mode and research_mode:
             yield _sse({"type": "error", "message": "Choose either Learning Mode or Research Mode, not both."})
             return
+        # Deep Research is a bounded agentic loop (plan → web-search rounds → synthesize) with
+        # a hard rupee budget. It supersedes the single-pass Research and Learning modes.
+        deep_research = bool(getattr(chat_request, "deep_research", False))
+        if deep_research:
+            research_mode = False
+            learning_mode = False
         learning_agent_name = "learning_mode_agent" if learning_mode else None
         learning_state = None
         if learning_mode:
@@ -3593,6 +3599,22 @@ async def intelligent_chat_stream(
                         running_chars += len(block)
 
                     context = "\n\n---\n\n".join(context_parts)
+
+                    # ── Deep Research short-circuit ──────────────────────────────────────────────
+                    # Hand off to the bounded agentic loop: it runs plan → web-search rounds →
+                    # synthesize under a hard rupee budget and streams the SAME SSE shapes
+                    # (status/thinking/chunk/done), so nothing downstream here needs to run.
+                    if deep_research:
+                        from app.services.deep_research import run_deep_research
+                        async for _dr_evt in run_deep_research(
+                            question=effective_query_text,
+                            document_context=context,
+                            session_id=(chat_request.session_id or ""),
+                            llm_config=llm_config,
+                        ):
+                            yield _dr_evt
+                        return
+
                     # ── Draft-from-template setup ────────────────────────────────────────────────
                     # A dedicated draft model (settings.draft_model_name, e.g. gemini-3.1-pro-preview)
                     # reads the uploaded template PDF DIRECTLY and reproduces all pages with clean

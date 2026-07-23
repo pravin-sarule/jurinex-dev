@@ -53,6 +53,8 @@ export default function IntelligentFolderChat({
   const [recognition, setRecognition] = useState(null);
   const [learningMode, setLearningMode] = useState(() => localStorage.getItem('learning_mode_enabled') === 'true');
   const [researchMode, setResearchMode] = useState(() => localStorage.getItem('research_mode_enabled') === 'true');
+  // Deep Research: bounded agentic loop (plan → web-search rounds → synthesize) under a ₹10 budget.
+  const [deepResearchMode, setDeepResearchMode] = useState(() => localStorage.getItem('deep_research_enabled') === 'true');
   const [adversarialMode, setAdversarialMode] = useState(() => localStorage.getItem('learning_adversarial_mode') === 'true');
   const [learningSessionId, setLearningSessionId] = useState(null);
   const [turnCount, setTurnCount] = useState(0);
@@ -125,12 +127,13 @@ export default function IntelligentFolderChat({
     }
     o.learning_mode = !!learningMode;
     o.research_mode = !!researchMode;
+    o.deep_research = !!deepResearchMode;
     if (learningMode) {
       o.adversarial_mode = !!adversarialMode;
       if (relationshipHint) o.context_selection = relationshipHint;
     }
     return Object.keys(o).length ? o : null;
-  }, [learningMode, researchMode, adversarialMode, relationshipHint]);
+  }, [learningMode, researchMode, deepResearchMode, adversarialMode, relationshipHint]);
 
   const {
     text,
@@ -340,6 +343,9 @@ export default function IntelligentFolderChat({
   useEffect(() => {
     localStorage.setItem('research_mode_enabled', String(researchMode));
   }, [researchMode]);
+  useEffect(() => {
+    localStorage.setItem('deep_research_enabled', String(deepResearchMode));
+  }, [deepResearchMode]);
   useEffect(() => {
     localStorage.setItem('learning_adversarial_mode', String(adversarialMode));
   }, [adversarialMode]);
@@ -631,6 +637,7 @@ export default function IntelligentFolderChat({
   const handleSelectStyle = async (style) => {
     if (style === 'learning') {
       setResearchMode(false);
+      setDeepResearchMode(false);
       await handleLearningModeToggle(true);
     } else if (style === 'research') {
       if (learningMode) {
@@ -638,13 +645,26 @@ export default function IntelligentFolderChat({
         setLearningSessionId(null);
         setTurnCount(0);
       }
+      setDeepResearchMode(false);
       setResearchMode(true);
+      setMessages([]);
+      setCurrentMessageId(null);
+      finalizedMessageIds.current.clear();
+    } else if (style === 'deep_research') {
+      if (learningMode) {
+        setLearningMode(false);
+        setLearningSessionId(null);
+        setTurnCount(0);
+      }
+      setResearchMode(false);
+      setDeepResearchMode(true);
       setMessages([]);
       setCurrentMessageId(null);
       finalizedMessageIds.current.clear();
     } else {
       if (learningMode) await handleLearningModeToggle(false);
       setResearchMode(false);
+      setDeepResearchMode(false);
     }
     setShowStyleDropdown(false);
   };
@@ -775,17 +795,18 @@ export default function IntelligentFolderChat({
           Intelligent Folder Chat
           {learningMode ? <span className="learning-mode-tag">📖 Learning Mode</span> : null}
           {researchMode ? <span className="research-mode-tag">Research Mode · Live web</span> : null}
+          {deepResearchMode ? <span className="research-mode-tag">Deep Research · agentic · ₹10 budget</span> : null}
         </h3>
         <div className="style-dropdown-wrap" ref={styleDropdownRef}>
           <button
             type="button"
-            className={`learning-pill-toggle ${learningMode || researchMode ? 'active' : ''}`}
+            className={`learning-pill-toggle ${learningMode || researchMode || deepResearchMode ? 'active' : ''}`}
             onClick={() => setShowStyleDropdown((s) => !s)}
             disabled={isStreaming || !String(folderName || '').trim()}
             title={!String(folderName || '').trim() ? 'Select a folder first' : 'Choose response style'}
           >
             <span className="learning-pill-knob" />
-            <span className="learning-pill-label">{learningMode ? 'Learning' : researchMode ? 'Research' : 'Normal'}</span>
+            <span className="learning-pill-label">{learningMode ? 'Learning' : deepResearchMode ? 'Deep Research' : researchMode ? 'Research' : 'Normal'}</span>
             <ChevronDown className="h-3 w-3" />
           </button>
           {showStyleDropdown && (
@@ -804,6 +825,10 @@ export default function IntelligentFolderChat({
               <button type="button" className="style-dropdown-item" onClick={() => handleSelectStyle("research")} disabled={!String(folderName || "").trim()}>
                 <Search className="h-3.5 w-3.5" />
                 Research
+              </button>
+              <button type="button" className="style-dropdown-item" onClick={() => handleSelectStyle("deep_research")} disabled={!String(folderName || "").trim()} title="Bounded agentic research: plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹10 budget).">
+                <Search className="h-3.5 w-3.5" />
+                Deep Research · ₹10
               </button>
             </div>
           )}
@@ -1030,6 +1055,12 @@ export default function IntelligentFolderChat({
                           <span className="method-label">Live Research</span>
                           <span className="method-tooltip">Gemini with Google Search grounding and case documents</span>
                         </>
+                      ) : msg.method === 'deep_research' ? (
+                        <>
+                          <span className="method-icon">🧭</span>
+                          <span className="method-label">Deep Research</span>
+                          <span className="method-tooltip">Bounded agentic loop: plan → multiple live web-search rounds → cited synthesis (hard ₹10 budget)</span>
+                        </>
                       ) : (
                         <>
                           <span className="method-icon">🔍</span>
@@ -1086,12 +1117,19 @@ export default function IntelligentFolderChat({
               <button type="button" className="learning-chip-close" onClick={() => setResearchMode(false)} disabled={isStreaming}>×</button>
             </div>
           )}
+          {deepResearchMode && (
+            <div className="research-active-chip" title="Bounded agentic research: multiple live web-search rounds then a cited report. Hard ₹10 budget.">
+              <Search className="h-3.5 w-3.5" />
+              <span>Deep Research · ₹10</span>
+              <button type="button" className="learning-chip-close" onClick={() => setDeepResearchMode(false)} disabled={isStreaming}>×</button>
+            </div>
+          )}
           <input
             ref={inputRef}
             type="text"
             value={input}
             onChange={handleInputChange}
-            placeholder={isSecretPromptSelected ? `Using: ${activeDropdown}` : researchMode ? "Research this topic using case documents and the live web..." : "Ask a question about your documents..."}
+            placeholder={isSecretPromptSelected ? `Using: ${activeDropdown}` : deepResearchMode ? "Deep research this across your documents and the live web (slower, ₹10 budget)..." : researchMode ? "Research this topic using case documents and the live web..." : "Ask a question about your documents..."}
             disabled={isStreaming || (learningMode && !!learningPopupQuestion)}
             className="flex-grow bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 text-sm font-medium py-2 min-w-0"
             autoFocus

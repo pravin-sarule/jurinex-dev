@@ -137,6 +137,38 @@ class Settings(BaseSettings):
         default="gemini-2.5-pro",
         validation_alias=AliasChoices("RESEARCH_MODEL_NAME"),
     )
+    # ── Deep Research (bounded agentic loop) ─────────────────────────────────────────
+    # Deliberate cheap-gather / expensive-synthesize split so a full multi-round run fits
+    # inside the rupee budget: flash grounds the plan + per-round searches, pro writes the
+    # final streamed report. All env-overridable.
+    deep_research_reasoning_model: str = Field(
+        default="gemini-2.5-flash",
+        validation_alias=AliasChoices("DEEP_RESEARCH_REASONING_MODEL"),
+    )
+    deep_research_search_model: str = Field(
+        default="gemini-2.5-flash",
+        validation_alias=AliasChoices("DEEP_RESEARCH_SEARCH_MODEL"),
+    )
+    deep_research_synthesis_model: str = Field(
+        default="gemini-2.5-pro",
+        validation_alias=AliasChoices("DEEP_RESEARCH_SYNTHESIS_MODEL"),
+    )
+    # Hard ceiling on search rounds (each round = one grounded model call + a gap check).
+    deep_research_max_rounds: int = Field(
+        default=4,
+        validation_alias=AliasChoices("DEEP_RESEARCH_MAX_ROUNDS"),
+    )
+    # Hard rupee ceiling for the WHOLE run. The loop stops opening new rounds before this
+    # is hit; the final report is always still written.
+    deep_research_budget_inr: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices("DEEP_RESEARCH_BUDGET_INR"),
+    )
+    # Fraction of the budget held back so the synthesis call can always complete.
+    deep_research_synthesis_reserve_frac: float = Field(
+        default=0.6,
+        validation_alias=AliasChoices("DEEP_RESEARCH_SYNTHESIS_RESERVE_FRAC"),
+    )
     # Dedicated key for Gemma models (gemma-*). Falls back to GEMINI_API_KEY when blank.
     gemma_api_key: str = Field(default="", validation_alias=AliasChoices("GEMMA_API_KEY"))
     # Dedicated model for draft-from-template mode. A stronger model (e.g. gemini-3.1-pro-preview)

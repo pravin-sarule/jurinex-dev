@@ -1006,6 +1006,8 @@ const ChatInterface = () => {
   const [showStyleDropdown, setShowStyleDropdown] = useState(false);
   const [learningModeActive, setLearningModeActive] = useState(false);
   const [researchModeActive, setResearchModeActive] = useState(false);
+  // Deep Research: bounded agentic loop (plan → web-search rounds → synthesize) under a ₹10 budget.
+  const [deepResearchActive, setDeepResearchActive] = useState(false);
   // Panel state ? mirrors Claude's artifact panel
   const [panelOpen, setPanelOpen] = useState(false);
   const [panelType, setPanelType] = useState(null); // 'learning' | 'response' | 'agentic'
@@ -2063,6 +2065,7 @@ const ChatInterface = () => {
           llm_name: 'gemini',
           learning_mode: learningModeActive,
           research_mode: researchModeActive,
+          deep_research: deepResearchActive,
         }),
       });
 
@@ -2133,6 +2136,7 @@ const ChatInterface = () => {
             chunk_details: finalMetadata?.chunk_details || null,
             learning_mode: !!learningModeActive,
             research_mode: researchModeActive,
+            deep_research: deepResearchActive,
             learningPayload: learningModeActive
               ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
               : null,
@@ -2213,6 +2217,7 @@ const ChatInterface = () => {
               chunk_details: finalMetadata?.chunk_details || null,
               learning_mode: !!learningModeActive,
               research_mode: researchModeActive,
+              deep_research: deepResearchActive,
               learningPayload: learningModeActive
                 ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                 : null,
@@ -2338,6 +2343,7 @@ const ChatInterface = () => {
                 chunk_details: finalMetadata?.chunk_details || null,
                 learning_mode: !!learningModeActive,
                 research_mode: researchModeActive,
+                deep_research: deepResearchActive,
                 learningPayload: learningModeActive
                   ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                   : null,
@@ -2490,6 +2496,7 @@ const ChatInterface = () => {
             llm_name: 'gemini',
             learning_mode: learningModeActive,
             research_mode: researchModeActive,
+            deep_research: deepResearchActive,
             // Draft-from-template: when a template is attached, tell the backend to fill it from the
             // case's documents (the backend attaches the template file to the model).
             ...(draftTemplate
@@ -2578,6 +2585,7 @@ const ChatInterface = () => {
               citations: finalMetadata?.citations || null,
               learning_mode: !!learningModeActive,
               research_mode: researchModeActive,
+              deep_research: deepResearchActive,
               learningPayload: learningModeActive
                 ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                 : null,
@@ -2664,6 +2672,7 @@ const ChatInterface = () => {
                 chunk_details: finalMetadata?.chunk_details || null,
                 learning_mode: !!learningModeActive,
                 research_mode: researchModeActive,
+                deep_research: deepResearchActive,
                 learningPayload: learningModeActive
                   ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                   : null,
@@ -2777,6 +2786,7 @@ const ChatInterface = () => {
                   chunk_details: finalMetadata?.chunk_details || null,
                   learning_mode: !!learningModeActive,
                   research_mode: researchModeActive,
+                  deep_research: deepResearchActive,
                   learningPayload: learningModeActive
                     ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                     : null,
@@ -4108,6 +4118,8 @@ const ChatInterface = () => {
                   <Settings2 className="h-3.5 w-3.5" />
                   {learningModeActive ? (
                     <Sparkles className="h-3.5 w-3.5 text-[#21C1B6]" />
+                  ) : deepResearchActive ? (
+                    <Search className="h-3.5 w-3.5 text-[#21C1B6]" />
                   ) : researchModeActive ? (
                     <Search className="h-3.5 w-3.5 text-[#21C1B6]" />
                   ) : (
@@ -4118,18 +4130,18 @@ const ChatInterface = () => {
                   <div className="absolute bottom-full left-0 mb-2 w-44 bg-white border border-gray-100 rounded-2xl shadow-xl z-20 overflow-hidden py-1">
                     <button
                       type="button"
-                      onClick={() => { setLearningModeActive(false); setResearchModeActive(false); setShowStyleDropdown(false); closePanel(); }}
+                      onClick={() => { setLearningModeActive(false); setResearchModeActive(false); setDeepResearchActive(false); setShowStyleDropdown(false); closePanel(); }}
                       className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50"
                     >
                       <span className="flex items-center gap-2">
                         <MessageSquare className="h-3.5 w-3.5 text-[#21C1B6]" />
                         Normal
                       </span>
-                      {!learningModeActive && !researchModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                      {!learningModeActive && !researchModeActive && !deepResearchActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
                     </button>
                     <button
                       type="button"
-                      onClick={() => { setLearningModeActive(true); setResearchModeActive(false); setShowStyleDropdown(false); }}
+                      onClick={() => { setLearningModeActive(true); setResearchModeActive(false); setDeepResearchActive(false); setShowStyleDropdown(false); }}
                       className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50"
                     >
                       <span className="flex items-center gap-2">
@@ -4140,7 +4152,7 @@ const ChatInterface = () => {
                     </button>
                     <button
                       type="button"
-                      onClick={() => { setLearningModeActive(false); setResearchModeActive(true); setShowStyleDropdown(false); closePanel(); }}
+                      onClick={() => { setLearningModeActive(false); setResearchModeActive(true); setDeepResearchActive(false); setShowStyleDropdown(false); closePanel(); }}
                       className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50"
                     >
                       <span className="flex items-center gap-2">
@@ -4148,6 +4160,18 @@ const ChatInterface = () => {
                         Research
                       </span>
                       {researchModeActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setLearningModeActive(false); setResearchModeActive(false); setDeepResearchActive(true); setShowStyleDropdown(false); closePanel(); }}
+                      className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-gray-700 hover:bg-gray-50"
+                      title="Bounded agentic research: plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹10 budget)."
+                    >
+                      <span className="flex items-center gap-2">
+                        <Search className="h-3.5 w-3.5 text-[#21C1B6]" />
+                        Deep Research · ₹10
+                      </span>
+                      {deepResearchActive && <Check className="h-3.5 w-3.5 text-[#21C1B6]" />}
                     </button>
                   </div>
                 )}

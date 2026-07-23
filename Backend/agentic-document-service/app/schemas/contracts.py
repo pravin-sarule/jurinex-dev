@@ -249,6 +249,9 @@ class FolderChatRequest(BaseModel):
     secret_id: str | None = None
     learning_mode: bool = False
     research_mode: bool = False
+    # Deep Research: bounded agentic web-research loop (plan → search rounds → synthesize)
+    # with a hard rupee budget. Supersedes research_mode/learning_mode when set.
+    deep_research: bool = False
     adversarial_mode: bool = False
     # Draft-from-template mode: fill an uploaded template (attached to the model as a file) from the
     # case's supporting documents. template_gcs_path is the gs:// object the browser PUT via the
