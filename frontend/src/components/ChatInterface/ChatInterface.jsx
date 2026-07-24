@@ -1185,6 +1185,14 @@ const ChatInterface = () => {
   const streamThinkingRef = useRef('');
   const streamUpdateTimeoutRef = useRef(null);
   const streamReaderRef = useRef(null);
+  // Monotonic token guarding fetchChatHistory against stale async resolutions. Each fetch
+  // captures the current value before awaiting; if the token has since moved on (a newer
+  // fetch started, or handleNewChat/handleSelectChatSession bumped it), the resolved fetch
+  // discards its result instead of clobbering the current session. Without this, an
+  // in-flight history load for a PREVIOUS chat resolves after "New Chat" and silently
+  // re-attaches the UI (and every subsequent send's session_id) to the old session — which
+  // in research/deep-research mode makes the model keep continuing the old case report.
+  const fetchHistoryReqRef = useRef(0);
   const chatMenuRefs = useRef({});
   const panelStatesSetRef = useRef(false);
   const fetchedFoldersRef = useRef(new Set());
@@ -1593,11 +1601,18 @@ const ChatInterface = () => {
       return;
     }
     console.log('[ChatInterface] fetchChatHistory: Starting fetch for folder:', folderToFetch, 'sessionId:', sessionId);
+    // Claim this fetch. If a newer fetch starts (or New Chat is clicked) before the await
+    // below resolves, reqId will no longer match and we abort without touching state.
+    const reqId = ++fetchHistoryReqRef.current;
     setLoadingChat(true);
     setChatError(null);
     try {
       console.log('[ChatInterface] fetchChatHistory: Calling session API...');
       const data = await documentApi.getFolderChatSessionById(folderToFetch, sessionId);
+      if (reqId !== fetchHistoryReqRef.current) {
+        console.log('[ChatInterface] fetchChatHistory: stale result for', sessionId, '- discarding (superseded)');
+        return;
+      }
       console.log('[ChatInterface] fetchChatHistory: API response:', data);
       let chats = Array.isArray(data?.chatHistory)
         ? data.chatHistory
@@ -1662,11 +1677,13 @@ const ChatInterface = () => {
         setForceSidebarCollapsed(false);
       }
     } catch (err) {
+      if (reqId !== fetchHistoryReqRef.current) return;
       console.error("[ChatInterface] fetchChatHistory: Error fetching chats:", err);
       console.error("[ChatInterface] fetchChatHistory: Error details:", err.response?.data || err.message);
       setChatError(stringToChatErrorDisplay('Failed to fetch chat history.'));
     } finally {
-      setLoadingChat(false);
+      // Only the latest fetch owns the loading flag — a superseded one must not clear it.
+      if (reqId === fetchHistoryReqRef.current) setLoadingChat(false);
       console.log('[ChatInterface] fetchChatHistory: Completed');
     }
   }, [selectedFolder]);
@@ -3013,6 +3030,9 @@ const ChatInterface = () => {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
+    // Invalidate any in-flight history fetch so a late resolution can't re-attach this
+    // fresh chat to the previous session (the stale-report bug).
+    fetchHistoryReqRef.current += 1;
     setCurrentChatHistory([]);
     setSelectedChatSessionId(null);
     setHasResponse(false);

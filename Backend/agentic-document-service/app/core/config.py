@@ -142,6 +142,20 @@ class Settings(BaseSettings):
     # inside the rupee budget: flash-lite grounds the plan + per-round searches (cheaper AND
     # more capable than 2.5-flash at $0.25/$1.50 per 1M vs $0.30/$2.50), the synthesis model
     # writes the final streamed report. All env-overridable.
+    #
+    # TESTED 2026-07-24: swapped synthesis to gemma-4-31b-it (minimal thinking) to cut the
+    # ~₹5/run synthesis cost to ₹0. Two live runs both came back with `synthesis(...)=0 new`
+    # citations (see the "[DeepResearch] citations · round-search=N · synthesis=N new"
+    # log line in agent.py) despite the google_search tool being attached and the call
+    # succeeding — Gemma accepts the tool param but does not appear to actually ground with
+    # it in this streaming call shape. Reverted synthesis back to gemini-3.6-flash; do not
+    # re-attempt a Gemma synthesis model without re-verifying this first.
+    #
+    # A third run (synthesis back on gemini-3.6-flash, everything else unchanged) came back
+    # `round-search=2 · synthesis=7 new · total=9`, all links resolved clean — so
+    # gemini-3.1-flash-lite's own grounding on the round-search step is fine; the two prior
+    # `round-search=0` readings were ordinary query/round variance, not a broken path. No
+    # action needed there.
     deep_research_reasoning_model: str = Field(
         default="gemini-3.1-flash-lite",
         validation_alias=AliasChoices("DEEP_RESEARCH_REASONING_MODEL"),
@@ -155,7 +169,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DEEP_RESEARCH_SYNTHESIS_MODEL"),
     )
     # Synthesis generation controls. gemini-3.6-flash is a thinking model with live
-    # Google Search grounding; medium thinking + temperature 1.0 is the tuned default.
+    # Google Search grounding; low thinking + temperature 1.0 is the tuned default.
     deep_research_synthesis_temperature: float = Field(
         default=1.0,
         validation_alias=AliasChoices("DEEP_RESEARCH_SYNTHESIS_TEMPERATURE"),

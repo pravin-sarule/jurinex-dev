@@ -3639,8 +3639,16 @@ async def intelligent_chat_stream(
                                     folder_name, _dr_persist_exc,
                                 )
 
+                        # Use the CLEAN current question (_dr_q), NOT effective_query_text.
+                        # effective_query_text prepends the entire prior Q/A of this session
+                        # (folder_service._build_query_with_recent_history) — feeding that as the
+                        # research question makes the plan/search/synthesis steps research the OLD
+                        # topic and regurgitate it, so a follow-up like "this day in the history"
+                        # comes back as a report on the previous case. The web grounding is driven
+                        # by the question text, so it must be exactly what the user just asked. (The
+                        # case document is still supplied separately as document_context background.)
                         async for _dr_evt in run_deep_research(
-                            question=effective_query_text,
+                            question=_dr_q,
                             document_context=context,
                             session_id=_dr_session_id,
                             llm_config=llm_config,

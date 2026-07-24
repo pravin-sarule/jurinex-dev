@@ -242,6 +242,7 @@ async def run_deep_research(
         f"({len(_dedupe_citations(all_citations))} unique source(s))…"
     )
 
+    _citations_before_synthesis = len(_dedupe_citations(all_citations))
     answer_parts: list[str] = []
     last_it = last_ot = 0
     try:
@@ -279,6 +280,16 @@ async def run_deep_research(
                 cfg.synthesis_model, last_it, last_ot, _cost)
     answer = "".join(answer_parts).strip()
     citations_payload = _dedupe_citations(all_citations)
+    # Split the final source count by origin so a run's console log can show whether the
+    # SYNTHESIS call itself actually grounded (returned grounding_metadata) or whether every
+    # source came from the round-search steps alone — the two calls use different models and
+    # a synthesis model that silently ignores the google_search tool would still show a
+    # nonzero total here, masking the fact that it contributed zero of its own.
+    _new_from_synthesis = len(citations_payload) - _citations_before_synthesis
+    logger.info(
+        "[DeepResearch] citations · round-search=%d · synthesis(model=%s)=%d new · total=%d",
+        _citations_before_synthesis, cfg.synthesis_model, _new_from_synthesis, len(citations_payload),
+    )
 
     # Every "## Sources" link the model wrote is a Gemini grounding-redirect wrapper, not a
     # real publisher URL — these are known to be dead/expired sometimes ("click and nothing

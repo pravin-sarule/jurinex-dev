@@ -7,6 +7,11 @@ INR 15 budget:
 
     * reasoning + search rounds -> gemini-3.1-flash-lite   ($0.25/$1.50 per 1M, still grounded)
     * final synthesis           -> gemini-3.6-flash        (grounded, low thinking, temp 1.0)
+
+A gemma-4-31b-it synthesis swap was tested live 2026-07-24 to cut the synthesis cost to
+$0 — reverted after two runs both showed zero grounded citations from the synthesis step
+(see app/core/config.py for the full note). Do not re-attempt without first confirming
+Gemma actually populates grounding_metadata on a streaming call.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ class DeepResearchConfig:
     temperature: float = 0.2    # plan/search temperature (low = focused)
     # Synthesis-specific generation controls (gemini-3.6-flash is a thinking model).
     synthesis_temperature: float = 1.0
-    synthesis_thinking_level: str = "low"  # "" disables; else low|medium|high
+    synthesis_thinking_level: str = "low"  # "" disables; else low|medium|high (Gemma instead needs minimal|high)
 
     # Character caps on the private-context we feed each step. Feeding the whole case on
     # every round is what makes an agentic loop expensive; these keep spend predictable.

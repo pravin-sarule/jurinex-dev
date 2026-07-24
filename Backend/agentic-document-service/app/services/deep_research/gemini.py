@@ -120,14 +120,35 @@ def synthesis_stream(
     request, as the client has been closed". Keeping `client` in this generator's frame
     holds it alive for the whole stream.
 
-    `thinking_level` (low|medium|high) is applied for thinking models such as
-    gemini-3.6-flash; it is attached defensively so an SDK that lacks ThinkingConfig or
-    the field simply runs without it rather than erroring.
+    `thinking_level` is passed through to ThinkingConfig as-is: Gemini accepts
+    low|medium|high, but Gemma ONLY accepts minimal|high (anything else, including
+    "low", 400s on the network call — verified live). The caller (DeepResearchConfig)
+    is responsible for supplying a value valid for whichever model is configured; this
+    function attaches it defensively so an SDK that lacks ThinkingConfig or the field
+    simply runs without it rather than erroring.
+
+    The google_search tool below is attached unconditionally — this is the whole point
+    of Deep Research (a cited, grounded report). CONFIRMED LIVE 2026-07-24: Gemma
+    (gemma-4-31b-it) accepts this tool without erroring but does NOT actually ground
+    with it on this streaming call shape — two live runs both returned zero grounding
+    citations from the synthesis step (see agent.py's per-run "citations ·
+    round-search=N · synthesis=N new" log). Google AI Studio showing the tool as
+    available for this model was not a reliable predictor here. Do not point
+    synthesis_model at a Gemma model without re-verifying this first.
     """
     from google.genai import types
     client = _client(model)
     if client is None:
         return
+
+    # Free-tier Gemma is rate-limited GLOBALLY per API key (shared with live document
+    # chat on the same key) — this call previously went straight to the network,
+    # unpaced, and could collide with that traffic. `_pace_gemma_call` is a no-op for
+    # non-Gemma models, so this is safe for the existing Gemini synthesis path too.
+    from app.services.adapters import document_ai
+    document_ai._pace_gemma_call(  # noqa: SLF001 - shared pacer, intentional reuse
+        model, est_input_tokens=document_ai._estimate_input_tokens(prompt)
+    )
 
     cfg_kwargs: dict[str, Any] = dict(
         temperature=temperature,
