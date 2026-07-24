@@ -30,19 +30,56 @@ logger = logging.getLogger(__name__)
 
 # ── parsing helpers ─────────────────────────────────────────────────────────────────
 
-def _parse_plan(text: str, fallback: str, max_rounds: int) -> list[str]:
-    """Extract the sub-question list from the planner's JSON reply, defensively."""
+def _parse_triage(text: str, fallback: str, max_rounds: int) -> tuple[str, str, list[str]]:
+    """Parse the planner's JSON triage object -> (mode, chat_reply, sub_questions).
+
+    Expected shape: {"mode": "chat"|"general"|"legal", "chat_reply": "...", "sub_questions": [...]}.
+    Defensive against code fences / surrounding prose, a legacy bare-array reply (older planner
+    shape), and malformed JSON (mode is then recovered by regex). Unknown/absent mode defaults to
+    "general" — NOT legal: when there is zero classification signal (the planner errored, got
+    truncated, or emitted an unrecognised synonym), general still does proportional web research
+    but IGNORES the case documents, which is the less-harmful miss. Defaulting to legal here would
+    re-run the full case-report path on a greeting or general question exactly when triage failed,
+    which is the bug this whole rework exists to kill.
+    """
+    mode = ""
+    chat_reply = ""
+    subqs: list[str] = []
     if text:
-        match = re.search(r"\[.*\]", text, re.DOTALL)
-        if match:
+        obj_match = re.search(r"\{.*\}", text, re.DOTALL)
+        if obj_match:
             try:
-                arr = json.loads(match.group(0))
-                subqs = [str(x).strip() for x in arr if str(x).strip()]
-                if subqs:
-                    return subqs[:max_rounds]
+                obj = json.loads(obj_match.group(0))
+                if isinstance(obj, dict):
+                    mode = str(obj.get("mode") or "").strip().lower()
+                    chat_reply = str(obj.get("chat_reply") or "").strip()
+                    raw = obj.get("sub_questions") or []
+                    if isinstance(raw, list):
+                        subqs = [str(x).strip() for x in raw if str(x).strip()]
             except Exception:
                 pass
-    return [fallback]
+        if not subqs and not mode:
+            arr_match = re.search(r"\[.*\]", text, re.DOTALL)
+            if arr_match:
+                try:
+                    arr = json.loads(arr_match.group(0))
+                    if isinstance(arr, list):
+                        subqs = [str(x).strip() for x in arr if str(x).strip()]
+                except Exception:
+                    pass
+        if not mode:
+            m = re.search(r'"mode"\s*:\s*"(chat|general|legal)"', text, re.IGNORECASE)
+            if m:
+                mode = m.group(1).lower()
+    if mode not in ("chat", "general", "legal"):
+        mode = "general"
+    if mode == "chat":
+        return "chat", chat_reply, []
+    if not subqs:
+        subqs = [fallback]
+    # `or [fallback]` guards a max_rounds=0 misconfig from slicing the queue empty and
+    # silently running synthesis on zero findings — a non-chat run always keeps >=1 sub-question.
+    return mode, chat_reply, (subqs[:max_rounds] or [fallback])
 
 
 def _parse_gap(text: str) -> str | None:
@@ -120,10 +157,53 @@ async def run_deep_research(
         logger.warning("[DeepResearch] planning failed: %s", exc)
         plan_text = ""
 
-    queue = _parse_plan(plan_text, fallback=question, max_rounds=cfg.max_rounds)
+    mode, chat_reply, queue = _parse_triage(plan_text, fallback=question, max_rounds=cfg.max_rounds)
+    logger.info("[DeepResearch] triage · mode=%s · planned_rounds=%d", mode, len(queue))
+
+    # ── CHAT short-circuit ───────────────────────────────────────────────────────
+    # Greetings / small talk / tests need no web research. Stream the planner's short reply,
+    # persist it, and finish — no search rounds, no synthesis, nothing beyond the one planning
+    # call already spent. This is what keeps "hi" from triggering a full research report.
+    if mode == "chat":
+        reply = chat_reply or (
+            "Hello! Ask me a research question — a legal issue on this case, or anything "
+            "you'd like me to look up on the web."
+        )
+        yield events.thinking("This looks like a greeting or small talk — replying directly, no web research needed.")
+        yield events.chunk(reply)
+        report.log_usage_table(
+            budget, cfg, rounds=0, session_id=session_id or "",
+            answer_length=len(reply), sources=0,
+        )
+        _record_usage_best_effort(cfg, budget)
+        # Persist BEFORE `done` (client refreshes its session list on `done`).
+        if on_result is not None and reply:
+            try:
+                await on_result(reply, [])
+            except Exception as exc:
+                logger.warning("[DeepResearch] on_result persist hook failed (chat): %s", exc)
+        yield events.thinking(f"Done · chat reply · ₹{budget.spent_inr:.2f} spent.")
+        yield events.done(
+            session_id=session_id or "",
+            method="deep_research",
+            routing_decision="deep_research_chat",
+            answer=reply,
+            citations=[],
+            used_chunk_ids=[],
+            deep_research=budget.summary() | {"rounds": 0, "mode": "chat"},
+        )
+        return
+
     yield events.thinking(
-        "Research plan:\n" + "\n".join(f"  {i}. {q}" for i, q in enumerate(queue, 1))
+        f"Mode: {mode} · research plan:\n" + "\n".join(f"  {i}. {q}" for i, q in enumerate(queue, 1))
     )
+
+    # Structural case-document isolation: the case PDF is fed to the search + synthesis steps
+    # ONLY in legal mode. In general mode we withhold it entirely rather than trusting the
+    # prompt's "ignore the case documents" instruction — this removes both the private-data
+    # leak surface (case facts bleeding into a general answer) and the wasted context tokens.
+    # The planner already got the real context above so it could still classify the question.
+    answer_context = document_context if mode == "legal" else ""
 
     # ── 2. ROUNDS: search -> read sources -> gap check ───────────────────────────
     findings: list[dict[str, Any]] = []
@@ -147,7 +227,7 @@ async def run_deep_research(
         try:
             text, cites, it, ot = await asyncio.to_thread(
                 gemini.search, cfg.search_model,
-                prompts.round_search(question, subq, findings, document_context, cfg.round_context_chars, today),
+                prompts.round_search(question, subq, findings, answer_context, cfg.round_context_chars, today, mode),
                 temperature=cfg.temperature, max_output_tokens=min(cfg.max_output_tokens, 8192),
             )
         except Exception as exc:
@@ -174,7 +254,7 @@ async def run_deep_research(
             try:
                 gap_text, it, ot = await asyncio.to_thread(
                     gemini.reason, cfg.reasoning_model,
-                    prompts.gap_check(question, findings, round_no, cfg.max_rounds),
+                    prompts.gap_check(question, findings, round_no, cfg.max_rounds, mode),
                     temperature=0.0, max_output_tokens=256,
                 )
                 _cost = budget.add(cfg.reasoning_model, it, ot, label=f"Round {round_no} gap-check")
@@ -188,8 +268,13 @@ async def run_deep_research(
             if not follow_up:
                 yield events.thinking("Coverage looks sufficient — no further searches needed.")
                 break
-            queue.insert(0, follow_up)
-            yield events.thinking(f"Identified a gap — next: {follow_up}")
+            # APPEND, not insert-at-front: the planner's own ordered sub-questions must all run
+            # first (they are deliberately sequenced and, under proportionality, few and load-
+            # bearing). Prepending gap follow-ups could starve the plan — a complex legal question
+            # with plan [A,B,C] would run A then only ever chase gap follow-ups, leaving B and C
+            # unsearched before max_rounds. This matches the intended loop-precedence rule.
+            queue.append(follow_up)
+            yield events.thinking(f"Identified a gap — queued next: {follow_up}")
 
     # ── 3. QUOTE VERIFICATION ───────────────────────────────────────────────────
     # A model can write a plausible "verbatim quote" next to a citation without that text
@@ -250,7 +335,7 @@ async def run_deep_research(
         # event loop. The generator keeps the genai client alive for the whole stream.
         it_stream = gemini.synthesis_stream(
             cfg.synthesis_model,
-            prompts.synthesis(question, findings, document_context, cfg.synth_context_chars, today),
+            prompts.synthesis(question, findings, answer_context, cfg.synth_context_chars, today, mode),
             temperature=cfg.synthesis_temperature,
             max_output_tokens=cfg.max_output_tokens,
             thinking_level=cfg.synthesis_thinking_level,
@@ -331,7 +416,7 @@ async def run_deep_research(
         answer=answer,
         citations=citations_payload,
         used_chunk_ids=[],
-        deep_research=budget.summary() | {"rounds": round_no},
+        deep_research=budget.summary() | {"rounds": round_no, "mode": mode},
     )
 
 

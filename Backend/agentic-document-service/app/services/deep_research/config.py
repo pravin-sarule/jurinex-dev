@@ -39,6 +39,15 @@ class DeepResearchConfig:
     round_context_chars: int = 8000
     synth_context_chars: int = 12000
 
+    # Floor for the synthesis output budget. The synthesis model is a THINKING model
+    # (gemini-3.6-flash) whose hidden reasoning tokens are billed against this same
+    # max_output_tokens — so a low cap gets partly eaten by thinking and truncates the
+    # VISIBLE report mid-content. The v5 synthesis prompt mandates 2,000-4,000+ word legal
+    # reports (~5-9k visible tokens + thinking), so we must never let Deep Research inherit
+    # a small shared "summarization" cap. Run cost is already bounded by the rupee budget,
+    # not by this token ceiling, so flooring it costs nothing when reports are naturally short.
+    _SYNTH_OUTPUT_TOKEN_FLOOR = 16384
+
     @classmethod
     def from_settings(cls, settings, llm_config: dict | None = None) -> "DeepResearchConfig":
         llm_config = llm_config or {}
@@ -47,6 +56,9 @@ class DeepResearchConfig:
             or llm_config.get("max_output_tokens")
             or 32768
         )
+        # Floor to _SYNTH_OUTPUT_TOKEN_FLOOR so a low shared summarization cap can't starve
+        # (and truncate) a long legal report; still hard-ceilinged at 65536.
+        _synth_max = min(max(_max, cls._SYNTH_OUTPUT_TOKEN_FLOOR), 65536)
         return cls(
             reasoning_model=(str(getattr(settings, "deep_research_reasoning_model", "") or "").strip()
                              or "gemini-3.1-flash-lite"),
@@ -58,7 +70,7 @@ class DeepResearchConfig:
             budget_inr=max(1.0, float(getattr(settings, "deep_research_budget_inr", 15.0) or 15.0)),
             synthesis_reserve_frac=min(0.9, max(0.1, float(
                 getattr(settings, "deep_research_synthesis_reserve_frac", 0.6) or 0.6))),
-            max_output_tokens=min(_max, 65536),
+            max_output_tokens=_synth_max,
             synthesis_temperature=float(
                 getattr(settings, "deep_research_synthesis_temperature", 1.0) or 1.0),
             synthesis_thinking_level=str(
