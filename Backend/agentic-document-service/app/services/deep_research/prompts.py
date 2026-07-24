@@ -31,6 +31,29 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit] + "\n…[context truncated to control cost]…"
 
 
+def _format_verification_badge(v: dict[str, Any]) -> str:
+    status = v.get("status")
+    if status == "verified":
+        return f"CONFIRMED — all {v.get('checked')} quoted passage(s) were found verbatim on the cited page(s)."
+    if status == "partially_verified":
+        return (
+            f"PARTIAL — {v.get('verified')}/{v.get('checked')} quoted passage(s) confirmed; "
+            f"{len(v.get('unverified') or [])} could NOT be found on the cited page(s) — treat those as unverified."
+        )
+    if status == "unverified":
+        return (
+            f"WARNING — none of the {v.get('checked')} quoted passage(s) for this point could be found on "
+            "the cited page(s). Do not present this point's specific wording as a confirmed direct quote."
+        )
+    if status == "unchecked":
+        return (
+            "COULD NOT VERIFY — the cited source(s) could not be fetched (network issue), so the quote was "
+            "NOT checked. This is not evidence the quote is wrong — treat it with normal editorial caution, "
+            "the same as any unverified claim, but do not describe it as having failed a check."
+        )
+    return "no verbatim quote was given for this point (nothing to mechanically check)."
+
+
 def format_findings(findings: list[dict[str, Any]]) -> str:
     """Render accumulated round findings into a compact text block for later steps."""
     if not findings:
@@ -41,16 +64,22 @@ def format_findings(findings: list[dict[str, Any]]) -> str:
         # Pre-formatted as Markdown links so the model reuses this exact shape (label + hidden URL)
         # instead of pasting the raw Google grounding-redirect URL.
         src = "\n".join(f"    - [{c.get('title') or c.get('uri')}]({c.get('uri')})" for c in cites)
-        blocks.append(
+        block = (
             f"[Round {i}] Sub-question: {f.get('query', '')}\n"
             f"Findings: {f.get('text', '').strip()}\n"
             f"Sources:\n{src if src else '    - (none reported)'}"
         )
+        # Present only once quote verification has actually run (post-round-loop, ahead of
+        # synthesis) — see agent.py. Absent during the search rounds themselves.
+        verification = f.get("verification")
+        if verification:
+            block += f"\nQuote verification: {_format_verification_badge(verification)}"
+        blocks.append(block)
     return "\n\n".join(blocks)
 
 
 # -----------------------------------------------------------------------------
-# 1. PLANNER — gemini-2.5-flash (decomposes the question into sub-questions)
+# 1. PLANNER — gemini-3.1-flash-lite (decomposes the question into sub-questions)
 # -----------------------------------------------------------------------------
 PLANNER_PROMPT = """You are the planning module of Jurinex Deep Research, a legal and factual research agent for matters under Indian law.
 
@@ -79,7 +108,7 @@ JSON array:"""
 
 
 # -----------------------------------------------------------------------------
-# 2. ROUND SEARCH — gemini-2.5-flash + Google Search (one call per round)
+# 2. ROUND SEARCH — gemini-3.1-flash-lite + Google Search (one call per round)
 # -----------------------------------------------------------------------------
 ROUND_SEARCH_PROMPT = """You are the search module of Jurinex Deep Research, a legal research agent for matters under Indian law. Today's date is {today}.
 
@@ -126,7 +155,7 @@ Structure the dossier as labelled points grouped by theme. Do not repeat finding
 
 
 # -----------------------------------------------------------------------------
-# 3. GAP CHECK — gemini-2.5-flash (continue vs stop, after each round)
+# 3. GAP CHECK — gemini-3.1-flash-lite (continue vs stop, after each round)
 # -----------------------------------------------------------------------------
 GAP_CHECK_PROMPT = """You are the coverage checker for Jurinex Deep Research. This is round {round_num} of at most {max_rounds}.
 
@@ -178,11 +207,12 @@ FORMAT RULES
 1. Do NOT write a memo header of any kind — no "TO:", "FROM:", "RE:", no "FINAL RESEARCH REPORT" banner, no addressee or sender line, and do not address the reader by name or as "User". Start directly with the first Markdown heading.
 2. Clearly distinguish document-supported claims (from the private case documents) from web-supported claims (from the research findings). Never blend the two silently.
 3. Never invent a source, URL, quotation, citation, date, section number, holding, or case fact. Every claim must come from the FINDINGS, the CASE DOCUMENTS, or a supplementary Google Search result you actually retrieved during this synthesis. If a point is supported by none of these, omit it or expressly mark it "(unverified)". Never construct or guess a URL — link only pages actually returned by search or listed in the findings.
-4. Cite judgments with full case name, citation or case number, court, and year, and note whether each authority is binding or persuasive for the relevant jurisdiction.
-5. For statutory provisions, state the provision currently in force as of {today}; where a provision was renumbered (IPC/CrPC/Evidence Act -> BNS/BNSS/BSA), give both old and new section numbers.
-6. If the findings reported a conflict between reliable sources, present both sides; do not resolve it by assumption.
-7. LINKS: Never paste a bare or raw URL anywhere. Every cited source must be a Markdown link with a readable label — [source name or page title](url) — so the URL appears only inside the parentheses.
-8. End with a "## Sources" section: a Markdown bullet list of the most important sources, each item exactly - [source name or page title](url). Then one final italic line stating the research date: *Research current as of {today}.*
+4. QUOTE VERIFICATION: Some findings carry a "Quote verification" line — each source's cited page was actually fetched and checked for the quoted text. Where it says CONFIRMED, you may present that finding's quote as a direct quotation. Where it says PARTIAL, WARNING, or COULD NOT VERIFY, do NOT present that finding's specific wording as a confirmed direct quote — paraphrase it instead (without quotation marks) or mark it "(quote unverified)"; the underlying legal point may still be usable, but its exact wording is not confirmed. COULD NOT VERIFY means the check itself could not run (a fetch problem) — treat it as simply unconfirmed, not as evidence the quote is wrong. Findings with no verification line simply had no quote to check.
+5. Cite judgments with full case name, citation or case number, court, and year, and note whether each authority is binding or persuasive for the relevant jurisdiction.
+6. For statutory provisions, state the provision currently in force as of {today}; where a provision was renumbered (IPC/CrPC/Evidence Act -> BNS/BNSS/BSA), give both old and new section numbers.
+7. If the findings reported a conflict between reliable sources, present both sides; do not resolve it by assumption.
+8. LINKS: Never paste a bare or raw URL anywhere. Every cited source must be a Markdown link with a readable label — [source name or page title](url) — so the URL appears only inside the parentheses.
+9. End with a "## Sources" section: a Markdown bullet list of the most important sources, each item exactly - [source name or page title](url). Then one final italic line stating the research date: *Research current as of {today}.*
 
 === PRIVATE CASE DOCUMENTS ===
 {context}

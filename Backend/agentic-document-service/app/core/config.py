@@ -139,14 +139,15 @@ class Settings(BaseSettings):
     )
     # ── Deep Research (bounded agentic loop) ─────────────────────────────────────────
     # Deliberate cheap-gather / expensive-synthesize split so a full multi-round run fits
-    # inside the rupee budget: flash grounds the plan + per-round searches, pro writes the
-    # final streamed report. All env-overridable.
+    # inside the rupee budget: flash-lite grounds the plan + per-round searches (cheaper AND
+    # more capable than 2.5-flash at $0.25/$1.50 per 1M vs $0.30/$2.50), the synthesis model
+    # writes the final streamed report. All env-overridable.
     deep_research_reasoning_model: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-3.1-flash-lite",
         validation_alias=AliasChoices("DEEP_RESEARCH_REASONING_MODEL"),
     )
     deep_research_search_model: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-3.1-flash-lite",
         validation_alias=AliasChoices("DEEP_RESEARCH_SEARCH_MODEL"),
     )
     deep_research_synthesis_model: str = Field(

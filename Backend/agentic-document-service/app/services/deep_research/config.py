@@ -5,8 +5,8 @@ cost/quality trade-off without a code change. The defaults implement the deliber
 cheap-gather / expensive-synthesize split that lets a full 4-round run fit inside the
 INR 15 budget:
 
-    * reasoning + search rounds -> gemini-2.5-flash   (cheap, fast, still grounded)
-    * final synthesis           -> gemini-3.6-flash   (grounded, medium thinking, temp 1.0)
+    * reasoning + search rounds -> gemini-3.1-flash-lite   ($0.25/$1.50 per 1M, still grounded)
+    * final synthesis           -> gemini-3.6-flash        (grounded, low thinking, temp 1.0)
 """
 
 from __future__ import annotations
@@ -44,9 +44,9 @@ class DeepResearchConfig:
         )
         return cls(
             reasoning_model=(str(getattr(settings, "deep_research_reasoning_model", "") or "").strip()
-                             or "gemini-2.5-flash"),
+                             or "gemini-3.1-flash-lite"),
             search_model=(str(getattr(settings, "deep_research_search_model", "") or "").strip()
-                          or "gemini-2.5-flash"),
+                          or "gemini-3.1-flash-lite"),
             synthesis_model=(str(getattr(settings, "deep_research_synthesis_model", "") or "").strip()
                              or "gemini-3.6-flash"),
             max_rounds=max(1, int(getattr(settings, "deep_research_max_rounds", 4) or 4)),

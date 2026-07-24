@@ -5050,6 +5050,22 @@ async def intelligent_chat_stream(
                 answer = raw_answer
                 if (chat_request.secret_id or "").strip():
                     answer = post_process_secret_prompt_response(answer)
+                if research_mode and answer:
+                    # Research mode's "## Sources" links are Gemini grounding-redirect
+                    # wrappers, not real publisher URLs — they can be dead/expired. Resolve
+                    # them to their real destination now (while freshly valid) so the
+                    # frontend's final rendered answer (it prefers this `done.answer` over
+                    # the raw streamed text) has working links, and drop any that don't
+                    # resolve rather than ship a dead "click here".
+                    try:
+                        yield _sse({"type": "thinking", "text": "Verifying source links...\n"})
+                        from app.services.grounding_links import resolve_grounding_links
+                        answer, _ = await resolve_grounding_links(answer)
+                    except Exception as _link_exc:
+                        logger.warning(
+                            "[Route:intelligent_chat_stream] grounding link resolution failed folder=%s err=%s",
+                            folder_name, _link_exc,
+                        )
 
             # Try to create a session entry in the folder service
             session_id = chat_request.session_id or ""

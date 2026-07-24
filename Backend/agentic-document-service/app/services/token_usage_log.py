@@ -25,6 +25,7 @@ _MODEL_PRICING: dict[str, tuple[float, float]] = {
     "claude-fable-5":    (10.00, 50.00),
     "claude-mythos":     (10.00, 50.00),
     "gemini-3.1-pro":    (2.50, 15.00),   # preview — estimate, update on GA
+    "gemini-3.1-flash-lite": (0.25, 1.50),  # official (AI Studio, rel. 7 May 2026)
     "gemini-3-pro":      (2.50, 15.00),   # estimate
     "gemini-3.6-flash":  (1.50, 7.50),    # official (AI Studio, rel. 21 Jul 2026)
     "gemini-3.5-flash":  (1.50, 9.00),
@@ -38,7 +39,7 @@ _MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gemma-3":           (0.00, 0.00),
     "gemma":             (0.00, 0.00),
 }
-_USD_TO_INR = 96.0  # display-only FX for the ₹ line; edit to taste
+_USD_TO_INR = 98.0  # display-only FX for the ₹ line; edit to taste
 
 
 def _price_for_model(model: str | None) -> tuple[float, float] | None:

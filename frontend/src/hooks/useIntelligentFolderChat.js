@@ -609,9 +609,14 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                 console.log('[useIntelligentFolderChat] used_chunk_ids:', parsed.used_chunk_ids);
                 console.log('[useIntelligentFolderChat] citations:', parsed.citations);
                 {
+                  // Prefer the backend's `done.answer` unconditionally (not just when
+                  // longer): it's the normalized, persisted text — e.g. Research/Deep
+                  // Research resolve grounding-redirect source links to their real
+                  // destination as a final step, which can make `answer` SHORTER than the
+                  // raw streamed buffer (dead links are dropped, not just swapped). A
+                  // length-based fallback would silently prefer the stale, dead-link text.
                   const fromDone = typeof parsed.answer === 'string' ? parsed.answer : '';
-                  const raw =
-                    fromDone.length > accumulatedText.length ? fromDone : (accumulatedText || fromDone);
+                  const raw = fromDone || accumulatedText;
                   if (raw) {
                     setText(formatAssistantText(raw));
                   }

@@ -18,6 +18,8 @@ from datetime import datetime
 from typing import Any, AsyncGenerator
 
 from app.core.config import get_settings
+from app.services import citation_verification
+from app.services.grounding_links import resolve_grounding_links
 
 from . import events, gemini, prompts, report
 from .budget import BudgetTracker
@@ -189,7 +191,51 @@ async def run_deep_research(
             queue.insert(0, follow_up)
             yield events.thinking(f"Identified a gap — next: {follow_up}")
 
-    # ── 3. SYNTHESIS (streamed) ──────────────────────────────────────────────────
+    # ── 3. QUOTE VERIFICATION ───────────────────────────────────────────────────
+    # A model can write a plausible "verbatim quote" next to a citation without that text
+    # actually being on the page. Fetch each cited page once and mechanically check the
+    # quoted spans — no extra LLM call, since a model asked "is this verified?" can
+    # hallucinate a confident yes just as easily as it hallucinated the quote. Findings get
+    # a verification badge that the synthesis prompt is instructed to respect. Pure network
+    # I/O — no token/₹ cost, so it doesn't touch the budget.
+    if findings:
+        yield events.thinking("Verifying quoted passages against their cited sources...")
+        try:
+            _all_urls = [c.get("uri") for f in findings for c in (f.get("citations") or []) if c.get("uri")]
+            _pages = await citation_verification.fetch_pages(_all_urls)
+            _v_checked = _v_confirmed = _v_warned = _v_unchecked = 0
+            for f in findings:
+                quotes = citation_verification.extract_quotes(f.get("text") or "")
+                if not quotes:
+                    continue
+                urls = [c.get("uri") for c in (f.get("citations") or []) if c.get("uri")]
+                pages_for_f = {u: _pages.get(u, "") for u in urls}
+                v = citation_verification.verify_quotes(quotes, pages_for_f)
+                f["verification"] = v
+                _v_checked += 1
+                if v["status"] == "verified":
+                    _v_confirmed += 1
+                elif v["status"] == "unchecked":
+                    _v_unchecked += 1
+                elif v["status"] in ("partially_verified", "unverified"):
+                    # A REAL red flag: the source page loaded fine but didn't contain the
+                    # quote — distinct from "unchecked" (couldn't reach the page at all).
+                    _v_warned += 1
+            if _v_checked:
+                yield events.thinking(
+                    f"Checked {_v_checked} finding(s) with quoted material · {_v_confirmed} fully confirmed"
+                    + (f" · {_v_warned} flagged (quote not found on the cited page)" if _v_warned else "")
+                    + (f" · {_v_unchecked} could not be checked (source unreachable)" if _v_unchecked else "")
+                    + "."
+                )
+                logger.info(
+                    "[DeepResearch] quote verification · checked=%d confirmed=%d flagged=%d unchecked=%d",
+                    _v_checked, _v_confirmed, _v_warned, _v_unchecked,
+                )
+        except Exception as _verify_exc:
+            logger.warning("[DeepResearch] quote verification failed: %s", _verify_exc)
+
+    # ── 4. SYNTHESIS (streamed) ──────────────────────────────────────────────────
     yield events.status("researching", "Synthesizing the final report…")
     yield events.thinking(
         f"Writing the cited report from {len(findings)} round(s) of findings "
@@ -233,6 +279,17 @@ async def run_deep_research(
                 cfg.synthesis_model, last_it, last_ot, _cost)
     answer = "".join(answer_parts).strip()
     citations_payload = _dedupe_citations(all_citations)
+
+    # Every "## Sources" link the model wrote is a Gemini grounding-redirect wrapper, not a
+    # real publisher URL — these are known to be dead/expired sometimes ("click and nothing
+    # is there"). Resolve them to their real destination now, while freshly valid, and drop
+    # any that don't resolve rather than ship a dead link.
+    if answer:
+        try:
+            yield events.thinking("Verifying source links...")
+            answer, _link_stats = await resolve_grounding_links(answer)
+        except Exception as _link_exc:
+            logger.warning("[DeepResearch] grounding link resolution failed: %s", _link_exc)
 
     # ── Per-step token & cost table for this Deep Research run (console + logs) ───
     report.log_usage_table(
