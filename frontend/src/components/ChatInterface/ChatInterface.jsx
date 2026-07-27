@@ -1007,7 +1007,7 @@ const ChatInterface = () => {
   const [showStyleDropdown, setShowStyleDropdown] = useState(false);
   const [learningModeActive, setLearningModeActive] = useState(false);
   const [researchModeActive, setResearchModeActive] = useState(false);
-  // Deep Research: bounded agentic loop (plan → web-search rounds → synthesize) under a ₹15 budget.
+  // Deep Research: bounded agentic loop (plan → web-search rounds → synthesize) under a ₹25 budget.
   const [deepResearchActive, setDeepResearchActive] = useState(false);
   // Panel state ? mirrors Claude's artifact panel
   const [panelOpen, setPanelOpen] = useState(false);
@@ -4196,7 +4196,7 @@ const ChatInterface = () => {
                   className={`flex-shrink-0 flex items-center gap-1.5 pl-2.5 pr-1.5 py-1.5 rounded-xl text-[11px] font-semibold transition-colors ${
                     deepResearchActive ? 'bg-teal-50 text-[#0f766e]' : 'bg-gray-50 text-gray-500 hover:text-gray-700'
                   }`}
-                  title="Deep Research: bounded agentic loop — plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹15 budget)."
+                  title="Deep Research: bounded agentic loop — plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹25 budget)."
                 >
                   Deep Research
                   <span
@@ -4349,7 +4349,7 @@ const ChatInterface = () => {
                 <span>
                   <strong>Deep Research uses ~100% more tokens</strong> than Research mode — it plans,
                   runs several live web-search rounds, then writes a cited report. Slower and costlier,
-                  capped at a hard ₹15 budget per run.
+                  capped at a hard ₹25 budget per run.
                 </span>
               </div>
             )}

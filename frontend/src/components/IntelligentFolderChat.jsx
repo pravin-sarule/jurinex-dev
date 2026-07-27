@@ -53,7 +53,7 @@ export default function IntelligentFolderChat({
   const [recognition, setRecognition] = useState(null);
   const [learningMode, setLearningMode] = useState(() => localStorage.getItem('learning_mode_enabled') === 'true');
   const [researchMode, setResearchMode] = useState(() => localStorage.getItem('research_mode_enabled') === 'true');
-  // Deep Research: bounded agentic loop (plan → web-search rounds → synthesize) under a ₹15 budget.
+  // Deep Research: bounded agentic loop (plan → web-search rounds → synthesize) under a ₹25 budget.
   // Session-only (NOT persisted): it is a sub-toggle of Research, so it must never outlive it.
   const [deepResearchMode, setDeepResearchMode] = useState(false);
   const [adversarialMode, setAdversarialMode] = useState(() => localStorage.getItem('learning_adversarial_mode') === 'true');
@@ -782,7 +782,7 @@ export default function IntelligentFolderChat({
           Intelligent Folder Chat
           {learningMode ? <span className="learning-mode-tag">📖 Learning Mode</span> : null}
           {researchMode ? <span className="research-mode-tag">Research Mode · Live web</span> : null}
-          {deepResearchMode ? <span className="research-mode-tag">Deep Research · agentic · ₹15 budget</span> : null}
+          {deepResearchMode ? <span className="research-mode-tag">Deep Research · agentic · ₹25 budget</span> : null}
         </h3>
         <div className="style-dropdown-wrap" ref={styleDropdownRef}>
           <button
@@ -1042,7 +1042,7 @@ export default function IntelligentFolderChat({
                         <>
                           <span className="method-icon">🧭</span>
                           <span className="method-label">Deep Research</span>
-                          <span className="method-tooltip">Bounded agentic loop: plan → multiple live web-search rounds → cited synthesis (hard ₹15 budget)</span>
+                          <span className="method-tooltip">Bounded agentic loop: plan → multiple live web-search rounds → cited synthesis (hard ₹25 budget)</span>
                         </>
                       ) : (
                         <>
@@ -1110,7 +1110,7 @@ export default function IntelligentFolderChat({
               disabled={isStreaming}
               className="research-active-chip"
               style={{ cursor: isStreaming ? 'default' : 'pointer', gap: '6px' }}
-              title="Deep Research: bounded agentic loop — plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹15 budget)."
+              title="Deep Research: bounded agentic loop — plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹25 budget)."
             >
               <Sparkles className="h-3.5 w-3.5" />
               <span>Deep Research</span>
@@ -1137,7 +1137,7 @@ export default function IntelligentFolderChat({
             type="text"
             value={input}
             onChange={handleInputChange}
-            placeholder={isSecretPromptSelected ? `Using: ${activeDropdown}` : deepResearchMode ? "Deep research this across your documents and the live web (slower, ₹15 budget)..." : researchMode ? "Research this topic using case documents and the live web..." : "Ask a question about your documents..."}
+            placeholder={isSecretPromptSelected ? `Using: ${activeDropdown}` : deepResearchMode ? "Deep research this across your documents and the live web (slower, ₹25 budget)..." : researchMode ? "Research this topic using case documents and the live web..." : "Ask a question about your documents..."}
             disabled={isStreaming || (learningMode && !!learningPopupQuestion)}
             className="flex-grow bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 text-sm font-medium py-2 min-w-0"
             autoFocus
@@ -1238,7 +1238,7 @@ export default function IntelligentFolderChat({
           <span>
             <strong>Deep Research uses ~100% more tokens</strong> than Research mode — it plans, runs
             several live web-search rounds, then writes a cited report. Slower and costlier, capped at a
-            hard ₹15 budget per run.
+            hard ₹25 budget per run.
           </span>
         </div>
       )}

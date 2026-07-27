@@ -133,8 +133,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("EMBEDDING_MODEL"),
     )
     gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY"))
+    # Single-pass Research mode model. gemini-3.6-flash (grounded, thinking_level="low")
+    # replaced gemini-2.5-pro — cheaper and faster while keeping live Google Search grounding.
     research_model_name: str = Field(
-        default="gemini-2.5-pro",
+        default="gemini-3.6-flash",
         validation_alias=AliasChoices("RESEARCH_MODEL_NAME"),
     )
     # ── Deep Research (bounded agentic loop) ─────────────────────────────────────────
@@ -175,8 +177,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DEEP_RESEARCH_SYNTHESIS_TEMPERATURE"),
     )
     deep_research_synthesis_thinking_level: str = Field(
-        default="low",
+        default="high",
         validation_alias=AliasChoices("DEEP_RESEARCH_SYNTHESIS_THINKING_LEVEL"),
+    )
+    # Thinking level for the cheap flash-lite steps (plan / round-search / gap-check). Applied
+    # best-effort: if gemini-3.1-flash-lite rejects thinking_level at the API layer, the call
+    # auto-retries without it (see deep_research/gemini.py), so this can never break a run.
+    # Gemini levels: low|medium|high.
+    deep_research_reasoning_thinking_level: str = Field(
+        default="high",
+        validation_alias=AliasChoices("DEEP_RESEARCH_REASONING_THINKING_LEVEL"),
     )
     # Hard ceiling on search rounds (each round = one grounded model call + a gap check).
     deep_research_max_rounds: int = Field(
@@ -186,7 +196,7 @@ class Settings(BaseSettings):
     # Hard rupee ceiling for the WHOLE run. The loop stops opening new rounds before this
     # is hit; the final report is always still written.
     deep_research_budget_inr: float = Field(
-        default=15.0,
+        default=25.0,
         validation_alias=AliasChoices("DEEP_RESEARCH_BUDGET_INR"),
     )
     # Fraction of the budget held back so the synthesis call can always complete.

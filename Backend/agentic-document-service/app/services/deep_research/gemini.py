@@ -72,38 +72,70 @@ def _grounding_citations(resp: Any) -> list[dict[str, str]]:
     return out
 
 
-def reason(model: str, prompt: str, *, temperature: float, max_output_tokens: int) -> tuple[str, int, int]:
-    """Plain, NON-grounded call for planning / gap decisions. Returns (text, in_tok, out_tok)."""
+def _generate_with_optional_thinking(client, model: str, prompt: str, *, base_kwargs: dict, thinking_level: str):
+    """`generate_content` that requests `thinking_level` when given, but FALLS BACK to a plain
+    no-thinking call if the model rejects it.
+
+    gemini-3.1-flash-lite (plan / round-search / gap-check) is NOT confirmed to support
+    thinking_level — a lite model can 400 on it. Rather than break the whole Deep Research run,
+    we retry the same call once without the thinking_config. ThinkingConfig construction itself is
+    also guarded so an older SDK simply runs without it."""
     from google.genai import types
+
+    def _run(use_thinking: bool):
+        kw = dict(base_kwargs)
+        if use_thinking and thinking_level:
+            try:
+                kw["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
+            except Exception:
+                pass  # SDK without ThinkingConfig / unsupported field → run without it
+        return client.models.generate_content(
+            model=model, contents=prompt, config=types.GenerateContentConfig(**kw),
+        )
+
+    try:
+        return _run(use_thinking=True)
+    except Exception:
+        if thinking_level:
+            # Most likely the model rejected thinking_level at the API layer — retry once plainly
+            # so a lite model that lacks thinking still returns a normal answer.
+            return _run(use_thinking=False)
+        raise
+
+
+def reason(model: str, prompt: str, *, temperature: float, max_output_tokens: int,
+           thinking_level: str = "") -> tuple[str, int, int]:
+    """Plain, NON-grounded call for planning / gap decisions. Returns (text, in_tok, out_tok).
+    `thinking_level` (low|medium|high for Gemini) is best-effort with a safe no-thinking fallback
+    — see `_generate_with_optional_thinking`."""
     client = _client(model)
     if client is None:
         return "", 0, 0
-    resp = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=temperature,
-            max_output_tokens=max_output_tokens,
-        ),
+    resp = _generate_with_optional_thinking(
+        client, model, prompt,
+        base_kwargs=dict(temperature=temperature, max_output_tokens=max_output_tokens),
+        thinking_level=thinking_level,
     )
     it, ot = _usage(resp)
     return _text(resp), it, ot
 
 
-def search(model: str, prompt: str, *, temperature: float, max_output_tokens: int) -> tuple[str, list[dict[str, str]], int, int]:
-    """Grounded call with the google_search tool. Returns (text, citations, in_tok, out_tok)."""
+def search(model: str, prompt: str, *, temperature: float, max_output_tokens: int,
+           thinking_level: str = "") -> tuple[str, list[dict[str, str]], int, int]:
+    """Grounded call with the google_search tool. Returns (text, citations, in_tok, out_tok).
+    `thinking_level` is best-effort with the same safe fallback as `reason`."""
     from google.genai import types
     client = _client(model)
     if client is None:
         return "", [], 0, 0
-    resp = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
+    resp = _generate_with_optional_thinking(
+        client, model, prompt,
+        base_kwargs=dict(
             temperature=temperature,
             max_output_tokens=max_output_tokens,
             tools=[types.Tool(google_search=types.GoogleSearch())],
         ),
+        thinking_level=thinking_level,
     )
     it, ot = _usage(resp)
     return _text(resp), _grounding_citations(resp), it, ot

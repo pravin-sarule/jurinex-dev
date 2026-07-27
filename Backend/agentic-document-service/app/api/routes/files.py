@@ -4121,16 +4121,25 @@ async def intelligent_chat_stream(
                     actual_model_name = resolved_model_name
 
                     if research_mode:
-                        resolved_model_name = str(getattr(settings, "research_model_name", "") or "").strip() or "gemini-2.5-pro"
+                        resolved_model_name = str(getattr(settings, "research_model_name", "") or "").strip() or "gemini-3.6-flash"
                         actual_model_name = resolved_model_name
                         stream_provider = "gemini"
                         from google.genai import types as _research_types
                         _research_max = int((llm_config or {}).get("max_summarization_output_tokens") or (llm_config or {}).get("max_output_tokens") or 32768)
-                        stream_cfg = _research_types.GenerateContentConfig(
+                        _research_cfg_kwargs = dict(
                             temperature=0.2,
                             max_output_tokens=min(_research_max, 65536),
                             tools=[_research_types.Tool(google_search=_research_types.GoogleSearch())],
                         )
+                        # gemini-3.6-flash is a thinking model — run Research at "high" thinking for
+                        # the deepest reasoning (valid Gemini levels: low|medium|high; "minimal" is
+                        # Gemma-only and 400s on Gemini). Attached defensively so an older SDK without
+                        # ThinkingConfig/thinking_level simply runs without it.
+                        try:
+                            _research_cfg_kwargs["thinking_config"] = _research_types.ThinkingConfig(thinking_level="high")
+                        except Exception:
+                            pass
+                        stream_cfg = _research_types.GenerateContentConfig(**_research_cfg_kwargs)
 
                     # Draft-from-template: force the selected draft engine (frontend dropdown, else the
                     # .env default) instead of the admin-selected chat model. Both Gemini-3.x and Claude

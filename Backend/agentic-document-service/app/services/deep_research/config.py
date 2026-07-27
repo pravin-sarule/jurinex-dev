@@ -2,11 +2,11 @@
 
 All knobs are read from the app Settings (env-overridable) so ops can tune the
 cost/quality trade-off without a code change. The defaults implement the deliberate
-cheap-gather / expensive-synthesize split that lets a full 4-round run fit inside the
-INR 15 budget:
+cheap-gather / expensive-synthesize split that lets a full multi-round run fit inside the
+INR 25 budget:
 
     * reasoning + search rounds -> gemini-3.1-flash-lite   ($0.25/$1.50 per 1M, still grounded)
-    * final synthesis           -> gemini-3.6-flash        (grounded, low thinking, temp 1.0)
+    * final synthesis           -> gemini-3.6-flash        (grounded, HIGH thinking, temp 1.0)
 
 A gemma-4-31b-it synthesis swap was tested live 2026-07-24 to cut the synthesis cost to
 $0 — reverted after two runs both showed zero grounded citations from the synthesis step
@@ -29,9 +29,12 @@ class DeepResearchConfig:
     synthesis_reserve_frac: float  # fraction of budget kept back for synthesis
     max_output_tokens: int      # ceiling for the synthesis output
     temperature: float = 0.2    # plan/search temperature (low = focused)
+    # Thinking level for the cheap flash-lite steps (plan/search/gap). Best-effort: auto-falls
+    # back to no-thinking if the lite model rejects it (see gemini.py). "" disables.
+    reasoning_thinking_level: str = "high"
     # Synthesis-specific generation controls (gemini-3.6-flash is a thinking model).
     synthesis_temperature: float = 1.0
-    synthesis_thinking_level: str = "low"  # "" disables; else low|medium|high (Gemma instead needs minimal|high)
+    synthesis_thinking_level: str = "high"  # "" disables; else low|medium|high (Gemma instead needs minimal|high)
 
     # Character caps on the private-context we feed each step. Feeding the whole case on
     # every round is what makes an agentic loop expensive; these keep spend predictable.
@@ -67,14 +70,16 @@ class DeepResearchConfig:
             synthesis_model=(str(getattr(settings, "deep_research_synthesis_model", "") or "").strip()
                              or "gemini-3.6-flash"),
             max_rounds=max(1, int(getattr(settings, "deep_research_max_rounds", 4) or 4)),
-            budget_inr=max(1.0, float(getattr(settings, "deep_research_budget_inr", 15.0) or 15.0)),
+            budget_inr=max(1.0, float(getattr(settings, "deep_research_budget_inr", 25.0) or 25.0)),
             synthesis_reserve_frac=min(0.9, max(0.1, float(
                 getattr(settings, "deep_research_synthesis_reserve_frac", 0.6) or 0.6))),
             max_output_tokens=_synth_max,
             synthesis_temperature=float(
                 getattr(settings, "deep_research_synthesis_temperature", 1.0) or 1.0),
             synthesis_thinking_level=str(
-                getattr(settings, "deep_research_synthesis_thinking_level", "low") or "low").strip().lower(),
+                getattr(settings, "deep_research_synthesis_thinking_level", "high") or "high").strip().lower(),
+            reasoning_thinking_level=str(
+                getattr(settings, "deep_research_reasoning_thinking_level", "high") or "high").strip().lower(),
         )
 
     @property

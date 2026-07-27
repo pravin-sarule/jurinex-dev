@@ -148,7 +148,9 @@ async def run_deep_research(
         plan_text, it, ot = await asyncio.to_thread(
             gemini.reason, cfg.reasoning_model,
             prompts.planner(question, cfg.max_rounds, document_context, cfg.plan_context_chars, today),
-            temperature=0.1, max_output_tokens=1024,
+            # 4096 (not ~1024): flash-lite thinking tokens count against max_output_tokens, so with
+            # thinking on, a small cap gets eaten by thinking and starves the JSON plan output.
+            temperature=0.1, max_output_tokens=4096, thinking_level=cfg.reasoning_thinking_level,
         )
         _cost = budget.add(cfg.reasoning_model, it, ot, label="Plan")
         logger.info("[DeepResearch] plan · model=%s · in=%d out=%d · ₹%.2f",
@@ -229,6 +231,7 @@ async def run_deep_research(
                 gemini.search, cfg.search_model,
                 prompts.round_search(question, subq, findings, answer_context, cfg.round_context_chars, today, mode),
                 temperature=cfg.temperature, max_output_tokens=min(cfg.max_output_tokens, 8192),
+                thinking_level=cfg.reasoning_thinking_level,
             )
         except Exception as exc:
             logger.warning("[DeepResearch] round %d search failed: %s", round_no, exc)
@@ -255,7 +258,9 @@ async def run_deep_research(
                 gap_text, it, ot = await asyncio.to_thread(
                     gemini.reason, cfg.reasoning_model,
                     prompts.gap_check(question, findings, round_no, cfg.max_rounds, mode),
-                    temperature=0.0, max_output_tokens=256,
+                    # 2048 (not 256): with thinking on, the ~1200+ thinking tokens would otherwise
+                    # consume the whole cap and leave nothing for the DONE / query-line output.
+                    temperature=0.0, max_output_tokens=2048, thinking_level=cfg.reasoning_thinking_level,
                 )
                 _cost = budget.add(cfg.reasoning_model, it, ot, label=f"Round {round_no} gap-check")
                 logger.info("[DeepResearch] round %d gap-check · model=%s · in=%d out=%d · ₹%.2f",
