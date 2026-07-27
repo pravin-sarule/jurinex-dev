@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useIntelligentFolderChat } from '../hooks/useIntelligentFolderChat';
-import { BookOpen, ChevronDown, Mic, MicOff, Send, Sparkles, Copy, Download, FileText, Printer, Code, Search } from 'lucide-react';
+import { BookOpen, ChevronDown, Mic, MicOff, Send, Sparkles, Copy, Download, FileText, Printer, Code, Search, AlertTriangle } from 'lucide-react';
 import { getCleanText, downloadAsPdf, downloadAsHtml, printResponse } from '../utils/responseExportUtils';
 import BrandingDownloadModal from './BrandingDownload/BrandingDownloadModal';
 import './IntelligentFolderChat.css';
@@ -1223,6 +1223,25 @@ export default function IntelligentFolderChat({
           </div>
         </div>
       </form>
+
+      {/* Token-cost warning — shown only while Deep Research is toggled ON, so the user knows
+          this run is much heavier than plain Research before sending. */}
+      {researchMode && deepResearchMode && (
+        <div
+          style={{
+            margin: '8px 4px 0', display: 'flex', alignItems: 'flex-start', gap: '6px',
+            padding: '6px 10px', borderRadius: '10px', background: '#fff8e1', color: '#92400e',
+            fontSize: '11px', lineHeight: 1.4,
+          }}
+        >
+          <AlertTriangle className="h-3.5 w-3.5" style={{ flexShrink: 0, marginTop: '1px' }} />
+          <span>
+            <strong>Deep Research uses ~100% more tokens</strong> than Research mode — it plans, runs
+            several live web-search rounds, then writes a cited report. Slower and costlier, capped at a
+            hard ₹15 budget per run.
+          </span>
+        </div>
+      )}
 
       {showCitations && citations && citations.length > 0 && (
         <CitationsPanel

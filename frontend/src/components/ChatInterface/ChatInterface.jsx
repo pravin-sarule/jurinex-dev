@@ -29,6 +29,7 @@ import {
   Code,
   Pencil,
   RotateCcw,
+  AlertTriangle,
 } from "lucide-react";
 import { getCleanText, stripMarkdown, downloadAsPdf, downloadAsHtml, printResponse } from "../../utils/responseExportUtils";
 import ReactMarkdown from "react-markdown";
@@ -4340,6 +4341,18 @@ const ChatInterface = () => {
                 )}
               </button>
             </form>
+            {/* Token-cost warning — shown only while Deep Research is toggled ON, so the user
+                knows this run is much heavier than plain Research before they send it. */}
+            {researchModeActive && deepResearchActive && (
+              <div className="mt-2 flex items-start gap-1.5 px-3 py-1.5 rounded-xl bg-amber-50 text-amber-700 text-[11px] leading-snug">
+                <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                <span>
+                  <strong>Deep Research uses ~100% more tokens</strong> than Research mode — it plans,
+                  runs several live web-search rounds, then writes a cited report. Slower and costlier,
+                  capped at a hard ₹15 budget per run.
+                </span>
+              </div>
+            )}
           </div>
         </div>
         {hasResponse && showCitations && (
