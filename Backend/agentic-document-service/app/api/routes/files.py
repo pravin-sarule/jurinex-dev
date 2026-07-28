@@ -81,6 +81,99 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 logger = logging.getLogger("agentic_document_service.api.files")
 
 
+_DEEP_RESEARCH_META_CITATION: dict[str, Any] = {
+    "source_type": "deep_research_meta",
+    "deep_research": True,
+    "method": "deep_research",
+    "schema_version": 1,
+}
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = default
+    return min(maximum, max(minimum, parsed))
+
+
+def _estimate_deep_research_token_request(
+    question_text: str = "",
+    *,
+    llm_config: dict[str, Any] | None = None,
+    max_rounds: int = 4,
+) -> dict[str, int]:
+    """Conservative firm-cap admission estimate for the bounded Deep pipeline only."""
+    normalized = str(question_text or "").strip()
+    question_chars = len(normalized)
+    question_tokens = max(1, (question_chars + 3) // 4)
+    rounds = _bounded_int(max_rounds, default=4, minimum=1, maximum=8)
+    config = llm_config if isinstance(llm_config, dict) else {}
+    synthesis_output_tokens = _bounded_int(
+        config.get("max_summarization_output_tokens")
+        or config.get("max_output_tokens")
+        or 32_768,
+        default=32_768,
+        minimum=4_096,
+        maximum=32_768,
+    )
+
+    plan_output_tokens = 4_096
+    search_output_tokens = min(synthesis_output_tokens, 8_192)
+    gap_output_tokens = 2_048
+
+    # These reserves mirror the hard Deep context bounds and allow for each stage's
+    # static instructions. Findings can grow by one full search output per round.
+    estimated_input_tokens = question_tokens + 1_500 + 2_048
+    estimated_output_tokens = plan_output_tokens
+    for round_index in range(rounds):
+        prior_findings_tokens = round_index * search_output_tokens
+        estimated_input_tokens += (
+            question_tokens
+            + prior_findings_tokens
+            + 512  # planned sub-question
+            + 2_048  # search-stage instructions
+        )
+        estimated_output_tokens += search_output_tokens
+        if round_index < rounds - 1:
+            current_findings_tokens = (round_index + 1) * search_output_tokens
+            estimated_input_tokens += question_tokens + current_findings_tokens + 1_024
+            estimated_output_tokens += gap_output_tokens
+
+    estimated_input_tokens += (
+        question_tokens
+        + (rounds * search_output_tokens)
+        + 3_000  # 12,000-character private synthesis context
+        + 4_096  # synthesis-stage instructions
+    )
+    estimated_output_tokens += synthesis_output_tokens
+
+    stage_tokens = estimated_input_tokens + estimated_output_tokens
+    safety_reserve_tokens = max(2_048, (stage_tokens + 9) // 10)
+    return {
+        "question_chars": question_chars,
+        "max_rounds": rounds,
+        "estimated_input_tokens": int(estimated_input_tokens),
+        "estimated_output_tokens": int(estimated_output_tokens),
+        "safety_reserve_tokens": int(safety_reserve_tokens),
+        "estimated_total_tokens": int(stage_tokens + safety_reserve_tokens),
+    }
+
+
+def _deep_research_persistence_citations(citations: list[Any] | None) -> list[Any]:
+    """Append one durable mode marker without mutating the emitted source list."""
+    persisted = list(citations or [])
+    has_marker = any(
+        isinstance(citation, dict)
+        and citation.get("source_type") == "deep_research_meta"
+        and citation.get("deep_research") is True
+        for citation in persisted
+    )
+    if not has_marker:
+        persisted.append(dict(_DEEP_RESEARCH_META_CITATION))
+    return persisted
+
+
 def _build_learning_citations_from_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     citations: list[dict[str, Any]] = []
     for ch in chunks[:8]:
@@ -3135,10 +3228,17 @@ async def intelligent_chat_stream(
 
         uid_int = _user_id_as_int(user_id)
         has_secret_id = bool((chat_request.secret_id or "").strip())
-        cap_est = estimate_streaming_token_request(
-            query_text,
-            has_secret_prompt=has_secret_id,
-        )
+        if deep_research:
+            cap_est = _estimate_deep_research_token_request(
+                query_text,
+                llm_config=llm_config,
+                max_rounds=getattr(get_settings(), "deep_research_max_rounds", 4),
+            )
+        else:
+            cap_est = estimate_streaming_token_request(
+                query_text,
+                has_secret_prompt=has_secret_id,
+            )
         cap_enf = enforce_limits(uid_int, {"tokens": cap_est["estimated_total_tokens"]})
         logger.info(
             "[STREAMING TOKEN CAP] Dataflow start userId=%s folder=%s hasSecretId=%s estimate=%s",
@@ -3545,7 +3645,7 @@ async def intelligent_chat_stream(
                 from google import genai  # type: ignore
 
                 settings = get_settings()
-                if settings.gemini_api_key:
+                if settings.gemini_api_key or deep_research:
                     context_parts = []
                     running_chars = 0
                     # Dynamically size the document context to the question: a greeting loads
@@ -3609,35 +3709,51 @@ async def intelligent_chat_stream(
                     # the browser keeps this chat (instead of opening a fresh one).
                     if deep_research:
                         from app.services.deep_research import run_deep_research
-                        _dr_session_id = str((chat_request.session_id or "").strip() or uuid.uuid4())
+                        _dr_raw_session_id = str((chat_request.session_id or "").strip())
+                        try:
+                            _dr_session_id = str(uuid.UUID(_dr_raw_session_id))
+                        except (ValueError, TypeError, AttributeError):
+                            _dr_session_id = str(uuid.uuid4())
                         _dr_sec = (chat_request.secret_id or "").strip() or None
                         _dr_q = str(getattr(chat_request, "question", "") or effective_query_text or "").strip()
+                        _dr_request_id = uuid.uuid4().hex[:12]
+                        _dr_state = {"answer_length": 0}
 
                         async def _dr_persist(_answer: str, _citations: list) -> None:
                             _a = str(_answer or "").strip()
                             if not _a:
                                 return
+                            _dr_state["answer_length"] = len(_a)
+                            _persisted_citations = _deep_research_persistence_citations(_citations)
 
-                            def _save() -> None:
-                                folder_service._save_folder_chat_to_db(  # noqa: SLF001
+                            def _save() -> bool:
+                                return folder_service._save_folder_chat_to_db(  # noqa: SLF001
                                     user_id=user_id,
                                     folder_name=folder_name,
                                     question=_dr_q,
                                     answer=_a,
                                     session_id=_dr_session_id,
-                                    citations=[],
+                                    citations=_persisted_citations,
                                     used_secret_prompt=bool(_dr_sec),
                                     prompt_label=(chat_request.prompt_label or "").strip() or None,
                                     secret_id=_dr_sec,
+                                    raise_on_error=True,
                                 )
 
                             try:
-                                await _run_blocking(_save, timeout_s=20.0, timeout_message="deep_research_persist")
+                                _saved = await _run_blocking(
+                                    _save,
+                                    timeout_s=20.0,
+                                    timeout_message="deep_research_persist",
+                                )
+                                if _saved is not True:
+                                    raise RuntimeError("deep_research_persist_unsuccessful")
                             except Exception as _dr_persist_exc:
-                                logger.warning(
+                                logger.exception(
                                     "[Route:intelligent_chat_stream] deep_research persist failed folder=%s err=%s",
                                     folder_name, _dr_persist_exc,
                                 )
+                                raise
 
                         # Use the CLEAN current question (_dr_q), NOT effective_query_text.
                         # effective_query_text prepends the entire prior Q/A of this session
@@ -3647,14 +3763,53 @@ async def intelligent_chat_stream(
                         # comes back as a report on the previous case. The web grounding is driven
                         # by the question text, so it must be exactly what the user just asked. (The
                         # case document is still supplied separately as document_context background.)
-                        async for _dr_evt in run_deep_research(
-                            question=_dr_q,
-                            document_context=context,
-                            session_id=_dr_session_id,
-                            llm_config=llm_config,
-                            on_result=_dr_persist,
-                        ):
-                            yield _dr_evt
+                        try:
+                            async for _dr_evt in run_deep_research(
+                                question=_dr_q,
+                                document_context=context,
+                                session_id=_dr_session_id,
+                                llm_config=llm_config,
+                                on_result=_dr_persist,
+                            ):
+                                yield _dr_evt
+                        finally:
+                            # Deep returns before the shared accounting block below, so it must
+                            # always flush its accumulator (success, error, or client disconnect).
+                            _dr_model = str(
+                                getattr(get_settings(), "deep_research_synthesis_model", "")
+                                or "deep-research"
+                            )
+                            _dr_usage = flush_aggregated_token_usage_table(
+                                usage_session_key,
+                                endpoint="/api/files/{folder}/intelligent-chat/stream",
+                                user_id=uid_int,
+                                session_id=_dr_session_id,
+                                request_id=_dr_request_id,
+                                model_name=_dr_model,
+                                answer_length=_dr_state["answer_length"],
+                                routing="deep_research",
+                                # Deep Research DOES consume the retrieved case context (it is
+                                # passed as document_context); reporting 0 made it look as though
+                                # the uploaded files never reached the run.
+                                retrieved_chunks=_rag_chunks_used,
+                            )
+                            if _dr_usage:
+                                try:
+                                    await _run_blocking(
+                                        lambda: log_llm_usage(
+                                            user_id=uid_int,
+                                            model_name=_dr_model,
+                                            input_tokens=_dr_usage.get("inputTokens") or 0,
+                                            output_tokens=_dr_usage.get("outputTokens") or 0,
+                                            endpoint="/api/files/{folder}/intelligent-chat/stream",
+                                            request_id=_dr_request_id,
+                                            session_id=_dr_session_id,
+                                        ),
+                                        timeout_s=8.0,
+                                        timeout_message="deep_research_usage_log",
+                                    )
+                                except Exception as _dr_usage_exc:
+                                    logger.warning("Deep Research usage log failed: %s", _dr_usage_exc)
                         return
 
                     # ── Draft-from-template setup ────────────────────────────────────────────────

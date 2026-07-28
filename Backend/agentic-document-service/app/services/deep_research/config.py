@@ -1,17 +1,10 @@
 """Configuration for a Deep Research run.
 
-All knobs are read from the app Settings (env-overridable) so ops can tune the
-cost/quality trade-off without a code change. The defaults implement the deliberate
-cheap-gather / expensive-synthesize split that lets a full multi-round run fit inside the
-INR 25 budget:
-
-    * reasoning + search rounds -> gemini-3.1-flash-lite   ($0.25/$1.50 per 1M, still grounded)
-    * final synthesis           -> gemini-3.6-flash        (grounded, HIGH thinking, temp 1.0)
-
-A gemma-4-31b-it synthesis swap was tested live 2026-07-24 to cut the synthesis cost to
-$0 — reverted after two runs both showed zero grounded citations from the synthesis step
-(see app/core/config.py for the full note). Do not re-attempt without first confirming
-Gemma actually populates grounding_metadata on a streaming call.
+All knobs are read from app Settings (environment-overridable) so operators can tune
+the cost/quality trade-off without changing code. Search rounds use Google grounding;
+the final synthesis is evidence-closed and receives only validated findings plus bounded
+private case context. Each provider call receives a lower runtime token cap derived from
+the configured application budget.
 """
 
 from __future__ import annotations
@@ -23,11 +16,21 @@ from dataclasses import dataclass
 class DeepResearchConfig:
     reasoning_model: str        # planning + gap decisions (cheap, non-grounded)
     search_model: str           # per-round grounded web search (cheap, grounded)
-    synthesis_model: str        # final grounded report (quality, streamed)
+    synthesis_model: str        # final evidence-closed report (quality, streamed)
     max_rounds: int             # hard ceiling on search rounds
-    budget_inr: float           # hard rupee ceiling for the WHOLE run
+    budget_inr: float           # application-enforced rupee ceiling, never above ₹150
     synthesis_reserve_frac: float  # fraction of budget kept back for synthesis
-    max_output_tokens: int      # ceiling for the synthesis output
+    max_output_tokens: int      # configured ceiling; budget derives a lower per-run cap
+    search_usd_per_query: float = 0.014  # Gemini 3 Google Search tool price
+    max_sources: int = 24            # maximum unique web sources validated/persisted
+    source_concurrency: int = 6      # bounded parallel outbound validations
+    source_timeout_s: float = 8.0    # per-source network deadline
+    source_max_bytes: int = 750_000  # maximum response bytes sampled for validation/quotes
+    source_max_redirects: int = 4    # every redirect hop is revalidated
+    stage_timeout_s: float = 120.0   # maximum time for one provider stage
+    run_timeout_s: float = 420.0     # maximum wall-clock time for the full Deep run
+    queue_timeout_s: float = 5.0     # maximum wait for an in-process Deep run slot
+    max_concurrent_runs: int = 2     # per-process Deep run capacity
     temperature: float = 0.2    # plan/search temperature (low = focused)
     # Thinking level for the cheap flash-lite steps (plan/search/gap). Best-effort: auto-falls
     # back to no-thinking if the lite model rejects it (see gemini.py). "" disables.
@@ -42,14 +45,10 @@ class DeepResearchConfig:
     round_context_chars: int = 8000
     synth_context_chars: int = 12000
 
-    # Floor for the synthesis output budget. The synthesis model is a THINKING model
-    # (gemini-3.6-flash) whose hidden reasoning tokens are billed against this same
-    # max_output_tokens — so a low cap gets partly eaten by thinking and truncates the
-    # VISIBLE report mid-content. The v5 synthesis prompt mandates 2,000-4,000+ word legal
-    # reports (~5-9k visible tokens + thinking), so we must never let Deep Research inherit
-    # a small shared "summarization" cap. Run cost is already bounded by the rupee budget,
-    # not by this token ceiling, so flooring it costs nothing when reports are naturally short.
-    _SYNTH_OUTPUT_TOKEN_FLOOR = 16384
+    # Hidden reasoning and visible output share one provider allowance. Keep a modest
+    # floor so a low shared summarization cap cannot starve synthesis; the reservation-
+    # based application budget still derives a lower safe cap per run.
+    _SYNTH_OUTPUT_TOKEN_FLOOR = 4096
 
     @classmethod
     def from_settings(cls, settings, llm_config: dict | None = None) -> "DeepResearchConfig":
@@ -59,9 +58,9 @@ class DeepResearchConfig:
             or llm_config.get("max_output_tokens")
             or 32768
         )
-        # Floor to _SYNTH_OUTPUT_TOKEN_FLOOR so a low shared summarization cap can't starve
-        # (and truncate) a long legal report; still hard-ceilinged at 65536.
-        _synth_max = min(max(_max, cls._SYNTH_OUTPUT_TOKEN_FLOOR), 65536)
+        # Prevent a low shared cap from starving synthesis while keeping a firm configured
+        # ceiling; the budget reservation may lower this further.
+        _synth_max = min(max(_max, cls._SYNTH_OUTPUT_TOKEN_FLOOR), 32768)
         return cls(
             reasoning_model=(str(getattr(settings, "deep_research_reasoning_model", "") or "").strip()
                              or "gemini-3.1-flash-lite"),
@@ -69,8 +68,11 @@ class DeepResearchConfig:
                           or "gemini-3.1-flash-lite"),
             synthesis_model=(str(getattr(settings, "deep_research_synthesis_model", "") or "").strip()
                              or "gemini-3.6-flash"),
-            max_rounds=max(1, int(getattr(settings, "deep_research_max_rounds", 4) or 4)),
-            budget_inr=max(1.0, float(getattr(settings, "deep_research_budget_inr", 25.0) or 25.0)),
+            max_rounds=min(8, max(1, int(getattr(settings, "deep_research_max_rounds", 4) or 4))),
+            budget_inr=min(
+                150.0,
+                max(1.0, float(getattr(settings, "deep_research_budget_inr", 90.0) or 90.0)),
+            ),
             synthesis_reserve_frac=min(0.9, max(0.1, float(
                 getattr(settings, "deep_research_synthesis_reserve_frac", 0.6) or 0.6))),
             max_output_tokens=_synth_max,
@@ -80,6 +82,26 @@ class DeepResearchConfig:
                 getattr(settings, "deep_research_synthesis_thinking_level", "high") or "high").strip().lower(),
             reasoning_thinking_level=str(
                 getattr(settings, "deep_research_reasoning_thinking_level", "high") or "high").strip().lower(),
+            search_usd_per_query=min(1.0, max(0.000001, float(
+                getattr(settings, "deep_research_search_usd_per_query", 0.014) or 0.014))),
+            max_sources=min(32, max(1, int(
+                getattr(settings, "deep_research_max_sources", 24) or 24))),
+            source_concurrency=min(8, max(1, int(
+                getattr(settings, "deep_research_source_concurrency", 6) or 6))),
+            source_timeout_s=min(20.0, max(2.0, float(
+                getattr(settings, "deep_research_source_timeout_s", 8.0) or 8.0))),
+            source_max_bytes=min(1_000_000, max(64_000, int(
+                getattr(settings, "deep_research_source_max_bytes", 750_000) or 750_000))),
+            source_max_redirects=min(5, max(0, int(
+                getattr(settings, "deep_research_source_max_redirects", 4) or 4))),
+            stage_timeout_s=min(240.0, max(15.0, float(
+                getattr(settings, "deep_research_stage_timeout_s", 120.0) or 120.0))),
+            run_timeout_s=min(900.0, max(60.0, float(
+                getattr(settings, "deep_research_run_timeout_s", 420.0) or 420.0))),
+            queue_timeout_s=min(30.0, max(0.1, float(
+                getattr(settings, "deep_research_queue_timeout_s", 5.0) or 5.0))),
+            max_concurrent_runs=min(8, max(1, int(
+                getattr(settings, "deep_research_max_concurrent_runs", 2) or 2))),
         )
 
     @property

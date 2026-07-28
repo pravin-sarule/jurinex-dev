@@ -1,23 +1,86 @@
 """Thin, synchronous google.genai wrappers used by the Deep Research loop.
 
-All calls here are blocking network calls — the agent runs them off the event loop with
-`asyncio.to_thread`. Keeping them synchronous makes them trivial to reason about and to
-unit-test. The client is obtained from the existing shared factory
-(`document_ai._gemini_client`) so key selection (Gemini vs Gemma) stays in one place.
+All calls here are blocking network calls — the orchestrator runs them through its
+bounded worker guard. Keeping them synchronous makes them straightforward to reason about and
+unit-test. Deep Research creates its own timeout-bounded client while reusing the existing
+model-aware Gemini/Gemma API-key selector.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any, Iterator
 
 
+_DEFAULT_STAGE_TIMEOUT_S = 120.0
+_MIN_STAGE_TIMEOUT_S = 15.0
+_MAX_STAGE_TIMEOUT_S = 240.0
+
+
+def _stage_timeout_ms(settings: Any) -> int:
+    """Return the Deep provider transport timeout, clamped to runtime bounds."""
+
+    try:
+        timeout_s = float(
+            getattr(settings, "deep_research_stage_timeout_s", _DEFAULT_STAGE_TIMEOUT_S)
+        )
+    except (TypeError, ValueError, OverflowError):
+        timeout_s = _DEFAULT_STAGE_TIMEOUT_S
+    if not math.isfinite(timeout_s):
+        timeout_s = _DEFAULT_STAGE_TIMEOUT_S
+    timeout_s = min(_MAX_STAGE_TIMEOUT_S, max(_MIN_STAGE_TIMEOUT_S, timeout_s))
+    return int(timeout_s * 1000)
+
+
 def _client(model: str):
+    """Create a Deep-only client whose transport cannot outlive the stage indefinitely."""
+
+    from google import genai
+    from google.genai import types
+
+    from app.core.config import get_settings
     from app.services.adapters import document_ai
-    return document_ai._gemini_client(model)  # noqa: SLF001 - shared factory, intentional reuse
+
+    api_key = document_ai._gemini_api_key_for_model(  # noqa: SLF001 - shared key policy
+        model
+    )
+    if not api_key:
+        return None
+    settings = get_settings()
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=_stage_timeout_ms(settings)),
+    )
 
 
-def client_available(model: str) -> bool:
-    return _client(model) is not None
+def _close_client(client: Any) -> None:
+    close = getattr(client, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def client_available(*models: str) -> bool:
+    """Return whether every requested model has a configured provider client."""
+
+    names = tuple(str(model or "").strip() for model in models)
+    if not names or any(not name for name in names):
+        return False
+    clients: list[Any] = []
+    try:
+        for name in dict.fromkeys(names):
+            client = _client(name)
+            if client is None:
+                return False
+            clients.append(client)
+        return True
+    except Exception:
+        return False
+    finally:
+        for client in clients:
+            _close_client(client)
 
 
 def _usage(resp: Any) -> tuple[int, int]:
@@ -52,24 +115,77 @@ def _text(resp: Any) -> str:
     return "".join(out)
 
 
-def _grounding_citations(resp: Any) -> list[dict[str, str]]:
-    """Extract the web sources Gemini actually grounded on, from grounding_metadata."""
-    out: list[dict[str, str]] = []
+def _grounding_metadata(resp: Any) -> tuple[list[dict[str, Any]], int]:
+    """Extract sources, claim support indices, and the billable search-query count."""
+    out: list[dict[str, Any]] = []
+    queries: set[str] = set()
+    support_no = 0
     try:
         for cand in getattr(resp, "candidates", None) or []:
             gm = getattr(cand, "grounding_metadata", None)
             if not gm:
                 continue
+            for query in getattr(gm, "web_search_queries", None) or []:
+                value = str(query or "").strip()
+                if value:
+                    queries.add(value)
+            candidate_sources: list[dict[str, Any]] = []
             for gch in getattr(gm, "grounding_chunks", None) or []:
                 web = getattr(gch, "web", None)
                 uri = getattr(web, "uri", None) if web else None
                 if not uri:
+                    candidate_sources.append({})
                     continue
                 title = getattr(web, "title", None) if web else None
-                out.append({"uri": uri, "title": title or uri})
+                source = {
+                    "uri": str(uri),
+                    "title": str(title or uri),
+                    "claim_ids": [],
+                    "claim_texts": [],
+                }
+                candidate_sources.append(source)
+            for support in getattr(gm, "grounding_supports", None) or []:
+                support_no += 1
+                segment = getattr(support, "segment", None)
+                claim_text = str(getattr(segment, "text", "") or "").strip()
+                claim_id = f"g{support_no}"
+                for raw_index in getattr(support, "grounding_chunk_indices", None) or []:
+                    try:
+                        source = candidate_sources[int(raw_index)]
+                    except (IndexError, TypeError, ValueError):
+                        continue
+                    if not source:
+                        continue
+                    source["claim_ids"].append(claim_id)
+                    if claim_text:
+                        source["claim_texts"].append(claim_text)
+            out.extend(
+                source for source in candidate_sources if source and source["claim_ids"]
+            )
     except Exception:
         pass
-    return out
+    for source in out:
+        source["claim_ids"] = list(dict.fromkeys(source["claim_ids"]))
+        source["claim_texts"] = list(dict.fromkeys(source["claim_texts"]))
+    return out, len(queries)
+
+
+def _thinking_config_rejected(exc: Exception) -> bool:
+    """Retry only an explicit client-side rejection of ``thinking_config``."""
+    raw_status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    try:
+        status = int(raw_status)
+    except (TypeError, ValueError, OverflowError):
+        status = 0
+    if status != 400:
+        return False
+    message = str(exc or "").casefold()
+    mentions_thinking = "thinking" in message
+    unsupported = any(
+        marker in message
+        for marker in ("not supported", "unsupported", "unknown field", "unrecognized field")
+    )
+    return mentions_thinking and unsupported
 
 
 def _generate_with_optional_thinking(client, model: str, prompt: str, *, base_kwargs: dict, thinking_level: str):
@@ -95,8 +211,8 @@ def _generate_with_optional_thinking(client, model: str, prompt: str, *, base_kw
 
     try:
         return _run(use_thinking=True)
-    except Exception:
-        if thinking_level:
+    except Exception as exc:
+        if thinking_level and _thinking_config_rejected(exc):
             # Most likely the model rejected thinking_level at the API layer — retry once plainly
             # so a lite model that lacks thinking still returns a normal answer.
             return _run(use_thinking=False)
@@ -111,40 +227,48 @@ def reason(model: str, prompt: str, *, temperature: float, max_output_tokens: in
     client = _client(model)
     if client is None:
         return "", 0, 0
-    resp = _generate_with_optional_thinking(
-        client, model, prompt,
-        base_kwargs=dict(temperature=temperature, max_output_tokens=max_output_tokens),
-        thinking_level=thinking_level,
-    )
-    it, ot = _usage(resp)
-    return _text(resp), it, ot
+    try:
+        resp = _generate_with_optional_thinking(
+            client, model, prompt,
+            base_kwargs=dict(temperature=temperature, max_output_tokens=max_output_tokens),
+            thinking_level=thinking_level,
+        )
+        it, ot = _usage(resp)
+        return _text(resp), it, ot
+    finally:
+        _close_client(client)
 
 
 def search(model: str, prompt: str, *, temperature: float, max_output_tokens: int,
-           thinking_level: str = "") -> tuple[str, list[dict[str, str]], int, int]:
-    """Grounded call with the google_search tool. Returns (text, citations, in_tok, out_tok).
+           thinking_level: str = "") -> tuple[str, list[dict[str, Any]], int, int, int]:
+    """Returns (text, citations, input tokens, output tokens, search-query count).
     `thinking_level` is best-effort with the same safe fallback as `reason`."""
     from google.genai import types
     client = _client(model)
     if client is None:
-        return "", [], 0, 0
-    resp = _generate_with_optional_thinking(
-        client, model, prompt,
-        base_kwargs=dict(
-            temperature=temperature,
-            max_output_tokens=max_output_tokens,
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-        ),
-        thinking_level=thinking_level,
-    )
-    it, ot = _usage(resp)
-    return _text(resp), _grounding_citations(resp), it, ot
+        return "", [], 0, 0, 0
+    try:
+        resp = _generate_with_optional_thinking(
+            client, model, prompt,
+            base_kwargs=dict(
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+            ),
+            thinking_level=thinking_level,
+        )
+        it, ot = _usage(resp)
+        citations, search_queries = _grounding_metadata(resp)
+        return _text(resp), citations, it, ot, search_queries
+    finally:
+        _close_client(client)
 
 
 def synthesis_stream(
-    model: str, prompt: str, *, temperature: float, max_output_tokens: int, thinking_level: str = "",
+    model: str, prompt: str, *, temperature: float, max_output_tokens: int,
+    thinking_level: str = "", use_google_search: bool = True,
 ) -> Iterator[Any]:
-    """Grounded streaming synthesis, yielded one chunk at a time.
+    """Streaming synthesis, yielded one chunk at a time.
 
     This MUST be a generator (not `return iter(stream)`): the genai Client owns the
     underlying httpx transport, and if it is only a local it gets garbage-collected the
@@ -159,14 +283,9 @@ def synthesis_stream(
     function attaches it defensively so an SDK that lacks ThinkingConfig or the field
     simply runs without it rather than erroring.
 
-    The google_search tool below is attached unconditionally — this is the whole point
-    of Deep Research (a cited, grounded report). CONFIRMED LIVE 2026-07-24: Gemma
-    (gemma-4-31b-it) accepts this tool without erroring but does NOT actually ground
-    with it on this streaming call shape — two live runs both returned zero grounding
-    citations from the synthesis step (see agent.py's per-run "citations ·
-    round-search=N · synthesis=N new" log). Google AI Studio showing the tool as
-    available for this model was not a reliable predictor here. Do not point
-    synthesis_model at a Gemma model without re-verifying this first.
+    ``use_google_search`` controls optional grounding. The production Deep orchestrator
+    disables it after source validation so synthesis is evidence-closed; callers enabling
+    it must account for search-query cost and validate every returned source.
     """
     from google.genai import types
     client = _client(model)
@@ -185,8 +304,9 @@ def synthesis_stream(
     cfg_kwargs: dict[str, Any] = dict(
         temperature=temperature,
         max_output_tokens=max_output_tokens,
-        tools=[types.Tool(google_search=types.GoogleSearch())],
     )
+    if use_google_search:
+        cfg_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
     lvl = (thinking_level or "").strip().lower()
     if lvl:
         try:
@@ -199,8 +319,14 @@ def synthesis_stream(
         contents=prompt,
         config=types.GenerateContentConfig(**cfg_kwargs),
     )
-    for chunk in stream:
-        yield chunk
+    try:
+        for chunk in stream:
+            yield chunk
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+        _close_client(client)
     # `client` and `stream` stay referenced until this generator is exhausted.
     _ = client
 
@@ -214,5 +340,28 @@ def chunk_text_and_usage(chunk: Any) -> tuple[str, int, int]:
     return txt, it, ot
 
 
-def chunk_citations(chunk: Any) -> list[dict[str, str]]:
-    return _grounding_citations(chunk)
+def chunk_finish_reason(chunk: Any) -> str:
+    """Return a stable provider finish-state label for one streamed chunk."""
+
+    try:
+        for candidate in getattr(chunk, "candidates", None) or []:
+            value = getattr(candidate, "finish_reason", None)
+            if value is None:
+                continue
+            label = getattr(value, "name", None)
+            if not label:
+                label = getattr(value, "value", None) or value
+            label = str(label or "").strip()
+            if label:
+                return label.rsplit(".", 1)[-1].upper()
+    except Exception:
+        return ""
+    return ""
+
+
+def chunk_citations(chunk: Any) -> list[dict[str, Any]]:
+    return _grounding_metadata(chunk)[0]
+
+
+def chunk_search_query_count(chunk: Any) -> int:
+    return _grounding_metadata(chunk)[1]

@@ -55,7 +55,10 @@ import { notifyResponseComplete, ensureNotificationPermission } from "../../util
  * locally (renderSecretPromptResponse) emits HTML tables mixed with markdown,
  * which the HTML render path then shows as flattened literal text.
  */
-const resolveFinalAnswer = (meta, rawBuffer, isStructured) => {
+const resolveFinalAnswer = (meta, rawBuffer, isStructured, isDeepResearch = false) => {
+  if (isDeepResearch) {
+    return reconcileDeepResearchStreamText(rawBuffer, meta?.answer);
+  }
   const backendAnswer = typeof meta?.answer === 'string' ? meta.answer.trim() : '';
   if (backendAnswer) return backendAnswer;
   return isStructured
@@ -76,6 +79,12 @@ import LearningDetailPanel from "./LearningDetailPanel";
 import AgentStepsPanel from "./AgentStepsPanel";
 import ChatSessionList from "./ChatSessionList";
 import FormattedAssistantContent from "./FormattedAssistantContent";
+import {
+  isDeepResearchMessage,
+  isDeepResearchSource,
+  mergeResearchStreamChunk,
+  reconcileDeepResearchStreamText,
+} from "../../utils/deepResearchSources";
 import DraftStudioModal from "./DraftStudioModal";
 import DraftEditModal from "./DraftEditModal";
 import {
@@ -1007,7 +1016,7 @@ const ChatInterface = () => {
   const [showStyleDropdown, setShowStyleDropdown] = useState(false);
   const [learningModeActive, setLearningModeActive] = useState(false);
   const [researchModeActive, setResearchModeActive] = useState(false);
-  // Deep Research: bounded agentic loop (plan → web-search rounds → synthesize) under a ₹25 budget.
+  // Deep Research: bounded agentic loop with validated web sources and a server-configured budget.
   const [deepResearchActive, setDeepResearchActive] = useState(false);
   // Panel state ? mirrors Claude's artifact panel
   const [panelOpen, setPanelOpen] = useState(false);
@@ -1181,6 +1190,7 @@ const ChatInterface = () => {
   const animationFrameRef = useRef(null);
   const markdownOutputRef = useRef(null);
   const horizontalScrollRef = useRef(null);
+  const activeStreamIsDeepRef = useRef(false);
   const stickyScrollbarRef = useRef(null);
   const streamBufferRef = useRef('');
   const streamThinkingRef = useRef('');
@@ -1723,6 +1733,18 @@ const ChatInterface = () => {
         return;
       }
 
+      if (isDeepResearchMessage(message)) {
+        // Deep history can contain a non-rendered persistence marker even when no
+        // web destination passed validation. Never feed that marker (or rejected
+        // web evidence) through the local-document citation mapper.
+        const deepSources = (Array.isArray(message.citations) ? message.citations : [])
+          .filter(isDeepResearchSource);
+        setCitations(deepSources);
+        saveSourcePassagesToStorage(folderName, message.id, deepSources);
+        setLoadingCitations(false);
+        return;
+      }
+
       if (message.chunk_details && Array.isArray(message.chunk_details) && message.chunk_details.length > 0) {
         console.log('[Citations] Using chunk_details from message:', message.chunk_details);
         const formattedCitations = message.chunk_details.map((chunk) => {
@@ -1973,6 +1995,11 @@ const ChatInterface = () => {
       clearTimeout(animationFrameRef.current);
       animationFrameRef.current = null;
     }
+    if (activeStreamIsDeepRef.current && streamReaderRef.current) {
+      streamReaderRef.current.cancel().catch(() => { });
+      streamReaderRef.current = null;
+      activeStreamIsDeepRef.current = false;
+    }
     if (streamBufferRef.current) {
       const isStructured = isStructuredJsonResponse(streamBufferRef.current);
       const formattedResponse = isStructured
@@ -2027,7 +2054,10 @@ const ChatInterface = () => {
     }
   };
 
-  const chatWithAI = async (folder, secretId, currentSessionId) => {
+  const chatWithAI = async (folder, secretId, currentSessionId, requestOptions = null) => {
+    const deepResearchForRequest = typeof requestOptions?.deepResearch === 'boolean'
+      ? requestOptions.deepResearch
+      : deepResearchActive;
     ensureNotificationPermission();
     setAnimatedResponseContent('');
     setThinkingContent('');
@@ -2046,6 +2076,7 @@ const ChatInterface = () => {
       }
       streamReaderRef.current = null;
     }
+    activeStreamIsDeepRef.current = Boolean(deepResearchForRequest);
 
     if (streamUpdateTimeoutRef.current) {
       clearTimeout(streamUpdateTimeoutRef.current);
@@ -2083,7 +2114,7 @@ const ChatInterface = () => {
           llm_name: 'gemini',
           learning_mode: learningModeActive,
           research_mode: researchModeActive,
-          deep_research: deepResearchActive,
+          deep_research: deepResearchForRequest,
         }),
       });
 
@@ -2129,7 +2160,13 @@ const ChatInterface = () => {
           }
           setLoadingChat(false);
           const isStructured = isStructuredJsonResponse(streamBufferRef.current);
-          let finalResponse = resolveFinalAnswer(finalMetadata, streamBufferRef.current, isStructured);
+          let finalResponse = resolveFinalAnswer(
+            finalMetadata,
+            streamBufferRef.current,
+            isStructured,
+            activeStreamIsDeepRef.current,
+          );
+          if (activeStreamIsDeepRef.current) streamBufferRef.current = finalResponse;
           if (finalMetadata) {
             newSessionId = finalMetadata.session_id || finalMetadata.sessionId || newSessionId;
             messageId = finalMetadata.message_id || finalMetadata.id || messageId;
@@ -2154,7 +2191,7 @@ const ChatInterface = () => {
             chunk_details: finalMetadata?.chunk_details || null,
             learning_mode: !!learningModeActive,
             research_mode: researchModeActive,
-            deep_research: deepResearchActive,
+            deep_research: deepResearchForRequest,
             learningPayload: learningModeActive
               ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
               : null,
@@ -2210,7 +2247,13 @@ const ChatInterface = () => {
             }
             setLoadingChat(false);
             const isStructured = isStructuredJsonResponse(streamBufferRef.current);
-            let finalResponse = resolveFinalAnswer(finalMetadata, streamBufferRef.current, isStructured);
+            let finalResponse = resolveFinalAnswer(
+              finalMetadata,
+              streamBufferRef.current,
+              isStructured,
+              activeStreamIsDeepRef.current,
+            );
+            if (activeStreamIsDeepRef.current) streamBufferRef.current = finalResponse;
             if (finalMetadata) {
               newSessionId = finalMetadata.session_id || finalMetadata.sessionId || newSessionId;
               messageId = finalMetadata.message_id || finalMetadata.id || messageId;
@@ -2235,7 +2278,7 @@ const ChatInterface = () => {
               chunk_details: finalMetadata?.chunk_details || null,
               learning_mode: !!learningModeActive,
               research_mode: researchModeActive,
-              deep_research: deepResearchActive,
+              deep_research: deepResearchForRequest,
               learningPayload: learningModeActive
                 ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                 : null,
@@ -2286,6 +2329,15 @@ const ChatInterface = () => {
               setCurrentStatus({
                 status: parsed.status,
                 message: parsed.message || parsed.status,
+                ...(activeStreamIsDeepRef.current ? {
+                  phase: parsed.phase,
+                  round: parsed.round,
+                  maxRounds: parsed.max_rounds,
+                  sourcesFound: parsed.sources_found,
+                  sourcesValidated: parsed.sources_validated,
+                  spentInr: parsed.spent_inr,
+                  budgetInr: parsed.budget_inr,
+                } : {}),
               });
               console.log('Status:', parsed.status, parsed.message);
             } else if (parsed.type === 'thinking') {
@@ -2301,12 +2353,18 @@ const ChatInterface = () => {
               }
             } else if (parsed.type === 'chunk') {
               const chunkText = parsed.text || '';
-              if (chunkText) {
+              const replaceDeepSnapshot = activeStreamIsDeepRef.current && parsed.replace === true;
+              if (chunkText || replaceDeepSnapshot) {
                 if (streamThinkingRef.current || thinkingContent) {
                   streamThinkingRef.current = '';
                   setThinkingContent('');
                 }
-                streamBufferRef.current += chunkText;
+                streamBufferRef.current = mergeResearchStreamChunk(
+                  streamBufferRef.current,
+                  chunkText,
+                  activeStreamIsDeepRef.current,
+                  parsed.replace,
+                );
                 setHasResponse(true);
                 setHasAiResponse(true);
                 if (!panelStatesSetRef.current) {
@@ -2314,9 +2372,11 @@ const ChatInterface = () => {
                   panelStatesSetRef.current = true;
                 }
                 const raw = streamBufferRef.current;
-                const live = isStructuredJsonResponse(raw)
+                const live = activeStreamIsDeepRef.current
                   ? raw
-                  : convertJsonToPlainText(raw);
+                  : isStructuredJsonResponse(raw)
+                    ? raw
+                    : convertJsonToPlainText(raw);
                 setAnimatedResponseContent(live);
                 setIsGenerating(true);
                 setIsAnimatingResponse(true);
@@ -2339,7 +2399,13 @@ const ChatInterface = () => {
               }
 
               const isStructured = isStructuredJsonResponse(streamBufferRef.current);
-              let finalResponse = resolveFinalAnswer(finalMetadata, streamBufferRef.current, isStructured);
+              let finalResponse = resolveFinalAnswer(
+                finalMetadata,
+                streamBufferRef.current,
+                isStructured,
+                activeStreamIsDeepRef.current,
+              );
+              if (activeStreamIsDeepRef.current) streamBufferRef.current = finalResponse;
               setLoadingChat(false);
               setCurrentStatus(null);
               if (streamThinkingRef.current) {
@@ -2361,7 +2427,7 @@ const ChatInterface = () => {
                 chunk_details: finalMetadata?.chunk_details || null,
                 learning_mode: !!learningModeActive,
                 research_mode: researchModeActive,
-                deep_research: deepResearchActive,
+                deep_research: deepResearchForRequest,
                 learningPayload: learningModeActive
                   ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                   : null,
@@ -2414,18 +2480,22 @@ const ChatInterface = () => {
       setIsGenerating(false);
       setPendingQuestion('');
       streamReaderRef.current = null;
+      activeStreamIsDeepRef.current = false;
     }
   };
 
-  const handleNewMessage = async (forcedQuestion = null, displayLabel = null) => {
+  const handleNewMessage = async (forcedQuestion = null, displayLabel = null, requestOptions = null) => {
     if (!selectedFolder) return;
+    const deepResearchForRequest = typeof requestOptions?.deepResearch === 'boolean'
+      ? requestOptions.deepResearch
+      : deepResearchActive;
     ensureNotificationPermission();
     if (isSecretPromptSelected) {
       if (!selectedSecretId) {
         setChatError(stringToChatErrorDisplay('Please select an analysis type.', 'Missing selection'));
         return;
       }
-      await chatWithAI(selectedFolder, selectedSecretId, selectedChatSessionId);
+      await chatWithAI(selectedFolder, selectedSecretId, selectedChatSessionId, requestOptions);
       setChatInput("");
       setIsSecretPromptSelected(false);
       setActiveDropdown("Custom Query");
@@ -2476,6 +2546,7 @@ const ChatInterface = () => {
         }
         streamReaderRef.current = null;
       }
+      activeStreamIsDeepRef.current = Boolean(deepResearchForRequest);
 
       if (streamUpdateTimeoutRef.current) {
         clearTimeout(streamUpdateTimeoutRef.current);
@@ -2514,7 +2585,7 @@ const ChatInterface = () => {
             llm_name: 'gemini',
             learning_mode: learningModeActive,
             research_mode: researchModeActive,
-            deep_research: deepResearchActive,
+            deep_research: deepResearchForRequest,
             // Draft-from-template: when a template is attached, tell the backend to fill it from the
             // case's documents (the backend attaches the template file to the model).
             ...(draftTemplate
@@ -2576,7 +2647,13 @@ const ChatInterface = () => {
             }
             setLoadingChat(false);
             const isStructured = isStructuredJsonResponse(streamBufferRef.current);
-            let finalResponse = resolveFinalAnswer(finalMetadata, streamBufferRef.current, isStructured);
+            let finalResponse = resolveFinalAnswer(
+              finalMetadata,
+              streamBufferRef.current,
+              isStructured,
+              activeStreamIsDeepRef.current,
+            );
+            if (activeStreamIsDeepRef.current) streamBufferRef.current = finalResponse;
             if (finalMetadata) {
               newSessionId = finalMetadata.session_id || finalMetadata.sessionId || newSessionId;
               messageId = finalMetadata.message_id || finalMetadata.id || messageId;
@@ -2603,7 +2680,7 @@ const ChatInterface = () => {
               citations: finalMetadata?.citations || null,
               learning_mode: !!learningModeActive,
               research_mode: researchModeActive,
-              deep_research: deepResearchActive,
+              deep_research: deepResearchForRequest,
               learningPayload: learningModeActive
                 ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                 : null,
@@ -2661,7 +2738,13 @@ const ChatInterface = () => {
               }
               setLoadingChat(false);
               const isStructured = isStructuredJsonResponse(streamBufferRef.current);
-              let finalResponse = resolveFinalAnswer(finalMetadata, streamBufferRef.current, isStructured);
+              let finalResponse = resolveFinalAnswer(
+                finalMetadata,
+                streamBufferRef.current,
+                isStructured,
+                activeStreamIsDeepRef.current,
+              );
+              if (activeStreamIsDeepRef.current) streamBufferRef.current = finalResponse;
               if (finalMetadata) {
                 newSessionId = finalMetadata.session_id || finalMetadata.sessionId || newSessionId;
                 messageId = finalMetadata.message_id || finalMetadata.id || messageId;
@@ -2690,7 +2773,7 @@ const ChatInterface = () => {
                 chunk_details: finalMetadata?.chunk_details || null,
                 learning_mode: !!learningModeActive,
                 research_mode: researchModeActive,
-                deep_research: deepResearchActive,
+                deep_research: deepResearchForRequest,
                 learningPayload: learningModeActive
                   ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                   : null,
@@ -2732,16 +2815,40 @@ const ChatInterface = () => {
                 setCurrentStatus({
                   status: parsed.status,
                   message: parsed.message || parsed.status,
+                  ...(activeStreamIsDeepRef.current ? {
+                    phase: parsed.phase,
+                    round: parsed.round,
+                    maxRounds: parsed.max_rounds,
+                    sourcesFound: parsed.sources_found,
+                    sourcesValidated: parsed.sources_validated,
+                    spentInr: parsed.spent_inr,
+                    budgetInr: parsed.budget_inr,
+                  } : {}),
                 });
                 console.log('Status:', parsed.status, parsed.message);
+              } else if (parsed.type === 'thinking' && activeStreamIsDeepRef.current) {
+                const thinkingText = parsed.text || '';
+                if (thinkingText) {
+                  streamThinkingRef.current += thinkingText;
+                  if (streamUpdateTimeoutRef.current) clearTimeout(streamUpdateTimeoutRef.current);
+                  streamUpdateTimeoutRef.current = setTimeout(() => {
+                    setThinkingContent(streamThinkingRef.current);
+                  }, 10);
+                }
               } else if (parsed.type === 'chunk') {
                 const chunkText = parsed.text || '';
-                if (chunkText) {
+                const replaceDeepSnapshot = activeStreamIsDeepRef.current && parsed.replace === true;
+                if (chunkText || replaceDeepSnapshot) {
                   if (streamThinkingRef.current || thinkingContent) {
                     streamThinkingRef.current = '';
                     setThinkingContent('');
                   }
-                  streamBufferRef.current += chunkText;
+                  streamBufferRef.current = mergeResearchStreamChunk(
+                    streamBufferRef.current,
+                    chunkText,
+                    activeStreamIsDeepRef.current,
+                    parsed.replace,
+                  );
                   setHasResponse(true);
                   setHasAiResponse(true);
                   if (!panelStatesSetRef.current) {
@@ -2749,9 +2856,11 @@ const ChatInterface = () => {
                     panelStatesSetRef.current = true;
                   }
                   const raw = streamBufferRef.current;
-                  const live = isStructuredJsonResponse(raw)
+                  const live = activeStreamIsDeepRef.current
                     ? raw
-                    : convertJsonToPlainText(raw);
+                    : isStructuredJsonResponse(raw)
+                      ? raw
+                      : convertJsonToPlainText(raw);
                   setAnimatedResponseContent(live);
                   setIsGenerating(true);
                   setIsAnimatingResponse(true);
@@ -2783,7 +2892,13 @@ const ChatInterface = () => {
                 }
 
                 const isStructured = isStructuredJsonResponse(streamBufferRef.current);
-                let finalResponse = resolveFinalAnswer(finalMetadata, streamBufferRef.current, isStructured);
+                let finalResponse = resolveFinalAnswer(
+                  finalMetadata,
+                  streamBufferRef.current,
+                  isStructured,
+                  activeStreamIsDeepRef.current,
+                );
+                if (activeStreamIsDeepRef.current) streamBufferRef.current = finalResponse;
                 setLoadingChat(false);
                 setCurrentStatus(null);
                 if (streamThinkingRef.current) {
@@ -2804,7 +2919,7 @@ const ChatInterface = () => {
                   chunk_details: finalMetadata?.chunk_details || null,
                   learning_mode: !!learningModeActive,
                   research_mode: researchModeActive,
-                  deep_research: deepResearchActive,
+                  deep_research: deepResearchForRequest,
                   learningPayload: learningModeActive
                     ? (finalMetadata?.learning_payload || extractLearningPayloadLenient(streamBufferRef.current) || null)
                     : null,
@@ -2853,6 +2968,7 @@ const ChatInterface = () => {
       } finally {
         setLoadingChat(false);
         streamReaderRef.current = null;
+        activeStreamIsDeepRef.current = false;
       }
     }
   };
@@ -2865,13 +2981,14 @@ const ChatInterface = () => {
   // through the normal streaming flow.
   const handleRetryChat = (chat) => {
     if (loadingChat || isGenerating || !chat) return;
+    const retryOptions = { deepResearch: isDeepResearchMessage(chat) };
     if (chat.isSecretPrompt || chat.used_secret_prompt) {
       const secret = secrets.find((s) => s.name === chat.prompt_label);
       if (!secret) {
         toast.error('This analysis prompt is no longer available, so it cannot be retried.');
         return;
       }
-      chatWithAI(selectedFolder, secret.id, selectedChatSessionId).catch(() => { });
+      chatWithAI(selectedFolder, secret.id, selectedChatSessionId, retryOptions).catch(() => { });
       return;
     }
     if (!chat.question) return;
@@ -2880,9 +2997,13 @@ const ChatInterface = () => {
       // path; send through the ref so the post-update closure is used.
       setIsSecretPromptSelected(false);
       setSelectedSecretId(null);
-      setTimeout(() => handleNewMessageRef.current?.(chat.question, chat.prompt_label || null), 0);
+      setTimeout(() => handleNewMessageRef.current?.(
+        chat.question,
+        chat.prompt_label || null,
+        retryOptions,
+      ), 0);
     } else {
-      handleNewMessage(chat.question, chat.prompt_label || null);
+      handleNewMessage(chat.question, chat.prompt_label || null, retryOptions);
     }
   };
 
@@ -3904,7 +4025,7 @@ const ChatInterface = () => {
                                     onViewFull={null}
                                   />
                                 ) : (
-                                  <FormattedAssistantContent raw={chat.response} markdownComponents={aiMarkdownComponents} />
+                                  <FormattedAssistantContent raw={chat.response} markdownComponents={aiMarkdownComponents} forceSafeMarkdown={isDeepResearchMessage(chat)} />
                                 )}
                               </div>
                             </div>
@@ -3922,7 +4043,12 @@ const ChatInterface = () => {
                                     className="chat-thread-card__body"
                                     ref={el => { if (el) chatBodyRefs.current[chat.id] = el; else delete chatBodyRefs.current[chat.id]; }}
                                   >
-                                    <FormattedAssistantContent raw={chat.response} markdownComponents={aiMarkdownComponents} />
+                                    <FormattedAssistantContent
+                                      raw={chat.response}
+                                      markdownComponents={aiMarkdownComponents}
+                                      forceSafeMarkdown={isDeepResearchMessage(chat)}
+                                      citations={chat.citations}
+                                    />
                                   </div>
                                   <div className="chat-thread-card__footer">
                                     {chat.draftDownloadUrl && (
@@ -4035,6 +4161,27 @@ const ChatInterface = () => {
                         <div className="chat-thread-card__label">You</div>
                         <div className="chat-thread-card__body">{pendingQuestion}</div>
                       </div>
+                      {activeStreamIsDeepRef.current && currentStatus?.phase && (
+                        <div className="rounded-xl border border-teal-100 bg-teal-50/60 px-4 py-3 text-xs text-teal-900">
+                          <div className="flex items-center gap-2 font-semibold">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                            {currentStatus.message || 'Deep Research is working…'}
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-teal-700">
+                            {Number.isFinite(currentStatus.round) && Number.isFinite(currentStatus.maxRounds) ? (
+                              <span>Round {currentStatus.round}/{currentStatus.maxRounds}</span>
+                            ) : null}
+                            {Number.isFinite(currentStatus.sourcesValidated) ? (
+                              <span>{currentStatus.sourcesValidated} validated source{currentStatus.sourcesValidated === 1 ? '' : 's'}</span>
+                            ) : Number.isFinite(currentStatus.sourcesFound) ? (
+                              <span>{currentStatus.sourcesFound} source{currentStatus.sourcesFound === 1 ? '' : 's'} found</span>
+                            ) : null}
+                            {Number.isFinite(currentStatus.spentInr) && Number.isFinite(currentStatus.budgetInr) ? (
+                              <span>₹{currentStatus.spentInr.toFixed(2)} / ₹{currentStatus.budgetInr.toFixed(0)}</span>
+                            ) : null}
+                          </div>
+                        </div>
+                      )}
                       <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
                         {learningModeActive ? (
                           <div style={{ width: '100%', maxWidth: '560px', margin: '0 auto' }}>
@@ -4063,7 +4210,7 @@ const ChatInterface = () => {
                               }
                               if (animatedResponseContent) {
                                 return (
-                                  <FormattedAssistantContent raw={animatedResponseContent} markdownComponents={aiMarkdownComponents} />
+                                  <FormattedAssistantContent raw={animatedResponseContent} markdownComponents={aiMarkdownComponents} forceSafeMarkdown={activeStreamIsDeepRef.current} />
                                 );
                               }
                               return (
@@ -4077,7 +4224,7 @@ const ChatInterface = () => {
                         ) : (
                           <div style={{ maxWidth: '100%', margin: '0 auto', width: '100%', fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
                             {animatedResponseContent ? (
-                              <FormattedAssistantContent raw={animatedResponseContent} markdownComponents={aiMarkdownComponents} />
+                              <FormattedAssistantContent raw={animatedResponseContent} markdownComponents={aiMarkdownComponents} forceSafeMarkdown={activeStreamIsDeepRef.current} />
                             ) : (
                               <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
                                 <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
@@ -4196,7 +4343,7 @@ const ChatInterface = () => {
                   className={`flex-shrink-0 flex items-center gap-1.5 pl-2.5 pr-1.5 py-1.5 rounded-xl text-[11px] font-semibold transition-colors ${
                     deepResearchActive ? 'bg-teal-50 text-[#0f766e]' : 'bg-gray-50 text-gray-500 hover:text-gray-700'
                   }`}
-                  title="Deep Research: bounded agentic loop — plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹25 budget)."
+                  title="Deep Research plans, runs multiple live web-search rounds, validates source links, and writes a cited report within the server-configured budget."
                 >
                   Deep Research
                   <span
@@ -4341,15 +4488,14 @@ const ChatInterface = () => {
                 )}
               </button>
             </form>
-            {/* Token-cost warning — shown only while Deep Research is toggled ON, so the user
-                knows this run is much heavier than plain Research before they send it. */}
+            {/* Cost warning shown only while Deep Research is toggled on. */}
             {researchModeActive && deepResearchActive && (
               <div className="mt-2 flex items-start gap-1.5 px-3 py-1.5 rounded-xl bg-amber-50 text-amber-700 text-[11px] leading-snug">
                 <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
                 <span>
-                  <strong>Deep Research uses ~100% more tokens</strong> than Research mode — it plans,
-                  runs several live web-search rounds, then writes a cited report. Slower and costlier,
-                  capped at a hard ₹25 budget per run.
+                  <strong>Deep Research runs multiple model and live-search steps.</strong> It is slower
+                  and costlier than Research mode. Source links are validated, and every run is bounded
+                  by the server-configured budget.
                 </span>
               </div>
             )}

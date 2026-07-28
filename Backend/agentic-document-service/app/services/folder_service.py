@@ -2728,9 +2728,12 @@ class FolderWorkflowService:
         used_secret_prompt: bool = False,
         prompt_label: str | None = None,
         secret_id: str | None = None,
-    ) -> None:
+        raise_on_error: bool = False,
+    ) -> bool | None:
         if not is_db_available():
-            return
+            if raise_on_error:
+                raise RuntimeError("folder chat database is unavailable")
+            return None
         chunk_ids = []
         summarized_file_ids = []
         normalized_citations = []
@@ -2775,6 +2778,7 @@ class FolderWorkflowService:
                     ),
                 )
                 conn.commit()
+            return True if raise_on_error else None
         except Exception as exc:
             logger.exception(
                 "[FolderService] task=save_folder_chat_db status=error folder=%s session_id=%s error=%s",
@@ -2782,6 +2786,9 @@ class FolderWorkflowService:
                 session_id,
                 exc,
             )
+            if raise_on_error:
+                raise
+            return None
 
     def update_latest_chat_answer(
         self,

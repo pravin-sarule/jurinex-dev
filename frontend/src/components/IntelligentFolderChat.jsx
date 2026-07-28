@@ -9,6 +9,7 @@ import apiService from '../services/api';
 import documentApi from '../services/documentApi';
 import LearningBubble from './LearningBubble';
 import LearningQuestionModal from './LearningQuestionModal';
+import FormattedAssistantContent from './ChatInterface/FormattedAssistantContent';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -25,6 +26,7 @@ import { API_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE, DOCS_BASE_U
 import { fetchSecretsList, peekSecretsList } from '../services/secretsService';
 import ChatQuotaErrorModal from './ChatQuotaErrorModal';
 import UpgradePlanBanner from './UpgradePlanBanner';
+import { isDeepResearchMessage, isDeepResearchSource } from '../utils/deepResearchSources';
 
 export default function IntelligentFolderChat({
   folderName,
@@ -53,7 +55,7 @@ export default function IntelligentFolderChat({
   const [recognition, setRecognition] = useState(null);
   const [learningMode, setLearningMode] = useState(() => localStorage.getItem('learning_mode_enabled') === 'true');
   const [researchMode, setResearchMode] = useState(() => localStorage.getItem('research_mode_enabled') === 'true');
-  // Deep Research: bounded agentic loop (plan → web-search rounds → synthesize) under a ₹25 budget.
+  // Deep Research: bounded agentic loop with validated web sources and a server-configured budget.
   // Session-only (NOT persisted): it is a sub-toggle of Research, so it must never outlive it.
   const [deepResearchMode, setDeepResearchMode] = useState(false);
   const [adversarialMode, setAdversarialMode] = useState(() => localStorage.getItem('learning_adversarial_mode') === 'true');
@@ -286,7 +288,15 @@ export default function IntelligentFolderChat({
             lastMessage.text = text || '';
             lastMessage.thinking = thinking || '';
             lastMessage.isStreaming = false;
-            lastMessage.method = methodUsed;
+            const finalMethod = finalMetadata?.method || methodUsed || lastMessage.method;
+            const finalCitations = Array.isArray(finalMetadata?.citations)
+              ? finalMetadata.citations
+              : lastMessage.citations;
+            const finalizedIsDeep = lastMessage.deep_research === true
+              || finalMethod === 'deep_research'
+              || isDeepResearchMessage({ citations: finalCitations });
+            lastMessage.method = finalizedIsDeep ? 'deep_research' : finalMethod;
+            if (finalizedIsDeep) lastMessage.deep_research = true;
             lastMessage.routingDecision = routingDecision;
             lastMessage.status = null;
             
@@ -368,6 +378,17 @@ export default function IntelligentFolderChat({
     const fetchCitationsForMessage = async (message) => {
       if (!message || !folderName) {
         setCitations([]);
+        return;
+      }
+
+      if (isDeepResearchMessage(message)) {
+        // Keep the raw marker/evidence on the message, but only send validated web
+        // destinations to the sources panel. This prevents a marker-only Deep run
+        // from being misread as a local document citation.
+        const deepSources = (Array.isArray(message.citations) ? message.citations : [])
+          .filter(isDeepResearchSource);
+        setCitations(deepSources);
+        setLoadingCitations(false);
         return;
       }
 
@@ -499,6 +520,7 @@ export default function IntelligentFolderChat({
       thinking: '',
       isStreaming: true,
       method: null,
+      deep_research: Boolean(researchMode && deepResearchMode),
       timestamp: new Date(),
     };
 
@@ -564,6 +586,7 @@ export default function IntelligentFolderChat({
       thinking: '',
       isStreaming: true,
       method: null,
+      deep_research: Boolean(researchMode && deepResearchMode),
       timestamp: new Date(),
     };
 
@@ -782,7 +805,7 @@ export default function IntelligentFolderChat({
           Intelligent Folder Chat
           {learningMode ? <span className="learning-mode-tag">📖 Learning Mode</span> : null}
           {researchMode ? <span className="research-mode-tag">Research Mode · Live web</span> : null}
-          {deepResearchMode ? <span className="research-mode-tag">Deep Research · agentic · ₹25 budget</span> : null}
+          {deepResearchMode ? <span className="research-mode-tag">Deep Research · validated sources</span> : null}
         </h3>
         <div className="style-dropdown-wrap" ref={styleDropdownRef}>
           <button
@@ -937,25 +960,29 @@ export default function IntelligentFolderChat({
                         onOptionSelect={handleQuickReply}
                       />
                     ) : msg.text ? (
-                      (() => {
-                        const rawResponse = msg.text || '';
-                        if (!rawResponse) return null;
-                        const isStructured = isStructuredJsonResponse(rawResponse);
-                        const formatted = isStructured
-                          ? renderSecretPromptResponse(rawResponse)
-                          : convertJsonToPlainText(rawResponse);
-                        const prepared = ensureTableSeparators(normalizeMarkdownFormatting(formatted));
-                        return splitMarkdownIntoRenderChunks(prepared).map((chunk, index) => (
-                          <ReactMarkdown
-                            key={`${index}-${chunk.length}`}
-                            remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
-                            rehypePlugins={markdownRehypePlugins}
-                            components={markdownTableComponents}
-                          >
-                            {chunk}
-                          </ReactMarkdown>
-                        ));
-                      })()
+                      isDeepResearchMessage(msg) ? (
+                        <FormattedAssistantContent raw={msg.text} forceSafeMarkdown citations={msg.citations} />
+                      ) : (
+                        (() => {
+                          const rawResponse = msg.text || '';
+                          if (!rawResponse) return null;
+                          const isStructured = isStructuredJsonResponse(rawResponse);
+                          const formatted = isStructured
+                            ? renderSecretPromptResponse(rawResponse)
+                            : convertJsonToPlainText(rawResponse);
+                          const prepared = ensureTableSeparators(normalizeMarkdownFormatting(formatted));
+                          return splitMarkdownIntoRenderChunks(prepared).map((chunk, index) => (
+                            <ReactMarkdown
+                              key={`${index}-${chunk.length}`}
+                              remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
+                              rehypePlugins={markdownRehypePlugins}
+                              components={markdownTableComponents}
+                            >
+                              {chunk}
+                            </ReactMarkdown>
+                          ));
+                        })()
+                      )
                     ) : (
                       msg.isStreaming && !msg.thinking ? 'Generating response...' : ''
                     )}
@@ -1042,7 +1069,7 @@ export default function IntelligentFolderChat({
                         <>
                           <span className="method-icon">🧭</span>
                           <span className="method-label">Deep Research</span>
-                          <span className="method-tooltip">Bounded agentic loop: plan → multiple live web-search rounds → cited synthesis (hard ₹25 budget)</span>
+                          <span className="method-tooltip">Plan → multiple live web-search rounds → validated cited synthesis within the configured budget</span>
                         </>
                       ) : (
                         <>
@@ -1110,7 +1137,7 @@ export default function IntelligentFolderChat({
               disabled={isStreaming}
               className="research-active-chip"
               style={{ cursor: isStreaming ? 'default' : 'pointer', gap: '6px' }}
-              title="Deep Research: bounded agentic loop — plans, runs multiple live web-search rounds, then writes a cited report. Slower & costs more (hard ₹25 budget)."
+              title="Deep Research plans, runs multiple live web-search rounds, validates source links, and writes a cited report within the server-configured budget."
             >
               <Sparkles className="h-3.5 w-3.5" />
               <span>Deep Research</span>
@@ -1137,7 +1164,7 @@ export default function IntelligentFolderChat({
             type="text"
             value={input}
             onChange={handleInputChange}
-            placeholder={isSecretPromptSelected ? `Using: ${activeDropdown}` : deepResearchMode ? "Deep research this across your documents and the live web (slower, ₹25 budget)..." : researchMode ? "Research this topic using case documents and the live web..." : "Ask a question about your documents..."}
+            placeholder={isSecretPromptSelected ? `Using: ${activeDropdown}` : deepResearchMode ? "Deep research this across your documents and the live web (slower, validated sources)..." : researchMode ? "Research this topic using case documents and the live web..." : "Ask a question about your documents..."}
             disabled={isStreaming || (learningMode && !!learningPopupQuestion)}
             className="flex-grow bg-transparent border-none outline-none text-gray-900 placeholder-gray-500 text-sm font-medium py-2 min-w-0"
             autoFocus
@@ -1224,8 +1251,7 @@ export default function IntelligentFolderChat({
         </div>
       </form>
 
-      {/* Token-cost warning — shown only while Deep Research is toggled ON, so the user knows
-          this run is much heavier than plain Research before sending. */}
+      {/* Cost warning shown only while Deep Research is toggled on. */}
       {researchMode && deepResearchMode && (
         <div
           style={{
@@ -1236,9 +1262,9 @@ export default function IntelligentFolderChat({
         >
           <AlertTriangle className="h-3.5 w-3.5" style={{ flexShrink: 0, marginTop: '1px' }} />
           <span>
-            <strong>Deep Research uses ~100% more tokens</strong> than Research mode — it plans, runs
-            several live web-search rounds, then writes a cited report. Slower and costlier, capped at a
-            hard ₹25 budget per run.
+            <strong>Deep Research runs multiple model and live-search steps.</strong> It is slower and
+            costlier than Research mode. Source links are validated, and every run is bounded by the
+            server-configured budget.
           </span>
         </div>
       )}

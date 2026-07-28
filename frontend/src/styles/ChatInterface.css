@@ -517,23 +517,166 @@
   background: transparent;
 }
 
-.formatted-assistant-markdown {
-  font-size: 15.5px;
-  line-height: 1.6;
-  color: #000000;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  word-break: break-word;
-  overflow-wrap: anywhere;
+/* ── Deep Research: plain document tables ───────────────────────────────────
+   Research answers read as a report, so their tables render as a quiet ruled
+   table — no search box, row count, Copy/CSV buttons or sort arrows. */
+.formatted-assistant-markdown table.md-doc-table {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  /* Fit the reading column and wrap. At max-content a 7-column authorities table
+     rendered 2,285px wide in an 880px column, pushing the "Key holding" text —
+     the substance — off-screen behind a horizontal scrollbar. */
+  width: 100%;
+  min-width: 0;
+  /* The wrapper owns the vertical rhythm; see .md-table-scroll below. */
+  margin: 0;
 }
 
+/* `th` is not covered by the base `table td` wrapping rule. */
+.formatted-assistant-markdown table.md-doc-table th,
+.formatted-assistant-markdown table.md-doc-table td {
+  overflow-wrap: break-word;
+}
+
+/* One margin, not two: the wrapper's 1.5em and the table's own 1.5em stacked into
+   ~45px of dead space around every table (paragraph rhythm is ~14px). */
+.formatted-assistant-markdown .md-table-scroll:has(> table.md-doc-table) {
+  margin: 1.25em 0 !important;
+}
+
+.formatted-assistant-markdown table.md-doc-table th {
+  background: #f7faf9;
+  color: #334155;
+  font-weight: 600;
+  font-size: 13.5px;
+  text-transform: none;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 10px 14px;
+  vertical-align: top;
+}
+
+.formatted-assistant-markdown table.md-doc-table td {
+  padding: 10px 14px;
+  vertical-align: top;
+  font-size: 14.5px;
+  line-height: 1.55;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.formatted-assistant-markdown table.md-doc-table th + th,
+.formatted-assistant-markdown table.md-doc-table td + td {
+  border-left: 1px solid #f1f5f9;
+}
+
+.formatted-assistant-markdown table.md-doc-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* ── Deep Research: inline [S1] citation chips ─────────────────────────────── */
+.formatted-assistant-markdown .dr-cite {
+  display: inline-block;
+  margin-left: 2px;
+  padding: 0 5px;
+  border: 1px solid #cdeae6;
+  border-radius: 999px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-size: 0.68em;
+  font-weight: 600;
+  line-height: 1.7;
+  vertical-align: super;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.formatted-assistant-markdown .dr-cite:hover,
+.formatted-assistant-markdown .dr-cite:focus-visible {
+  background: #ccfbf1;
+  border-color: #5eead4;
+  outline: none;
+}
+
+/* ── Deep Research: the "Validated sources" list ───────────────────────────── */
+.formatted-assistant-markdown .dr-source-line {
+  margin: 0.35em 0;
+  line-height: 1.55;
+}
+
+/* Only server-validated URLs get an href; everything else renders as text. */
+.formatted-assistant-markdown .dr-source-link {
+  color: #0f766e;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: #99e6dd;
+  font-weight: 500;
+}
+
+.formatted-assistant-markdown .dr-source-link:hover {
+  color: #115e59;
+  text-decoration-color: #0f766e;
+}
+
+/* Brief highlight when a [S1] chip jumps to its entry. */
+.dr-source-flash {
+  border-radius: 6px;
+  background: #ccfbf1;
+  box-shadow: 0 0 0 4px #ccfbf1;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.formatted-assistant-markdown {
+  font-size: 15.5px;
+  line-height: 1.68;
+  color: #000000;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* break-word only wraps tokens that cannot fit (long URLs/citations); "anywhere"
+     used to split ordinary words mid-line, which made prose look broken. */
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+/* Heading hierarchy — without distinct sizes a long report reads as one flat
+   block, because every ## section title rendered at body size. */
 .formatted-assistant-markdown h1,
 .formatted-assistant-markdown h2,
 .formatted-assistant-markdown h3,
-.formatted-assistant-markdown h4 {
+.formatted-assistant-markdown h4,
+.formatted-assistant-markdown h5,
+.formatted-assistant-markdown h6 {
+  font-weight: 700;
+  line-height: 1.35;
+  color: #0f172a;
+  letter-spacing: -0.01em;
+}
+
+.formatted-assistant-markdown h1 { font-size: 1.42em; margin: 1.6em 0 0.6em; }
+
+.formatted-assistant-markdown h2 {
+  font-size: 1.22em;
+  margin: 1.8em 0 0.7em;
+  padding-bottom: 0.35em;
+  border-bottom: 1px solid #e8edeb;
+}
+
+.formatted-assistant-markdown h3 { font-size: 1.08em; margin: 1.5em 0 0.5em; }
+
+.formatted-assistant-markdown h4,
+.formatted-assistant-markdown h5,
+.formatted-assistant-markdown h6 {
+  font-size: 1em;
   font-weight: 600;
-  line-height: 1.4;
-  margin: 1.5em 0 0.6em;
-  color: #000000;
+  margin: 1.3em 0 0.45em;
+  color: #334155;
+}
+
+/* No dead space above the answer's first line. */
+.formatted-assistant-markdown > :first-child,
+.formatted-assistant-markdown > *:first-child > :first-child {
+  margin-top: 0;
 }
 
 .formatted-assistant-markdown strong,
@@ -542,18 +685,41 @@
   color: #000000;
 }
 
-.formatted-assistant-markdown p { margin: 0 0 1em; }
+.formatted-assistant-markdown p { margin: 0 0 0.9em; }
 
+/* Tailwind's preflight resets `ul, ol { list-style: none }` app-wide, which left
+   every bullet and number in an answer invisible — restore markers here. */
 .formatted-assistant-markdown ul,
 .formatted-assistant-markdown ol {
-  margin: 1.2em 0;
-  padding-left: 1.8em;
+  margin: 0.7em 0 1em;
+  padding-left: 1.5em;
+  list-style-position: outside;
+}
+
+.formatted-assistant-markdown ul { list-style-type: disc; }
+.formatted-assistant-markdown ul ul { list-style-type: circle; }
+.formatted-assistant-markdown ul ul ul { list-style-type: square; }
+.formatted-assistant-markdown ol { list-style-type: decimal; }
+.formatted-assistant-markdown ol ol { list-style-type: lower-alpha; }
+
+.formatted-assistant-markdown li::marker {
+  color: #64748b;
+  font-weight: 500;
 }
 
 .formatted-assistant-markdown li {
-  margin: 0.6em 0;
-  line-height: 1.6;
+  margin: 0.3em 0;
+  line-height: 1.68;
+  padding-left: 0.15em;
 }
+
+/* A list nested in a list should not re-open the outer spacing. */
+.formatted-assistant-markdown li > ul,
+.formatted-assistant-markdown li > ol {
+  margin: 0.3em 0 0.4em;
+}
+
+.formatted-assistant-markdown li > p { margin: 0 0 0.4em; }
 
 .formatted-assistant-markdown blockquote {
   border-left: 4px solid #1f6b5f;
@@ -588,6 +754,45 @@
   color: #243124;
   padding: 0;
   white-space: pre;
+}
+
+/* Multi-line blocks that stay fenced (real code, or content we deliberately
+   don't rewrite): a soft card that WRAPS, never the red inline-code pill and
+   never a line clipped at the panel edge. */
+.formatted-assistant-markdown pre,
+.response-content pre {
+  background: #f7f9f8 !important;
+  color: #243124 !important;
+  border: 1px solid #e2e8f0 !important;
+  border-radius: 8px !important;
+  padding: 14px 16px !important;
+  margin: 0.9em 0 !important;
+  overflow-x: auto !important;
+  font-size: 14px !important;
+}
+
+/* Syntax-highlighted code renders its own card (PreTag="div") — don't box it twice. */
+.formatted-assistant-markdown pre:has(> div),
+.response-content pre:has(> div) {
+  background: none !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+.formatted-assistant-markdown .md-code-block,
+.response-content .md-code-block,
+.formatted-assistant-markdown pre code,
+.response-content pre code {
+  display: block;
+  background: none !important;
+  color: #243124 !important;
+  padding: 0 !important;
+  border: none !important;
+  font-family: ui-monospace, "IBM Plex Mono", "Courier New", monospace !important;
+  font-size: 14px !important;
+  line-height: 1.6 !important;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .formatted-assistant-markdown.stream-active { will-change: contents; }

@@ -312,6 +312,10 @@ import { renderSecretPromptResponse, isStructuredJsonResponse } from '../utils/r
 import { DOCS_BASE_URL } from '../config/apiConfig';
 import { parseLlmPolicyErrorForUi, stringToChatErrorDisplay } from '../utils/llmQuotaMessages';
 import { notifyResponseComplete, ensureNotificationPermission } from '../utils/responseNotifier';
+import {
+  mergeResearchStreamChunk,
+  reconcileDeepResearchStreamText,
+} from '../utils/deepResearchSources';
 
 const API_BASE = DOCS_BASE_URL;
 
@@ -377,6 +381,7 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
     setMethodUsed(null);
     setRoutingDecision(null);
     setStatus(null);
+    setFinalMetadata(null);
     setLearningPayload(null);
     setLearningPopupQuestion(null);
 
@@ -443,6 +448,8 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
         return;
       }
 
+      const isDeepResearchRequest = requestBody.deep_research === true;
+
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
@@ -497,7 +504,7 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
             chunkDisplayTimeoutRef.current = null;
           }
           if (accumulatedText) {
-            setText(formatAssistantText(accumulatedText));
+            setText(isDeepResearchRequest ? accumulatedText : formatAssistantText(accumulatedText));
           }
           if (accumulatedThinking) {
             setThinking(accumulatedThinking);
@@ -523,7 +530,7 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
               chunkDisplayTimeoutRef.current = null;
             }
             if (accumulatedText) {
-              setText(formatAssistantText(accumulatedText));
+              setText(isDeepResearchRequest ? accumulatedText : formatAssistantText(accumulatedText));
             }
             if (accumulatedThinking) {
               setThinking(accumulatedThinking);
@@ -573,8 +580,14 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
 
               case 'chunk': {
                 const chunkText = parsed.text || '';
-                if (chunkText) {
-                  accumulatedText += chunkText;
+                const replaceDeepSnapshot = isDeepResearchRequest && parsed.replace === true;
+                if (chunkText || replaceDeepSnapshot) {
+                  accumulatedText = mergeResearchStreamChunk(
+                    accumulatedText,
+                    chunkText,
+                    isDeepResearchRequest,
+                    parsed.replace,
+                  );
                   if (chunkDisplayTimeoutRef.current) {
                     clearTimeout(chunkDisplayTimeoutRef.current);
                     chunkDisplayTimeoutRef.current = null;
@@ -615,10 +628,18 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
                   // destination as a final step, which can make `answer` SHORTER than the
                   // raw streamed buffer (dead links are dropped, not just swapped). A
                   // length-based fallback would silently prefer the stale, dead-link text.
-                  const fromDone = typeof parsed.answer === 'string' ? parsed.answer : '';
-                  const raw = fromDone || accumulatedText;
-                  if (raw) {
-                    setText(formatAssistantText(raw));
+                  const hasDoneAnswer = typeof parsed.answer === 'string';
+                  const fromDone = hasDoneAnswer ? parsed.answer : '';
+                  if (isDeepResearchRequest && hasDoneAnswer) {
+                    // Keep the final server-validated answer as the stream buffer too,
+                    // so a following [DONE]/EOF cannot restore transient link text.
+                    accumulatedText = reconcileDeepResearchStreamText(accumulatedText, fromDone);
+                  }
+                  const raw = isDeepResearchRequest && hasDoneAnswer
+                    ? accumulatedText
+                    : fromDone || accumulatedText;
+                  if (raw || (isDeepResearchRequest && hasDoneAnswer)) {
+                    setText(isDeepResearchRequest ? raw : formatAssistantText(raw));
                   }
                 }
                 if (accumulatedThinking) {

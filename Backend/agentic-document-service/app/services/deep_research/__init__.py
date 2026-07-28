@@ -15,6 +15,6 @@ special handling.
 Public entrypoint: `run_deep_research(...)` — an async generator of SSE strings.
 """
 
-from .agent import run_deep_research
+from .orchestrator import run_deep_research
 
 __all__ = ["run_deep_research"]

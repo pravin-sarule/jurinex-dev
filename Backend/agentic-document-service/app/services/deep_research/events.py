@@ -5,7 +5,8 @@ frontend renders them with no changes:
 
     {"type": "status",   "status": "<phase>", "message": "..."}
     {"type": "thinking", "text": "...\n"}          # progress / reasoning trace
-    {"type": "chunk",    "text": "<delta>"}         # answer tokens  (NOT "token")
+    {"type": "chunk",    "text": "<delta>"}         # answer delta (NOT "token")
+    {"type": "chunk",    "text": "<snapshot>", "replace": true}
     {"type": "done",     ...}                        # terminal success
     {"type": "error",    "message": "..."}           # terminal failure
 
@@ -23,22 +24,37 @@ def sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
-def status(phase: str, message: str) -> str:
-    return sse({"type": "status", "status": phase, "message": message})
+def status(status_name: str, message: str, **fields: Any) -> str:
+    payload = {"type": "status", "status": status_name, "message": message}
+    payload.update(fields)
+    return sse(payload)
 
 
-def thinking(text: str) -> str:
+def thinking(text: str, **fields: Any) -> str:
     if not text.endswith("\n"):
         text += "\n"
-    return sse({"type": "thinking", "text": text})
+    payload = {"type": "thinking", "text": text}
+    payload.update(fields)
+    return sse(payload)
 
 
-def chunk(delta: str) -> str:
-    return sse({"type": "chunk", "text": delta})
+def chunk(delta: str, *, replace: bool = False) -> str:
+    payload: dict[str, Any] = {"type": "chunk", "text": delta}
+    if replace:
+        payload["replace"] = True
+    return sse(payload)
 
 
-def error(message: str) -> str:
-    return sse({"type": "error", "message": message})
+def error(
+    message: str,
+    *,
+    code: str = "deep_research_failed",
+    retryable: bool = False,
+    **fields: Any,
+) -> str:
+    payload = {"type": "error", "message": message, "code": code, "retryable": retryable}
+    payload.update(fields)
+    return sse(payload)
 
 
 def done(**fields: Any) -> str:

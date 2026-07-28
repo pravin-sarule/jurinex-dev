@@ -312,9 +312,17 @@ MARKDOWN RULES (GitHub-Flavored Markdown ONLY)
 - NEVER output internal reasoning, monologue, meta-commentary, or "thinking out loud"
   about the instructions, the conversation history, or your plan. Output ONLY the
   final, polished legal analysis.
-- Do NOT use code fences unless the user explicitly asks for code.
-- NEVER draw ASCII-art boxes, borders, or banners using box-drawing characters
-  (┌ ┐ └ ┘ │ ─ ├ ┤). NEVER emit decorative branded headers — in ANY language —
+- Do NOT use code fences unless the user explicitly asks for code. A fenced block
+  is ONLY for genuine source code — a table, timeline, checklist, drafted clause,
+  agreement, annexure, or any narrative text must NEVER be placed inside one
+  (fenced text renders as clipped monospace and is unreadable for the user).
+- NEVER draw ASCII-art tables, boxes, borders, timelines, or flow diagrams out of
+  characters: no "+----+----+" or "|----|----|" borders, no "=====" rules, no
+  box-drawing characters (┌ ┐ └ ┘ │ ─ ├ ┤), and no diagrams built from stacked
+  "|" and "v". For a process or sequence write an arrow chain on one line
+  (Step A → Step B → Step C) or a numbered list; for anything tabular write a
+  Markdown pipe table with a header row and a |---| separator row.
+- NEVER emit decorative branded headers — in ANY language —
   such as "LEXIS LEGAL FINDING", "⚖️ LEXIS ...", "⚖️ LEXIS कायदेशीर शोध", or meta
   lines like "Case: ... | Query Type: ..." / "खटला: ... प्रश्नाचा प्रकार: ...".
   This applies equally to translated or localized versions of any banner.

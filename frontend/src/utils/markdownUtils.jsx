@@ -6,6 +6,7 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import InteractiveTable from '../components/InteractiveTable';
+import { cleanAsciiArtBlocks } from './asciiBlocks';
 
 // Permissive sanitize schema: allow the safe inline HTML the model/markdown
 // utilities legitimately emit (bold/italic via <strong>/<em>, line breaks via
@@ -257,15 +258,17 @@ function cleanOcrArtifacts(text) {
   // 6e. Dictionary-backed rejoiner for general split words ("com pliance" etc.)
   t = rejoinSplitWords(t);
   // 7. Tighten spaced/mismatched bold & italic. Horizontal whitespace only
-  //    ([ \t], never \s) so markers can't pair across newlines. The
-  //    (?<![A-Za-z0-9*]) guard means an OPENING marker is never started from a
-  //    closing "word**" — otherwise a real close pairs with a downstream "*".
+  //    ([ \t], never \s) so markers can't pair across newlines. An OCR-spaced
+  //    OPENER always sits at the start of a line or after whitespace/an opening
+  //    bracket; a marker preceded by any other character is the CLOSER of an
+  //    earlier phrase ("**s. 55(2)** of the Act, **Ramesh**"). Pairing that
+  //    closer with the next opener would swallow the words between them.
   t = t
-    .replace(/(?<![A-Za-z0-9*])\*\*[ \t]+([^*\n]+?)[ \t]+\*\*/g, '**$1**')
-    .replace(/(?<![A-Za-z0-9*])\*\*[ \t]+([^*\n]+?)\*\*/g, '**$1**')
-    .replace(/(?<![A-Za-z0-9*])\*\*([^*\n]+?)[ \t]+\*\*/g, '**$1**')
-    .replace(/(?<![A-Za-z0-9*])\*\*[ \t]+([^*\n]+?)[ \t]+\*(?!\*)/g, '**$1**')
-    .replace(/(?<![A-Za-z0-9*])\*[ \t]+([^*\n]+?)[ \t]+\*(?!\*)/g, '*$1*');
+    .replace(/(?<![^\s([{"'“‘])\*\*[ \t]+([^*\n]+?)[ \t]+\*\*/g, '**$1**')
+    .replace(/(?<![^\s([{"'“‘])\*\*[ \t]+([^*\n]+?)\*\*/g, '**$1**')
+    .replace(/(?<![^\s([{"'“‘])\*\*([^*\n]+?)[ \t]+\*\*/g, '**$1**')
+    .replace(/(?<![^\s([{"'“‘])\*\*[ \t]+([^*\n]+?)[ \t]+\*(?!\*)/g, '**$1**')
+    .replace(/(?<![^\s([{"'“‘])\*[ \t]+([^*\n]+?)[ \t]+\*(?!\*)/g, '*$1*');
   // 8. Strip a stray mid-line single "*" (unclosed italic). The (?<=\S) guard
   //    means a real list bullet at line start is never touched.
   t = t.replace(/(?<=\S)[ \t]+\*(?!\*)[ \t]+/g, ' ');
@@ -287,14 +290,83 @@ export function preprocessLaTeX(text) {
  * Tightens bold and italic markers by removing internal spaces and converts them
  * to HTML tags as a safety net for non-standard markdown output.
  */
-export function convertMarkdownMarkers(text) {
+/**
+ * Drop unpaired `**` markers so they never render as literal asterisks. Used on
+ * the markdown-only path, where the `<strong>` conversion (which absorbs valid
+ * pairs) is deliberately skipped.
+ */
+// A ** span may legitimately cross a soft or hard line break inside one paragraph
+// or list item — the backend emits exactly that when it un-fences a drafted block —
+// but never across a blank line, heading, table row, fence or new list item.
+const EMPHASIS_SCOPE_BREAK_RE = /^\s*(?:$|#{1,6}\s|\||>?\s*(?:[-*+]|\d{1,9}[.)])\s|```|~~~)/;
+
+/**
+ * Remove only the `**` markers that genuinely cannot pair, matching each closer to
+ * the nearest open marker the way remark does. Deleting "the last **" per physical
+ * line silently erased both halves of any bold span that wrapped a line.
+ */
+function dropUnpairableBold(chunk) {
+  const open = [];
+  const stray = [];
+  for (let i = 0; i < chunk.length - 1; i++) {
+    if (chunk[i] !== '*' || chunk[i + 1] !== '*') continue;
+    const before = chunk[i - 1];
+    const after = chunk[i + 2];
+    const canClose = before !== undefined && !/\s/.test(before);
+    const canOpen = after !== undefined && !/\s/.test(after);
+    if (canClose && open.length) open.pop();
+    else if (canOpen) open.push(i);
+    else stray.push(i);
+    i++; // consume both asterisks
+  }
+  const remove = new Set([...open, ...stray]);
+  if (!remove.size) return chunk;
+  let out = '';
+  for (let i = 0; i < chunk.length; i++) {
+    if (remove.has(i)) { i++; continue; }
+    out += chunk[i];
+  }
+  return out;
+}
+
+function stripUnpairedBoldMarkers(text) {
+  const lines = String(text).split('\n');
+  const out = [];
+  let scope = [];
+  const flush = () => {
+    if (scope.length) { out.push(dropUnpairableBold(scope.join('\n'))); scope = []; }
+  };
+  for (const line of lines) {
+    if (EMPHASIS_SCOPE_BREAK_RE.test(line)) flush();
+    scope.push(line);
+  }
+  flush();
+  return out.join('\n');
+}
+
+/**
+ * @param {string} text
+ * @param {{html?: boolean}} [options] html=false keeps `**bold**` as Markdown
+ *   instead of converting it to <strong> — required for surfaces that render
+ *   with skipHtml (Deep Research), where HTML tags are stripped and the emphasis
+ *   would be lost entirely.
+ */
+export function convertMarkdownMarkers(text, options = {}) {
   if (!text || typeof text !== 'string') return text;
+  const { html = true } = options;
 
   let t = text;
 
   // 0. Fix a list bullet glued to bold/italic by OCR: "-**Case Type**" -> "- **Case Type**"
   //    so it renders as a proper list item instead of a stray leading dash.
   t = t.replace(/^(\s*)-(\*+)(?=\S)/gm, '$1- $2');
+
+  // Markdown-only surfaces (Deep Research) skip the OCR "tightening" below: the
+  // model's output is already clean markdown, and tightening a CLOSER against the
+  // next OPENER ("**s. 55(2)** of the Act, **Ramesh**") eats the words between
+  // them. remark renders **bold** / *italic* natively, so only stray unpaired
+  // markers need removing.
+  if (!html) return stripUnpairedBoldMarkers(t);
 
   // 1. Tighten spaced bold: "** text **" -> "**text**"
   //    SINGLE LINE ONLY. Crossing newlines here pairs the CLOSING ** of one
@@ -306,14 +378,18 @@ export function convertMarkdownMarkers(text) {
   //    potential CLOSER must not be followed by one — otherwise the closer of one
   //    emphasis and the opener of the next get "tightened" together, eating the
   //    text between them.
-  t = t.replace(/(?<![\w*])\*\*[ \t]+([^\n*][^\n]*?)[ \t]+\*\*(?![\w*])/g, '**$1**');
-  t = t.replace(/(?<![\w*])\*\*[ \t]+([^\n*][^\n]*?)\*\*(?![\w*])/g, '**$1**');
-  t = t.replace(/(?<![\w*])\*\*([^\n*][^\n]*?)[ \t]+\*\*(?![\w*])/g, '**$1**');
+  //    An OCR-spaced OPENER always sits at line start or after whitespace / an
+  //    opening bracket; a marker preceded by anything else (")", ":", a letter)
+  //    is the CLOSER of an earlier phrase — pairing it with the next opener
+  //    ("**s. 55(2)** of the Act, **Ramesh**") swallows the words between them.
+  t = t.replace(/(?<![^\s([{"'“‘])\*\*[ \t]+([^\n*][^\n]*?)[ \t]+\*\*(?![\w*])/g, '**$1**');
+  t = t.replace(/(?<![^\s([{"'“‘])\*\*[ \t]+([^\n*][^\n]*?)\*\*(?![\w*])/g, '**$1**');
+  t = t.replace(/(?<![^\s([{"'“‘])\*\*([^\n*][^\n]*?)[ \t]+\*\*(?![\w*])/g, '**$1**');
 
   // 2. Tighten spaced italics: "* text *" -> "*text*" (single line only)
-  t = t.replace(/(?<![\w*])\*[ \t]+([^ *\n][^*\n]*?)[ \t]+\*(?![\w*])/g, '*$1*');
-  t = t.replace(/(?<![\w*])\*[ \t]+([^ *\n][^*\n]*?)\*(?![\w*])/g, '*$1*');
-  t = t.replace(/(?<![\w*])\*([^ *\n][^*\n]*?)[ \t]+\*(?![\w*])/g, '*$1*');
+  t = t.replace(/(?<![^\s([{"'“‘])\*[ \t]+([^ *\n][^*\n]*?)[ \t]+\*(?![\w*])/g, '*$1*');
+  t = t.replace(/(?<![^\s([{"'“‘])\*[ \t]+([^ *\n][^*\n]*?)\*(?![\w*])/g, '*$1*');
+  t = t.replace(/(?<![^\s([{"'“‘])\*([^ *\n][^*\n]*?)[ \t]+\*(?![\w*])/g, '*$1*');
 
   // 3. Convert to HTML tags as a safety net for "broken" markdown (e.g. *text*word)
   // Bold: **text** -> <strong>text</strong>. May wrap a single newline but must
@@ -386,10 +462,20 @@ const OPEN_THINK_RE = /<\s*think(?:ing)?\s*>[\s\S]*$/i;
 const REASONING_CUE_RE = /^\s*(?:we\s+need\s+to|we\s+already\s+have|we\s+also\s+have|we\s+have\s+a\s+conversation|we\s+should|we\s+must|we\s+can\s+(?:now|produce)|we\s+will\s+(?:now|produce)|let\s+me\b|let's\b|i\s+need\s+to|i\s+will\b|i'?ll\b|i\s+should\b|to\s+(?:produce|answer|begin|summari[sz]e)\b|the\s+user('?s)?\b|the\s+task\b|first,?\s+i\b|okay\b|alright\b|here'?s\s+my\s+plan|my\s+plan\b|thinking:|reasoning:|let\s+us\s+(?:produce|begin))/i;
 const STRUCTURE_RE = /^[ \t]*(?:#{1,6}\s|\|)/m;
 
-function stripReasoning(text) {
+/**
+ * @param {string} text
+ * @param {{dropCueParagraphs?: boolean}} [options] dropCueParagraphs=false keeps the
+ *   opening paragraph. The cue heuristic fires on ordinary legal prose — "The task of
+ *   the Collector under Section 33 is limited…", "To answer whether…", "The user…" —
+ *   and every Deep Research report has `##` headings, so its gate is always open. On
+ *   that path it silently deleted the first paragraph, citation and all.
+ *   <think>/<thinking> stripping stays unconditional.
+ */
+function stripReasoning(text, { dropCueParagraphs = true } = {}) {
   if (!text || typeof text !== 'string') return text;
   let s = text.replace(THINK_TAG_RE, '').replace(OPEN_THINK_RE, '').replace(/^\s+/, '');
   if (!s) return s;
+  if (!dropCueParagraphs) return s.trim();
   const hasStructure = STRUCTURE_RE.test(s) || s.includes('Based on a meticulous analysis');
   if (!hasStructure) return s.trim();
   const paragraphs = s.split(/\n\s*\n/);
@@ -402,11 +488,28 @@ function stripReasoning(text) {
   return paragraphs.join('\n\n').trim();
 }
 
-export function normalizeMarkdownFormatting(text) {
+/**
+ * @param {string} text
+ * @param {{html?: boolean, repairOcr?: boolean}} [options]
+ *   html=false keeps emphasis as Markdown (`**bold**`) instead of <strong>/<em>
+ *     — for renderers using skipHtml.
+ *   repairOcr=false skips the PDF/OCR salvage heuristics. They exist for text
+ *     extracted from scanned documents and actively CORRUPT clean model prose:
+ *     they merge separated numbers ("Section 17 1" → "Section 171", "in 2025 30
+ *     days" → "202530 days"), rejoin words, and rewrite a numbered chronology
+ *     into a table. Deep Research answers are model-authored, never OCR.
+ */
+export function normalizeMarkdownFormatting(text, options = {}) {
   if (!text || typeof text !== 'string') return text;
+  const { repairOcr = true } = options;
 
   // Strip chain-of-thought / <think> blocks first so reasoning never renders.
-  let t = stripReasoning(text);
+  let t = stripReasoning(text, { dropCueParagraphs: repairOcr });
+
+  // Rewrite ASCII art (character-drawn tables, box diagrams, fenced prose) into
+  // real Markdown BEFORE any other converter runs — those blocks otherwise
+  // render as clipped monospace text instead of tables/paragraphs.
+  t = cleanAsciiArtBlocks(t);
 
   // Strip standalone placeholder lines (e.g. ":-----------------------" or "___________")
   // that models sometimes emit as empty form-fillers.
@@ -434,7 +537,7 @@ export function normalizeMarkdownFormatting(text) {
   // 0a. Collapse degenerate single-column "fragment tables" (one syllable per
   //     row) back into prose BEFORE the chronology/table converters run — they
   //     bail out when a pipe table is present, so this must come first.
-  t = collapseFragmentedColumnTables(t);
+  if (repairOcr) t = collapseFragmentedColumnTables(t);
 
   // 0. Remove model-emitted <br> in flowing text (outside table rows) FIRST,
   //    before any converter runs, so they never reach the renderer as raw HTML.
@@ -442,14 +545,18 @@ export function normalizeMarkdownFormatting(text) {
   // Split at fenced code blocks so we never mangle code samples
   // Run bold-date-list converter FIRST (catches "** DATE ** – desc" format),
   // then the numbered-chronology converter (catches "1. DATE desc" format).
-  const boldConverted = convertBoldDateListToTable(deBred);
-  const chronologyNormalized = convertNumberedChronologyToMarkdownTable(boldConverted);
+  // Both are OCR-era salvage: on clean model prose they turn a perfectly good
+  // numbered list into a table, so they stay off when repairOcr is false.
+  const boldConverted = repairOcr ? convertBoldDateListToTable(deBred) : deBred;
+  const chronologyNormalized = repairOcr
+    ? convertNumberedChronologyToMarkdownTable(boldConverted)
+    : boldConverted;
   const latexPreprocessed = preprocessLaTeX(chronologyNormalized);
   const parts = latexPreprocessed.split(/(```[\s\S]*?```)/g);
-  const cleaned = parts
-    .map((part, i) => (i % 2 === 1 ? part : cleanOcrArtifacts(part)))
-    .join('');
-  const marked = convertMarkdownMarkers(cleaned);
+  const cleaned = repairOcr
+    ? parts.map((part, i) => (i % 2 === 1 ? part : cleanOcrArtifacts(part))).join('')
+    : parts.join('');
+  const marked = convertMarkdownMarkers(cleaned, { html: options.html !== false });
   return neutralizeSetextHeadings(marked);
 }
 
@@ -743,6 +850,9 @@ export function collapseFragmentedColumnTables(text) {
   return out.join('\n');
 }
 
+// A bullet or ordered-list marker, at any indent depth.
+const LIST_ITEM_RE = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+/;
+
 /**
  * Ensures GFM table separator rows are present so ReactMarkdown + remarkGfm
  * can render tables immediately, even during streaming when the AI emits header
@@ -753,7 +863,7 @@ export function collapseFragmentedColumnTables(text) {
  *   | ------ |   ← separator; without it remarkGfm renders raw pipe text
  *   | Cell   |
  */
-export function ensureTableSeparators(text) {
+export function ensureTableSeparators(text, { preserveIndent = false } = {}) {
   if (!text) return text;
 
   // Normalize Windows line endings so split/join is consistent
@@ -762,10 +872,32 @@ export function ensureTableSeparators(text) {
   const out = [];
   let insertedSepForTable = false;
   let prevLineWasTableOrSep = false;
+  let openFence = null;
+  let inListBlock = false;
 
   for (let i = 0; i < lines.length; i++) {
     const curr = lines[i].trim();
     const next = (lines[i + 1] || '').trim();
+
+    // Fenced code is copied through byte-for-byte — trimming/table repair inside
+    // a code block destroys its indentation and can eat lines that look like
+    // table scaffolding.
+    const fenceMark = curr.match(/^(`{3,}|~{3,})/);
+    if (openFence) {
+      out.push(lines[i]);
+      if (fenceMark && fenceMark[1][0] === openFence[0] && fenceMark[1].length >= openFence.length
+          && curr.slice(fenceMark[1].length).trim() === '') {
+        openFence = null;
+      }
+      continue;
+    }
+    if (fenceMark) {
+      openFence = fenceMark[1];
+      out.push(lines[i]);
+      insertedSepForTable = false;
+      prevLineWasTableOrSep = false;
+      continue;
+    }
 
     const isPipeDividerOnly = /^\|[\s\-:=|]+\|?$/.test(curr);
     const isLongDividerOnly = /^[\s\-:=|]{8,}$/.test(curr) && /[-=]/.test(curr);
@@ -818,11 +950,32 @@ export function ensureTableSeparators(text) {
       }
     }
 
-    // Fix missing leading/trailing pipes
-    let fixedLine = lines[i].trim();
-    if (isTableRow) {
-      if (!fixedLine.startsWith('|')) fixedLine = '| ' + fixedLine;
-      if (!fixedLine.endsWith('|')) fixedLine = fixedLine + ' |';
+    // Track whether we are inside a list: a flush-left non-list line ends it,
+    // an indented line continues it, a blank line leaves it open.
+    if (LIST_ITEM_RE.test(lines[i])) inListBlock = true;
+    else if (curr !== '' && !/^[ \t]/.test(lines[i])) inListBlock = false;
+
+    // Fix missing leading/trailing pipes. Only table rows may be trimmed
+    // unconditionally: trimming EVERY line flattens nested lists, tears a
+    // numbered list into separate <ol> blocks and ejects list continuations.
+    let fixedLine;
+    if (isTableRow || isSeparatorRow) {
+      fixedLine = lines[i].trim();
+      if (isTableRow) {
+        if (!fixedLine.startsWith('|')) fixedLine = '| ' + fixedLine;
+        if (!fixedLine.endsWith('|')) fixedLine = fixedLine + ' |';
+      }
+    } else if (!preserveIndent) {
+      fixedLine = lines[i].trim();
+    } else if (!inListBlock) {
+      // Outside a list, 4+ leading spaces would become an indented code block.
+      fixedLine = lines[i]
+        .replace(/^[ \t]+/, (ws) => (ws.length >= 4 ? '' : ws))
+        .replace(/\s+$/, '');
+    } else {
+      // Inside a list the leading indent carries the nesting; only trailing
+      // whitespace goes (it would otherwise emit a stray <br>).
+      fixedLine = lines[i].replace(/\s+$/, '');
     }
     out.push(fixedLine);
 
@@ -966,6 +1119,18 @@ export function extractTableData(node) {
 export const markdownTableComponents = {
   code({ node, inline, className, children, ...props }) {
     const match = /language-(\w+)/.exec(className || '');
+    // react-markdown v10 no longer passes `inline`; a block is anything that
+    // spans more than one line. Multi-line blocks must never get the red inline
+    // pill styling — they render as a soft, wrapping card instead of monospace
+    // text clipped at the panel edge.
+    const isBlock = inline === false || String(children).includes('\n');
+    if (!match && isBlock) {
+      return (
+        <code className={`md-code-block ${className || ''}`.trim()} {...props}>
+          {children}
+        </code>
+      );
+    }
     return !inline && match ? (
       <SyntaxHighlighter
         style={oneLight}

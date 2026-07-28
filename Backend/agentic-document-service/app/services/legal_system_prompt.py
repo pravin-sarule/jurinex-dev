@@ -32,8 +32,14 @@ OUTPUT FORMATTING (always apply — render as GitHub-Flavored Markdown):
   - Separate every block (heading, paragraph, list, table) with ONE blank line.
   - Keep each table row complete on a single physical line, starting and ending with |.
   - Never emit <think> tags, a leading ```markdown fence, or partial/abandoned tables.
-- NEVER draw ASCII-art boxes/banners with box-drawing characters (┌ ┐ └ ┘ │ ─) and
-  NEVER emit decorative branded headers in ANY language — e.g. "LEXIS LEGAL FINDING",
+- NEVER draw ASCII-art tables, boxes, borders, timelines, or flow diagrams out of
+  characters: no "+----+----+" or "|----|----|" borders, no "=====" rules, no
+  box-drawing characters (┌ ┐ └ ┘ │ ─ ├ ┤), and no diagrams built from stacked
+  "|" and "v". A fenced code block is ONLY for genuine source code — never put a
+  table, timeline, checklist, drafted document, or any narrative text inside one.
+  For a process or sequence use an arrow chain on one line (Step A → Step B →
+  Step C) or a numbered list; for anything tabular use a Markdown pipe table.
+- NEVER emit decorative branded headers in ANY language — e.g. "LEXIS LEGAL FINDING",
   "⚖️ LEXIS कायदेशीर शोध", or meta lines like "Case: ..." / "खटला: ..." /
   "Query Type: ..." / "प्रश्नाचा प्रकार: ..." — even if a template or preset shows
   one (including translated versions). Skip the banner and its meta line entirely

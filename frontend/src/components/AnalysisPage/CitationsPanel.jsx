@@ -115,6 +115,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { FileText, X, ExternalLink, Scale, ChevronDown, ChevronRight } from 'lucide-react';
 import { API_BASE_URL } from '../../config/apiConfig';
+import { isDeepResearchSource, normalizeDeepResearchSources } from '../../utils/deepResearchSources';
 
 function toPlainText(v) {
   if (v == null) return '';
@@ -596,6 +597,10 @@ function DimensionCitationsBody({ citations, handleDocCitationClick, reactKeyPre
 
 // ── Main panel ─────────────────────────────────────────────────────────────
 const CitationsPanel = ({ citations = [], dimensions = null, fileId, folderName, onClose, onCitationClick }) => {
+  const deepSources = useMemo(
+    () => (Array.isArray(citations) ? citations.filter(isDeepResearchSource) : []),
+    [citations],
+  );
   const handleDocCitationClick = (citation) => {
     if (onCitationClick) {
       onCitationClick(citation);
@@ -640,6 +645,46 @@ const CitationsPanel = ({ citations = [], dimensions = null, fileId, folderName,
       el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   };
+
+  if (deepSources.length > 0) {
+    return (
+      <div className="h-full flex flex-col bg-white border-l border-gray-200 shadow-xl rounded-l-2xl" style={{ width: '380px', maxWidth: '380px' }}>
+        <div className="px-4 py-4 bg-gray-50 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
+          <h2 className="text-lg font-semibold text-gray-900">Validated Sources</h2>
+          <button
+            type="button"
+            className="text-gray-400 hover:text-gray-500 p-1 rounded-md hover:bg-gray-100 transition-colors"
+            onClick={onClose}
+            aria-label="Close sources panel"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        {/* A plain list, not cards — Deep Research sources render as text everywhere. */}
+        <div className="flex-1 overflow-y-auto p-4" style={{ scrollbarWidth: 'thin' }}>
+          <ul className="flex flex-col gap-3 text-sm">
+            {normalizeDeepResearchSources(deepSources).map((source) => (
+              <li key={`${source.source_id}-${source.canonical_url}`} className="leading-snug">
+                <span className="font-semibold text-gray-900">[{source.source_id}]</span>{' '}
+                <a
+                  href={source.canonical_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  referrerPolicy="no-referrer"
+                  className="text-teal-700 underline underline-offset-2 hover:text-teal-900"
+                >
+                  {source.title}
+                </a>
+                <div className="mt-0.5 text-[11px] text-gray-500">
+                  {source.authority_label} · {source.domain}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full flex flex-col bg-white border-l border-gray-200 shadow-xl rounded-l-2xl" style={{ width: '380px', maxWidth: '380px' }}>

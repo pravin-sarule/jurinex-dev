@@ -140,24 +140,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("RESEARCH_MODEL_NAME"),
     )
     # ── Deep Research (bounded agentic loop) ─────────────────────────────────────────
-    # Deliberate cheap-gather / expensive-synthesize split so a full multi-round run fits
-    # inside the rupee budget: flash-lite grounds the plan + per-round searches (cheaper AND
-    # more capable than 2.5-flash at $0.25/$1.50 per 1M vs $0.30/$2.50), the synthesis model
-    # writes the final streamed report. All env-overridable.
+    # Search rounds use Google grounding. Final synthesis is evidence-closed: it receives
+    # validated findings and bounded case context, with live search disabled. The rupee limit
+    # is an application reservation/settlement cap, not a provider-account billing limit.
     #
-    # TESTED 2026-07-24: swapped synthesis to gemma-4-31b-it (minimal thinking) to cut the
-    # ~₹5/run synthesis cost to ₹0. Two live runs both came back with `synthesis(...)=0 new`
-    # citations (see the "[DeepResearch] citations · round-search=N · synthesis=N new"
-    # log line in agent.py) despite the google_search tool being attached and the call
-    # succeeding — Gemma accepts the tool param but does not appear to actually ground with
-    # it in this streaming call shape. Reverted synthesis back to gemini-3.6-flash; do not
-    # re-attempt a Gemma synthesis model without re-verifying this first.
-    #
-    # A third run (synthesis back on gemini-3.6-flash, everything else unchanged) came back
-    # `round-search=2 · synthesis=7 new · total=9`, all links resolved clean — so
-    # gemini-3.1-flash-lite's own grounding on the round-search step is fine; the two prior
-    # `round-search=0` readings were ordinary query/round variance, not a broken path. No
-    # action needed there.
+    # BUDGET SIZING (measured, gemini-3.1-flash-lite search + gemini-3.6-flash synthesis,
+    # USD->INR 98): one grounded round with 4 queries costs ~₹6.4; a plan or gap call ~₹0.3;
+    # synthesis costs ~₹20.6 at 16k output tokens and ~₹32.3 at 32k. The old ₹25 cap with a
+    # 60% synthesis reserve left only ₹10 for searching — ONE round — and a reserve too small
+    # to write a long report, which is why Deep answers came back thin. The defaults below
+    # fund ~6 rounds plus a full-length synthesis. Lower DEEP_RESEARCH_BUDGET_INR to spend less.
     deep_research_reasoning_model: str = Field(
         default="gemini-3.1-flash-lite",
         validation_alias=AliasChoices("DEEP_RESEARCH_REASONING_MODEL"),
@@ -170,8 +162,7 @@ class Settings(BaseSettings):
         default="gemini-3.6-flash",
         validation_alias=AliasChoices("DEEP_RESEARCH_SYNTHESIS_MODEL"),
     )
-    # Synthesis generation controls. gemini-3.6-flash is a thinking model with live
-    # Google Search grounding; low thinking + temperature 1.0 is the tuned default.
+    # Evidence-closed synthesis controls. Search is disabled for this provider stage.
     deep_research_synthesis_temperature: float = Field(
         default=1.0,
         validation_alias=AliasChoices("DEEP_RESEARCH_SYNTHESIS_TEMPERATURE"),
@@ -190,19 +181,66 @@ class Settings(BaseSettings):
     )
     # Hard ceiling on search rounds (each round = one grounded model call + a gap check).
     deep_research_max_rounds: int = Field(
-        default=4,
+        default=6,
         validation_alias=AliasChoices("DEEP_RESEARCH_MAX_ROUNDS"),
     )
-    # Hard rupee ceiling for the WHOLE run. The loop stops opening new rounds before this
-    # is hit; the final report is always still written.
+    # Application-enforced ceiling for one run. Provider invoices remain external.
     deep_research_budget_inr: float = Field(
-        default=25.0,
+        default=90.0,
+        ge=1.0,
+        le=150.0,
         validation_alias=AliasChoices("DEEP_RESEARCH_BUDGET_INR"),
     )
+    # Gemini 3 Google Search tool price in USD per executed unique query.
+    deep_research_search_usd_per_query: float = Field(
+        default=0.014,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("DEEP_RESEARCH_SEARCH_USD_PER_QUERY"),
+    )
     # Fraction of the budget held back so the synthesis call can always complete.
+    # 40% of ₹90 = ₹36 held back — enough for a 32k-output report (~₹32) while leaving
+    # ₹54 for search rounds. At the old 60% the reserve could not even fund 16k output.
     deep_research_synthesis_reserve_frac: float = Field(
-        default=0.6,
+        default=0.4,
         validation_alias=AliasChoices("DEEP_RESEARCH_SYNTHESIS_RESERVE_FRAC"),
+    )
+    # Deep-only operational bounds. They do not affect single-pass Research mode.
+    deep_research_max_sources: int = Field(
+        default=24,
+        validation_alias=AliasChoices("DEEP_RESEARCH_MAX_SOURCES"),
+    )
+    deep_research_source_concurrency: int = Field(
+        default=6,
+        validation_alias=AliasChoices("DEEP_RESEARCH_SOURCE_CONCURRENCY"),
+    )
+    deep_research_source_timeout_s: float = Field(
+        default=8.0,
+        validation_alias=AliasChoices("DEEP_RESEARCH_SOURCE_TIMEOUT_S"),
+    )
+    deep_research_source_max_bytes: int = Field(
+        default=750_000,
+        validation_alias=AliasChoices("DEEP_RESEARCH_SOURCE_MAX_BYTES"),
+    )
+    deep_research_source_max_redirects: int = Field(
+        default=4,
+        validation_alias=AliasChoices("DEEP_RESEARCH_SOURCE_MAX_REDIRECTS"),
+    )
+    deep_research_stage_timeout_s: float = Field(
+        default=120.0,
+        validation_alias=AliasChoices("DEEP_RESEARCH_STAGE_TIMEOUT_S"),
+    )
+    deep_research_run_timeout_s: float = Field(
+        default=420.0,
+        validation_alias=AliasChoices("DEEP_RESEARCH_RUN_TIMEOUT_S"),
+    )
+    deep_research_queue_timeout_s: float = Field(
+        default=5.0,
+        validation_alias=AliasChoices("DEEP_RESEARCH_QUEUE_TIMEOUT_S"),
+    )
+    deep_research_max_concurrent_runs: int = Field(
+        default=2,
+        validation_alias=AliasChoices("DEEP_RESEARCH_MAX_CONCURRENT_RUNS"),
     )
     # Dedicated key for Gemma models (gemma-*). Falls back to GEMINI_API_KEY when blank.
     gemma_api_key: str = Field(default="", validation_alias=AliasChoices("GEMMA_API_KEY"))
