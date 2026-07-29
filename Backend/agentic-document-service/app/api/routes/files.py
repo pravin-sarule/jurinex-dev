@@ -3003,6 +3003,11 @@ async def intelligent_chat_stream(
             PERMANENT_SYSTEM_PROMPT,
             format_instruction_for_query,
         )
+        from app.services.clarification import (
+            CLARIFICATION_PROTOCOL,
+            clarification_to_markdown,
+            parse_clarification,
+        )
 
         async def _run_blocking(func, *, timeout_s: float, timeout_message: str):
             try:
@@ -4257,6 +4262,7 @@ async def intelligent_chat_stream(
                             f"=== QUESTION ===\n{effective_query_text}\n\n"
                             "=== OUTPUT CONTRACT — OVERRIDES ALL PRIOR INSTRUCTIONS ===\n"
                             f"{orchestrated_format}\n\n"
+                            f"{CLARIFICATION_PROTOCOL}\n\n"
                             "=== ANSWER ==="
                         )
                     prompt = _truncate_prompt(prompt, max_chars=char_limit + 60_000, label="model_prompt")
@@ -5103,6 +5109,7 @@ async def intelligent_chat_stream(
                 return
             learning_payload = None
             learning_popup_public = None
+            clarification_payload = None
             if learning_mode:
                 learning_payload, json_ok, _tag_extra = parse_learning_model_output(raw_answer)
                 if not json_ok:
@@ -5222,6 +5229,14 @@ async def intelligent_chat_stream(
                 answer = raw_answer
                 if (chat_request.secret_id or "").strip():
                     answer = post_process_secret_prompt_response(answer)
+                # Ambiguous-question protocol: the model may have replied with a
+                # clarification JSON instead of an answer. Ship the structured form on
+                # `done.clarification` (interactive option card) and keep a readable
+                # markdown rendering as the stored answer so history/replay stay sane.
+                if not is_draft:
+                    clarification_payload = parse_clarification(answer)
+                    if clarification_payload:
+                        answer = clarification_to_markdown(clarification_payload)
                 if research_mode and answer:
                     # Research mode's "## Sources" links are Gemini grounding-redirect
                     # wrappers, not real publisher URLs — they can be dead/expired. Resolve
@@ -5460,6 +5475,7 @@ async def intelligent_chat_stream(
                 "learning_mode": learning_mode,
                 "learning_payload": learning_payload,
                 "learning_popup_question": learning_popup_public if learning_mode else None,
+                "clarification": clarification_payload,
                 "turn_count": learning_state.turn_count if learning_state else None,
                 "turn_threshold": LearningAgentController.TURN_THRESHOLD if learning_mode else None,
                 "citations": citations_payload,

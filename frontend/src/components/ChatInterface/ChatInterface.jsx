@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect, useLayoutEffect, useContext, useRef, useMemo, useCallback, startTransition } from "react";
+import { createPortal } from "react-dom";
 import { FileManagerContext } from "../../context/FileManagerContext";
 import documentApi from "../../services/documentApi";
 import { API_BASE_URL, DOCS_BASE_URL, CHAT_MODEL_BASE_URL, SECRET_PROMPTS_API_BASE, DOCUMENT_SERVICE_URL, getUserIdForDrafting } from "../../config/apiConfig";
@@ -30,6 +31,8 @@ import {
   Pencil,
   RotateCcw,
   AlertTriangle,
+  CornerDownRight,
+  MessageSquarePlus,
 } from "lucide-react";
 import { getCleanText, stripMarkdown, downloadAsPdf, downloadAsHtml, printResponse } from "../../utils/responseExportUtils";
 import ReactMarkdown from "react-markdown";
@@ -75,6 +78,7 @@ import { useTokenQuota } from "../../context/TokenQuotaContext";
 import ChatQuotaErrorModal from "../ChatQuotaErrorModal";
 import { buildSuggestedQuestions } from "../../utils/suggestedQuestions";
 import LearningChatBubble from "./LearningChatBubble";
+import ClarificationCard from "./ClarificationCard";
 import LearningDetailPanel from "./LearningDetailPanel";
 import AgentStepsPanel from "./AgentStepsPanel";
 import ChatSessionList from "./ChatSessionList";
@@ -972,6 +976,41 @@ function injectCitationMarkersIntoParagraphs(text, maxCitations) {
 
 
 
+// Helper: extract raw text from rehype node children (used for option detection).
+// Module-scoped (pure) so the memoized markdown components never see a new identity.
+const extractNodeText = (nodeChildren = []) => {
+  return nodeChildren.map(n => {
+    if (n.type === 'text') return n.value || '';
+    if (n.children) return extractNodeText(n.children);
+    return '';
+  }).join('');
+};
+
+// True while a streamed reply looks like the backend's clarification-protocol JSON —
+// suppresses the raw-JSON flicker; the interactive card arrives on `done.clarification`.
+const looksLikeClarificationStream = (text) => {
+  const t = String(text || '').trimStart().replace(/^```(?:json)?\s*/i, '');
+  if (!t.startsWith('{')) return false;
+  return t.length < 400 || /"type"\s*:\s*"clarification"/.test(t.slice(0, 400));
+};
+
+// Legal-draft line alignment (Indian court/legal format). Content-driven so it works
+// for live AND reloaded-from-history drafts: centers the ALL-CAPS document title /
+// "IN THE COURT OF" / suit-no / "IN THE MATTER OF" / VERSUS lines, right-aligns
+// trailing party-role labels ("...Plaintiff", "…LANDLORD/LESSOR"). Returns null for
+// ordinary text, so normal chat paragraphs are unaffected.
+const _draftLineAlign = (t0) => {
+  const s = String(t0 || '').replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
+  if (!s || s.length > 160) return null;
+  if (/(\.{2,}|…)\s*["'“”]?(the\s+)?(first|second|third|1st|2nd|3rd)?\s*(plaintiff|defendant|petitioner|respondent|appellant|applicant|complainant|landlord|tenant|lessor|lessee|licensor|licensee|vendor|purchaser|party|witnesse?s?)(\s*\/\s*[a-z]+)?["'“”]?\.?$/i.test(s)) return 'right';
+  if (/^(versus|vs\.?|v\/s\.?)$/i.test(s)) return 'center';
+  if (/^in the (court|high court|hon.?ble|matter of)\b/i.test(s)) return 'center';
+  if (s.length < 90 && /\b(suit|petition|application|appeal|complaint|case|criminal|civil|writ|misc)\s*(no\.?|number)\b/i.test(s)) return 'center';
+  if (/^[A-Z][A-Z0-9 ,.'&()\/-]*\b(AGREEMENT|DEED|PLAINT|PETITION|AFFIDAVIT|WILL|TESTAMENT|MEMORANDUM|SUIT|APPLICATION|NOTICE|CONTRACT|VAKALATNAMA|INDENTURE|LEASE|CONVEYANCE|BOND|UNDERTAKING)\b/.test(s.split(/\(/)[0].trim())) return 'center';
+  if (/^\(\s*(to be (executed|stamped|typed)|on (a )?non-judicial|stamp paper)/i.test(s)) return 'center';
+  return null;
+};
+
 const ChatInterface = () => {
   const {
     selectedFolder,
@@ -1043,6 +1082,14 @@ const ChatInterface = () => {
   const [chatHistorySidebarOpen, setChatHistorySidebarOpen] = useState(true);
   // Tracks the option key the user last picked (resets when a new pending question starts)
   const [pickedOption, setPickedOption] = useState(null);
+  // Ask-about-selection: excerpts the user highlighted inside an AI response, queued as quote
+  // chips above the input. They ride the next typed question, then clear on success.
+  const [quotedSnippets, setQuotedSnippets] = useState([]); // [{ id, text }]
+  const [askSelectionPopup, setAskSelectionPopup] = useState(null); // { x, y, below, text } | null
+  // Clarifying-question cards: chat.id -> the option label the user picked (locks that card).
+  const [clarificationPicks, setClarificationPicks] = useState({});
+  const quoteIdRef = useRef(0);
+  const chatInputFieldRef = useRef(null);
 
   const handleNewMessageRef = useRef(null);
   const chatBodyRefs = useRef({});
@@ -2502,8 +2549,8 @@ const ChatInterface = () => {
       setSelectedSecretId(null);
       setSelectedLlmName(null);
     } else {
-      const questionText = String(forcedQuestion ?? chatInput).trim();
-      if (!questionText) return;
+      const typedQuestion = String(forcedQuestion ?? chatInput).trim();
+      if (!typedQuestion) return;
 
       // Draft-from-template → open the dedicated Draft Studio popup (section-by-section
       // generation + a Create button that merges into the final court-styled draft),
@@ -2514,7 +2561,7 @@ const ChatInterface = () => {
           : (selectedFolder?.originalname || selectedFolder?.name || null);
         if (dfName) {
           setDraftStudio({
-            question: questionText,
+            question: typedQuestion,
             template: draftTemplate,
             model: draftModel,
             structureModel: structureModel,
@@ -2525,6 +2572,22 @@ const ChatInterface = () => {
           setChatInput('');
           return;
         }
+      }
+
+      // Ask-about-selection: quoted excerpts ride only a question the user typed here —
+      // never a retry or forced prompt (those pass forcedQuestion/displayLabel).
+      const activeQuotes = (forcedQuestion == null && displayLabel == null) ? quotedSnippets : [];
+      let questionText = typedQuestion;
+      if (activeQuotes.length > 0) {
+        const quoteBlock = activeQuotes
+          .map((q, i) => `[Excerpt ${i + 1}] "${q.text}"`)
+          .join('\n\n');
+        questionText = `I have highlighted the following excerpt(s) from your earlier response in this conversation:\n\n${quoteBlock}\n\nMy question about the highlighted excerpt(s): ${typedQuestion}`;
+        // The stored label keeps the user bubble readable: quote lines + the typed question.
+        displayLabel = [
+          ...activeQuotes.map((q) => `↳ "${q.text.length > 180 ? `${q.text.slice(0, 180)}…` : q.text}"`),
+          typedQuestion,
+        ].join('\n');
       }
 
       setAnimatedResponseContent('');
@@ -2642,7 +2705,7 @@ const ChatInterface = () => {
               console.warn('[ChatInterface] Folder chat stream stopped after error:', streamErrorMessage);
               setLoadingChat(false);
               setCurrentStatus(null);
-              setChatInput(questionText);
+              setChatInput(typedQuestion);
               break;
             }
             setLoadingChat(false);
@@ -2678,6 +2741,7 @@ const ChatInterface = () => {
               isSecretPrompt: false,
               used_chunk_ids: usedChunkIds,
               citations: finalMetadata?.citations || null,
+              clarification: finalMetadata?.clarification || null,
               learning_mode: !!learningModeActive,
               research_mode: researchModeActive,
               deep_research: deepResearchForRequest,
@@ -2712,6 +2776,7 @@ const ChatInterface = () => {
               }
             }
             setChatInput("");
+            setQuotedSnippets([]);
             break;
           }
 
@@ -2733,7 +2798,7 @@ const ChatInterface = () => {
                 console.warn('[ChatInterface] Folder chat stream received DONE after error:', streamErrorMessage);
                 setLoadingChat(false);
                 setCurrentStatus(null);
-                setChatInput(questionText);
+                setChatInput(typedQuestion);
                 return;
               }
               setLoadingChat(false);
@@ -2770,6 +2835,7 @@ const ChatInterface = () => {
                 isSecretPrompt: false,
                 used_chunk_ids: usedChunkIds,
                 citations: finalMetadata?.citations || null,
+                clarification: finalMetadata?.clarification || null,
                 chunk_details: finalMetadata?.chunk_details || null,
                 learning_mode: !!learningModeActive,
                 research_mode: researchModeActive,
@@ -2797,6 +2863,7 @@ const ChatInterface = () => {
                 setIsGenerating(false);
               }
               setChatInput("");
+              setQuotedSnippets([]);
               return;
             }
 
@@ -2916,6 +2983,7 @@ const ChatInterface = () => {
                   isSecretPrompt: false,
                   used_chunk_ids: usedChunkIds,
                   citations: finalMetadata?.citations || null,
+                  clarification: finalMetadata?.clarification || null,
                   chunk_details: finalMetadata?.chunk_details || null,
                   learning_mode: !!learningModeActive,
                   research_mode: researchModeActive,
@@ -3013,8 +3081,10 @@ const ChatInterface = () => {
     setSelectedSecretId(null);
     setSelectedLlmName(null);
     setActiveDropdown("Custom Query");
-    await handleNewMessage(String(optionText));
-  }, [loadingChat, isGenerating, handleNewMessage]);
+    // Through the ref so this callback stays identity-stable across renders —
+    // aiMarkdownComponents (and the memoized markdown DOM) depends on it.
+    await handleNewMessageRef.current?.(String(optionText));
+  }, [loadingChat, isGenerating]);
 
   const openPanel = useCallback((type, data) => {
     setPanelType(type);
@@ -3315,6 +3385,105 @@ const ChatInterface = () => {
     }
   };
 
+  // Ask-about-selection: when the user finishes selecting text inside an AI response,
+  // offer a floating "Ask anything" button next to the selection.
+  const handleThreadMouseUp = () => {
+    // Defer one tick so the browser finalises the selection before we read it.
+    window.setTimeout(() => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+        setAskSelectionPopup(null);
+        return;
+      }
+      const text = sel.toString().replace(/\s+/g, ' ').trim();
+      if (!text) {
+        setAskSelectionPopup(null);
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      const node = range.commonAncestorContainer;
+      const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+      // Only AI response bodies qualify — FormattedAssistantContent renders exactly these containers.
+      if (!el || !el.closest('.formatted-assistant-markdown, .formatted-assistant-html')) {
+        setAskSelectionPopup(null);
+        return;
+      }
+      const rect = range.getBoundingClientRect();
+      if (!rect || (rect.width === 0 && rect.height === 0)) {
+        setAskSelectionPopup(null);
+        return;
+      }
+      const below = rect.top < 96; // selection touches the top edge → show the button underneath
+      setAskSelectionPopup({
+        x: Math.min(Math.max(rect.left + rect.width / 2, 90), window.innerWidth - 90),
+        y: below ? rect.bottom + 8 : rect.top - 8,
+        below,
+        text,
+      });
+    }, 0);
+  };
+
+  const addQuotedSnippet = (rawText) => {
+    const text = String(rawText || '').trim();
+    if (!text) return;
+    const capped = text.length > 1500 ? `${text.slice(0, 1500)}…` : text;
+    setQuotedSnippets((prev) =>
+      prev.some((q) => q.text === capped) ? prev : [...prev, { id: ++quoteIdRef.current, text: capped }]
+    );
+    setAskSelectionPopup(null);
+    try { window.getSelection()?.removeAllRanges(); } catch { /* ignore */ }
+    chatInputFieldRef.current?.focus();
+  };
+
+  const removeQuotedSnippet = (id) => {
+    setQuotedSnippets((prev) => prev.filter((q) => q.id !== id));
+  };
+
+  // Clarifying-question card: the picked option is sent as the answer to the model's
+  // question. The composed text carries the question so the model has context even if
+  // history is trimmed; the bubble shows only the option label.
+  const handleClarificationOptionSelect = (chat, opt) => {
+    if (loadingChat || isGenerating || !chat?.clarification || !opt?.label) return;
+    setClarificationPicks((prev) => ({ ...prev, [chat.id]: opt.label }));
+    handleNewMessage(
+      `Answering your clarifying question ("${chat.clarification.question}"): ${opt.label}` +
+      `${opt.description ? ` — ${opt.description}` : ''}. Please answer my original question accordingly.`,
+      opt.label,
+    ).catch(console.error);
+  };
+
+  // Document-level mouseup: selections often end outside the thread container, so a
+  // container onMouseUp would miss them. The handler filters to AI response bodies itself.
+  useEffect(() => {
+    const onMouseUp = (e) => {
+      if (e.target?.closest?.('[data-ask-selection-popup]')) return;
+      handleThreadMouseUp();
+    };
+    document.addEventListener('mouseup', onMouseUp);
+    return () => document.removeEventListener('mouseup', onMouseUp);
+    // handleThreadMouseUp only touches setState + window.getSelection, so the
+    // first-render closure is safe to keep for the component's lifetime.
+  }, []);
+
+  // Dismiss the "Ask anything" popup on outside clicks, thread scrolling or resize.
+  useEffect(() => {
+    if (!askSelectionPopup) return undefined;
+    const onMouseDown = (e) => {
+      if (e.target?.closest?.('[data-ask-selection-popup]')) return;
+      setAskSelectionPopup(null);
+    };
+    const onScrollOrResize = () => setAskSelectionPopup(null);
+    document.addEventListener('mousedown', onMouseDown);
+    const scroller = responseRef.current;
+    scroller?.addEventListener('scroll', onScrollOrResize, { passive: true });
+    window.addEventListener('resize', onScrollOrResize);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      scroller?.removeEventListener('scroll', onScrollOrResize);
+      window.removeEventListener('resize', onScrollOrResize);
+    };
+  }, [askSelectionPopup]);
+
   const handleChatInputChange = (e) => {
     setChatInput(e.target.value);
     if (e.target.value && isSecretPromptSelected) {
@@ -3353,37 +3522,14 @@ const ChatInterface = () => {
   const getSessionIdFromSummary = (session) =>
     session?.sessionId || session?.session_id || session?.id || null;
 
-  // Helper: extract raw text from rehype node children (used for option detection)
-  const extractNodeText = (nodeChildren = []) => {
-    return nodeChildren.map(n => {
-      if (n.type === 'text') return n.value || '';
-      if (n.children) return extractNodeText(n.children);
-      return '';
-    }).join('');
-  };
-
-  // Legal-draft line alignment (Indian court/legal format). Content-driven so it works
-  // for live AND reloaded-from-history drafts: centers the ALL-CAPS document title /
-  // "IN THE COURT OF" / suit-no / "IN THE MATTER OF" / VERSUS lines, right-aligns
-  // trailing party-role labels ("...Plaintiff", "…LANDLORD/LESSOR"). Returns null for
-  // ordinary text, so normal chat paragraphs are unaffected.
-  const _draftLineAlign = (t0) => {
-    const s = String(t0 || '').replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
-    if (!s || s.length > 160) return null;
-    if (/(\.{2,}|…)\s*["'“”]?(the\s+)?(first|second|third|1st|2nd|3rd)?\s*(plaintiff|defendant|petitioner|respondent|appellant|applicant|complainant|landlord|tenant|lessor|lessee|licensor|licensee|vendor|purchaser|party|witnesse?s?)(\s*\/\s*[a-z]+)?["'“”]?\.?$/i.test(s)) return 'right';
-    if (/^(versus|vs\.?|v\/s\.?)$/i.test(s)) return 'center';
-    if (/^in the (court|high court|hon.?ble|matter of)\b/i.test(s)) return 'center';
-    if (s.length < 90 && /\b(suit|petition|application|appeal|complaint|case|criminal|civil|writ|misc)\s*(no\.?|number)\b/i.test(s)) return 'center';
-    if (/^[A-Z][A-Z0-9 ,.'&()\/-]*\b(AGREEMENT|DEED|PLAINT|PETITION|AFFIDAVIT|WILL|TESTAMENT|MEMORANDUM|SUIT|APPLICATION|NOTICE|CONTRACT|VAKALATNAMA|INDENTURE|LEASE|CONVEYANCE|BOND|UNDERTAKING)\b/.test(s.split(/\(/)[0].trim())) return 'center';
-    if (/^\(\s*(to be (executed|stamped|typed)|on (a )?non-judicial|stamp paper)/i.test(s)) return 'center';
-    return null;
-  };
-
   // Shared ReactMarkdown component overrides ? clean serif style matching the site theme.
   // ? Option paragraphs (A) ? D)) ? interactive clickable choice cards
   // ? Bold text ? site teal, no chip
   // ? Questions (ending with ?) ? bold body text (no callout box)
-  const aiMarkdownComponents = {
+  // useMemo is load-bearing: FormattedAssistantContent is React.memo'd on this object's
+  // identity — a fresh object every render would remount the markdown DOM on any state
+  // change (killing text selections and re-parsing every historical message).
+  const aiMarkdownComponents = useMemo(() => ({
     p: ({ node, children, ...props }) => {
       const rawText = extractNodeText(node?.children || []);
 
@@ -3551,7 +3697,7 @@ const ChatInterface = () => {
       ) : (
         <code {...props}>{children}</code>
       ),
-  };
+  }), [pickedOption, loadingChat, isGenerating, handleLearningOptionSelect]);
 
   const normalizeSessionSummary = (session) => {
     const messages = Array.isArray(session?.messages)
@@ -3997,7 +4143,8 @@ const ChatInterface = () => {
                         {/* User question ? same card layout as AI response */}
                         <div className="chat-thread-card chat-thread-card--user">
                           <div className="chat-thread-card__label">You</div>
-                          <div className="chat-thread-card__body">
+                          {/* pre-wrap keeps ask-about-selection quote lines (↳ "…") on their own lines */}
+                          <div className="chat-thread-card__body" style={{ whiteSpace: 'pre-wrap' }}>
                             {(chat.used_secret_prompt || chat.isSecretPrompt) && (chat.prompt_label || chat.promptLabel)
                               ? `Analysis: ${chat.prompt_label || chat.promptLabel}`
                               // A stored label means the question body is a prompt —
@@ -4043,12 +4190,21 @@ const ChatInterface = () => {
                                     className="chat-thread-card__body"
                                     ref={el => { if (el) chatBodyRefs.current[chat.id] = el; else delete chatBodyRefs.current[chat.id]; }}
                                   >
-                                    <FormattedAssistantContent
-                                      raw={chat.response}
-                                      markdownComponents={aiMarkdownComponents}
-                                      forceSafeMarkdown={isDeepResearchMessage(chat)}
-                                      citations={chat.citations}
-                                    />
+                                    {chat.clarification ? (
+                                      <ClarificationCard
+                                        data={chat.clarification}
+                                        locked={idx !== currentChatHistory.length - 1 || loadingChat || isGenerating}
+                                        pickedLabel={clarificationPicks[chat.id] || null}
+                                        onSelect={(opt) => handleClarificationOptionSelect(chat, opt)}
+                                      />
+                                    ) : (
+                                      <FormattedAssistantContent
+                                        raw={chat.response}
+                                        markdownComponents={aiMarkdownComponents}
+                                        forceSafeMarkdown={isDeepResearchMessage(chat)}
+                                        citations={chat.citations}
+                                      />
+                                    )}
                                   </div>
                                   <div className="chat-thread-card__footer">
                                     {chat.draftDownloadUrl && (
@@ -4159,7 +4315,7 @@ const ChatInterface = () => {
                     <div className="flex flex-col gap-3">
                       <div className="chat-thread-card chat-thread-card--user">
                         <div className="chat-thread-card__label">You</div>
-                        <div className="chat-thread-card__body">{pendingQuestion}</div>
+                        <div className="chat-thread-card__body" style={{ whiteSpace: 'pre-wrap' }}>{pendingQuestion}</div>
                       </div>
                       {activeStreamIsDeepRef.current && currentStatus?.phase && (
                         <div className="rounded-xl border border-teal-100 bg-teal-50/60 px-4 py-3 text-xs text-teal-900">
@@ -4223,12 +4379,16 @@ const ChatInterface = () => {
                           </div>
                         ) : (
                           <div style={{ maxWidth: '100%', margin: '0 auto', width: '100%', fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
-                            {animatedResponseContent ? (
+                            {animatedResponseContent && !looksLikeClarificationStream(animatedResponseContent) ? (
                               <FormattedAssistantContent raw={animatedResponseContent} markdownComponents={aiMarkdownComponents} forceSafeMarkdown={activeStreamIsDeepRef.current} />
                             ) : (
                               <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
                                 <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
-                                <span style={{ whiteSpace: 'pre-wrap' }}>{(thinkingContent && thinkingContent.trim().split('\n').filter(Boolean).slice(-1)[0]) || 'Thinking...'}</span>
+                                <span style={{ whiteSpace: 'pre-wrap' }}>
+                                  {animatedResponseContent
+                                    ? 'Preparing a quick question for you...'
+                                    : (thinkingContent && thinkingContent.trim().split('\n').filter(Boolean).slice(-1)[0]) || 'Thinking...'}
+                                </span>
                               </div>
                             )}
                             {isGenerating && <span className="inline-block w-0.5 h-4 bg-gray-500 ml-1 animate-pulse" />}
@@ -4242,6 +4402,33 @@ const ChatInterface = () => {
 
             </div>
           </div>
+
+          {/* Ask-about-selection: floating "Ask anything" button next to the highlighted text.
+              Portaled to <body> so transformed/overflow ancestors can never clip or shift it. */}
+          {askSelectionPopup && createPortal(
+            <div
+              data-ask-selection-popup
+              style={{
+                position: 'fixed',
+                left: askSelectionPopup.x,
+                top: askSelectionPopup.y,
+                transform: askSelectionPopup.below ? 'translate(-50%, 0)' : 'translate(-50%, -100%)',
+                zIndex: 9999,
+              }}
+            >
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => addQuotedSnippet(askSelectionPopup.text)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-200 rounded-full shadow-lg text-xs font-semibold text-gray-700 hover:text-[#21C1B6] hover:border-[#21C1B6] transition-colors cursor-pointer"
+                title="Add this excerpt to your next question"
+              >
+                <MessageSquarePlus className="h-3.5 w-3.5 text-[#21C1B6]" />
+                Ask anything
+              </button>
+            </div>,
+            document.body
+          )}
 
           {/* Input Area */}
           <div className="flex-shrink-0 px-3 py-3" style={{ background: '#ffffff' }}>
@@ -4267,6 +4454,31 @@ const ChatInterface = () => {
               onDeleteCustomPrompt={handleDeleteCustomPrompt}
               onDeleteGroup={handleDeleteCustomGroup}
             />
+            {/* Ask-about-selection: queued excerpt chips — sent along with the next question */}
+            {quotedSnippets.length > 0 && (
+              <div className="flex flex-col gap-1.5 mb-2">
+                {quotedSnippets.map((q) => (
+                  <div key={q.id} className="flex items-start gap-2 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2">
+                    <CornerDownRight className="h-3.5 w-3.5 text-gray-400 flex-shrink-0 mt-0.5" />
+                    <span
+                      className="flex-grow text-xs text-gray-600 leading-snug"
+                      style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
+                      title={q.text}
+                    >
+                      “{q.text}”
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removeQuotedSnippet(q.id)}
+                      className="flex-shrink-0 p-0.5 text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"
+                      title="Remove excerpt"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -4466,9 +4678,16 @@ const ChatInterface = () => {
 
               <input
                 type="text"
+                ref={chatInputFieldRef}
                 value={chatInput}
                 onChange={handleChatInputChange}
-                placeholder={isSecretPromptSelected ? `Analysis: ${activeDropdown}` : "How can I help you today?"}
+                placeholder={
+                  isSecretPromptSelected
+                    ? `Analysis: ${activeDropdown}`
+                    : quotedSnippets.length > 0
+                      ? `Ask about the selected excerpt${quotedSnippets.length > 1 ? 's' : ''}…`
+                      : "How can I help you today?"
+                }
                 className="flex-grow bg-transparent border-none outline-none text-gray-800 text-sm py-1 min-w-0 placeholder-gray-400"
                 disabled={loadingChat || isRecording || isTranscribing}
               />

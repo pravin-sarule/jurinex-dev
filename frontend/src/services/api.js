@@ -198,6 +198,30 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
  return this.request("/api/auth/profile");
  }
 
+  // Device sessions — Settings → "Where you're logged in"
+  async getSessions() {
+    return this.request("/api/auth/sessions");
+  }
+
+  async revokeSession(sessionId) {
+    return this.request(`/api/auth/sessions/${sessionId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async revokeSessions(sessionIds) {
+    return this.request("/api/auth/sessions/revoke", {
+      method: "POST",
+      body: JSON.stringify({ session_ids: sessionIds }),
+    });
+  }
+
+  async revokeAllOtherSessions() {
+    return this.request("/api/auth/sessions/revoke-all", {
+      method: "POST",
+    });
+  }
+
   async verifyOtp(email, otp, newPassword = null) {
     const body = { email, otp };
     if (newPassword) {

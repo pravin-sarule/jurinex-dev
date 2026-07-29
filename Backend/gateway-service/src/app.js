@@ -136,6 +136,17 @@ app.use(["/api/auth", "/api/rbac"], express.json({ limit: '10mb' }), async (req,
     if (req.headers['x-user-id']) {
       headers['x-user-id'] = req.headers['x-user-id'];
     }
+    // Device-session tracking needs the real client, not the gateway: forward the
+    // browser's User-Agent and append our view of the client IP to X-Forwarded-For.
+    if (req.headers['user-agent']) {
+      headers['User-Agent'] = req.headers['user-agent'];
+    }
+    const clientIp = req.headers['x-forwarded-for']
+      ? `${req.headers['x-forwarded-for']}, ${req.ip}`
+      : (req.ip || req.socket?.remoteAddress || '');
+    if (clientIp) {
+      headers['X-Forwarded-For'] = clientIp;
+    }
 
     const axiosConfig = { method, url: authUrl, headers };
 

@@ -11,6 +11,9 @@ const internalRoutes = require("./src/routes/internalRoutes");
 const pool = require("./src/config/db.js");
 
 const app = express();
+// Behind the gateway / Cloud Run, the client IP arrives via X-Forwarded-For —
+// trust it so req.ip resolves to the real device address for session tracking.
+app.set('trust proxy', true);
 const PORT = process.env.PORT || 5001;
 
 const allowedOrigins = (
@@ -53,6 +56,7 @@ const rbacRoutes = require("./src/Rbac_service/rbacRoutes");
 const { initializeRbacSchema } = require("./src/Rbac_service/rbacDb");
 const { initializeUserActivitySchema } = require("./src/utils/userActivityDb");
 const { ensureFirmActiveColumn } = require("./src/utils/ensureFirmActiveColumn");
+const { initializeDeviceSessionSchema } = require("./src/utils/deviceSessionDb");
 
 app.use("/api/auth", authRoutes);
 app.use("/api/auth/internal", internalRoutes); // Internal service-to-service routes
@@ -72,4 +76,5 @@ app.listen(PORT, async () => {
   await ensureFirmActiveColumn();
   await initializeUserActivitySchema();
   await initializeRbacSchema();
+  await initializeDeviceSessionSchema();
 });

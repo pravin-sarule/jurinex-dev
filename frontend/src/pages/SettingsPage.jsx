@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { User, Mail, Phone, MapPin, Calendar, Shield, Bell, Palette, Globe, Download, Trash2, LogOut, ChevronRight, Check, Lock, Eye, EyeOff, CreditCard } from 'lucide-react';
+import { User, Mail, Phone, MapPin, Calendar, Shield, Bell, Palette, Globe, Download, Trash2, LogOut, ChevronRight, Check, Lock, Eye, EyeOff, CreditCard, Monitor, Smartphone, Tablet, RefreshCw, MoreVertical } from 'lucide-react';
 import { useAuth } from '../context';
 import { useTheme } from '../context/ThemeContext.jsx';
 import api from '../services/api';
@@ -97,6 +97,269 @@ const SettingSection = React.memo(({ icon: Icon, title, children, className = ""
 ));
 
 SettingSection.displayName = 'SettingSection';
+
+// "Jul 29, 2026, 10:57 AM" — matches the Active-sessions table look.
+const formatSessionTime = (value) => {
+ if (!value) return '—';
+ try {
+ return new Intl.DateTimeFormat('en-US', {
+ month: 'short', day: 'numeric', year: 'numeric',
+ hour: 'numeric', minute: '2-digit',
+ }).format(new Date(value));
+ } catch {
+ return '—';
+ }
+};
+
+// "Chrome (Windows)" — browser without version, OS family only.
+const deviceLabel = (session) => {
+ const browser = String(session.browser || 'Unknown browser').replace(/\s+\d+$/, '');
+ const os = String(session.os || 'Unknown').split(' ')[0];
+ return `${browser} (${os})`;
+};
+
+const DeviceTypeIcon = ({ type }) => {
+ if (type === 'mobile') return <Smartphone className="w-4 h-4 text-gray-400" />;
+ if (type === 'tablet') return <Tablet className="w-4 h-4 text-gray-400" />;
+ return <Monitor className="w-4 h-4 text-gray-400" />;
+};
+
+// "Active sessions" — device-wise login table (Device | Location | IP | Created |
+// Updated), max 3 concurrent devices. Sign out other devices via the row menu.
+const LoginDevicesSection = () => {
+ const [sessions, setSessions] = useState([]);
+ const [maxDevices, setMaxDevices] = useState(3);
+ const [loading, setLoading] = useState(true);
+ const [error, setError] = useState(null);
+ const [revokingId, setRevokingId] = useState(null);
+ const [openMenuId, setOpenMenuId] = useState(null);
+ const [selectedIds, setSelectedIds] = useState([]);
+ const [bulkBusy, setBulkBusy] = useState(false);
+
+ const loadSessions = useCallback(async () => {
+ setLoading(true);
+ setError(null);
+ try {
+ const data = await api.getSessions();
+ setSessions(Array.isArray(data?.sessions) ? data.sessions : []);
+ if (data?.max_devices) setMaxDevices(data.max_devices);
+ } catch (err) {
+ console.error('[Settings] Failed to load login sessions:', err);
+ setError('Could not load your login sessions. Please try again.');
+ } finally {
+ setLoading(false);
+ }
+ }, []);
+
+ useEffect(() => {
+ loadSessions();
+ }, [loadSessions]);
+
+ useEffect(() => {
+ if (openMenuId == null) return undefined;
+ const close = (e) => {
+ if (!e.target.closest?.('[data-session-menu]')) setOpenMenuId(null);
+ };
+ document.addEventListener('mousedown', close);
+ return () => document.removeEventListener('mousedown', close);
+ }, [openMenuId]);
+
+ const handleRevoke = async (session) => {
+ if (revokingId) return;
+ setRevokingId(session.id);
+ try {
+ await api.revokeSession(session.id);
+ toast.success('Device signed out');
+ setSessions((prev) => prev.filter((s) => s.id !== session.id));
+ setSelectedIds((prev) => prev.filter((id) => id !== session.id));
+ } catch (err) {
+ console.error('[Settings] Failed to sign out device:', err);
+ toast.error('Could not sign out that device');
+ } finally {
+ setRevokingId(null);
+ setOpenMenuId(null);
+ }
+ };
+
+ // Only non-current stored rows are selectable (the virtual current entry has id null).
+ const otherSessions = sessions.filter((s) => !s.is_current && s.id != null);
+ const allSelected = otherSessions.length > 0 && selectedIds.length === otherSessions.length;
+
+ const toggleSelect = (id) => {
+ setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+ };
+
+ const toggleSelectAll = () => {
+ setSelectedIds(allSelected ? [] : otherSessions.map((s) => s.id));
+ };
+
+ const handleRevokeSelected = async () => {
+ if (selectedIds.length === 0 || bulkBusy) return;
+ setBulkBusy(true);
+ try {
+ await api.revokeSessions(selectedIds);
+ toast.success(`Signed out ${selectedIds.length} device${selectedIds.length > 1 ? 's' : ''}`);
+ setSelectedIds([]);
+ await loadSessions();
+ } catch (err) {
+ console.error('[Settings] Failed to sign out selected devices:', err);
+ toast.error('Could not sign out the selected devices');
+ } finally {
+ setBulkBusy(false);
+ }
+ };
+
+ const handleRevokeAll = async () => {
+ if (bulkBusy) return;
+ setBulkBusy(true);
+ try {
+ await api.revokeAllOtherSessions();
+ toast.success('Signed out all other devices');
+ setSelectedIds([]);
+ await loadSessions();
+ } catch (err) {
+ console.error('[Settings] Failed to sign out all devices:', err);
+ toast.error('Could not sign out all devices');
+ } finally {
+ setBulkBusy(false);
+ }
+ };
+
+ return (
+ <SettingSection icon={Monitor} title="Active sessions">
+ <div className="flex items-start justify-between mb-3 gap-4">
+ <p className="text-sm text-gray-500">
+ You can be signed in on up to <span className="font-semibold text-gray-700">{maxDevices} devices</span> at
+ a time. Signing in on another device automatically signs out the oldest session.
+ </p>
+ <button
+ onClick={loadSessions}
+ disabled={loading}
+ title="Refresh"
+ className="flex-shrink-0 p-2 text-gray-400 hover:text-gray-600 rounded-md transition-colors disabled:opacity-50"
+ >
+ <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+ </button>
+ </div>
+
+ {loading ? (
+ <div className="flex items-center justify-center py-8">
+ <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900" />
+ </div>
+ ) : error ? (
+ <div className="text-sm text-red-500 py-4">{error}</div>
+ ) : sessions.length === 0 ? (
+ <div className="text-sm text-gray-500 py-4">
+ No active sessions found. Sessions appear here after your next login.
+ </div>
+ ) : (
+ <>
+ {otherSessions.length > 0 && (
+ <div className="flex items-center gap-2 mb-3 flex-wrap">
+ <button
+ onClick={handleRevokeSelected}
+ disabled={selectedIds.length === 0 || bulkBusy}
+ className="px-3 py-1.5 text-xs font-medium text-white rounded-md transition-colors duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
+ style={{ backgroundColor: '#21C1B6' }}
+ onMouseEnter={(e) => !e.currentTarget.disabled && (e.currentTarget.style.backgroundColor = '#1AA49B')}
+ onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#21C1B6')}
+ >
+ {bulkBusy ? 'Signing out...' : `Sign out selected${selectedIds.length ? ` (${selectedIds.length})` : ''}`}
+ </button>
+ <button
+ onClick={handleRevokeAll}
+ disabled={bulkBusy}
+ className="px-3 py-1.5 text-xs font-medium text-red-600 border border-red-200 rounded-md hover:bg-red-50 transition-colors duration-200 disabled:opacity-40 disabled:cursor-not-allowed"
+ >
+ Sign out all other devices
+ </button>
+ </div>
+ )}
+ <div className="overflow-x-auto">
+ <table className="w-full text-left">
+ <thead>
+ <tr className="border-b border-gray-200">
+ <th className="py-2 pr-3 w-8">
+ {otherSessions.length > 0 && (
+ <input
+ type="checkbox"
+ checked={allSelected}
+ onChange={toggleSelectAll}
+ className="w-4 h-4 rounded border-gray-300 accent-[#21C1B6] cursor-pointer"
+ title="Select all other devices"
+ />
+ )}
+ </th>
+ <th className="py-2 pr-4 text-xs font-medium text-gray-500">Device</th>
+ <th className="py-2 pr-4 text-xs font-medium text-gray-500">Location</th>
+ <th className="py-2 pr-4 text-xs font-medium text-gray-500">IP address</th>
+ <th className="py-2 pr-4 text-xs font-medium text-gray-500">Created</th>
+ <th className="py-2 pr-4 text-xs font-medium text-gray-500">Updated</th>
+ <th className="py-2 w-8" />
+ </tr>
+ </thead>
+ <tbody>
+ {sessions.map((session) => (
+ <tr key={session.id ?? 'current'} className="border-b border-gray-100 hover:bg-gray-50">
+ <td className="py-3 pr-3">
+ {!session.is_current && session.id != null && (
+ <input
+ type="checkbox"
+ checked={selectedIds.includes(session.id)}
+ onChange={() => toggleSelect(session.id)}
+ className="w-4 h-4 rounded border-gray-300 accent-[#21C1B6] cursor-pointer"
+ />
+ )}
+ </td>
+ <td className="py-3 pr-4">
+ <div className="flex items-center gap-2 whitespace-nowrap">
+ <DeviceTypeIcon type={session.device_type} />
+ <span className="text-sm text-gray-900">{deviceLabel(session)}</span>
+ {session.is_current && (
+ <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-[#E8F7F5] text-[#0F766E]">
+ Current
+ </span>
+ )}
+ </div>
+ </td>
+ <td className="py-3 pr-4 text-sm text-gray-600">{session.location || 'Unknown'}</td>
+ <td className="py-3 pr-4 text-sm text-gray-600 whitespace-nowrap">{session.ip_address || 'Unknown'}</td>
+ <td className="py-3 pr-4 text-sm text-gray-600 whitespace-nowrap">{formatSessionTime(session.login_time)}</td>
+ <td className="py-3 pr-4 text-sm text-gray-600 whitespace-nowrap">{formatSessionTime(session.last_active_at)}</td>
+ <td className="py-3 relative">
+ {!session.is_current && (
+ <div className="relative" data-session-menu>
+ <button
+ onClick={() => setOpenMenuId(openMenuId === session.id ? null : session.id)}
+ className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"
+ title="Session options"
+ >
+ <MoreVertical className="w-4 h-4" />
+ </button>
+ {openMenuId === session.id && (
+ <div className="absolute right-0 top-7 w-36 bg-white border border-gray-200 rounded-lg shadow-lg z-20 py-1">
+ <button
+ onClick={() => handleRevoke(session)}
+ disabled={revokingId !== null}
+ className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+ >
+ {revokingId === session.id ? 'Signing out...' : 'Sign out'}
+ </button>
+ </div>
+ )}
+ </div>
+ )}
+ </td>
+ </tr>
+ ))}
+ </tbody>
+ </table>
+ </div>
+ </>
+ )}
+ </SettingSection>
+ );
+};
 
 const ToggleSwitch = React.memo(({ enabled, onChange, label, description }) => (
  <div className="flex items-center justify-between py-3">
@@ -725,6 +988,8 @@ const SettingsPage = () => {
  )}
  </div>
  </SettingSection>
+
+ <LoginDevicesSection />
 
  <SettingSection icon={Globe} title="Language & Region">
  <div className="space-y-4">

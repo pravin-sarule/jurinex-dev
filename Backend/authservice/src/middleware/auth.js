@@ -1,5 +1,6 @@
 const { verifyToken, verifyTokenLenient } = require('../utils/jwt');
 const User = require('../models/User');
+const Session = require('../models/Session');
 const { getAuthDenial } = require('../utils/authAccess');
 
 const authenticateToken = async (req, res, next) => {
@@ -28,6 +29,26 @@ const authenticateToken = async (req, res, next) => {
       console.log("❌ User ID missing from token.");
       console.log("❌ Authentication failed: User ID missing from token payload.");
       return res.status(400).json({ message: 'User ID missing from token' });
+    }
+
+    // Device-session enforcement: tokens carry `sid` (session id). If that session
+    // was signed out — 3-device-limit eviction, remote "sign out" from Settings, or
+    // logout — the token is dead even though its signature is still valid. Tokens
+    // minted before this feature have no sid and skip the check (24h expiry ages
+    // them out). Session-table errors fail open: metadata must not block auth.
+    if (decoded.sid) {
+      try {
+        const sessionActive = await Session.isActiveBySid(decoded.sid);
+        if (!sessionActive) {
+          console.log("❌ Session revoked (signed out on this device):", decoded.sid);
+          return res.status(401).json({
+            code: 'SESSION_REVOKED',
+            message: 'This device was signed out. Please log in again.',
+          });
+        }
+      } catch (sessionErr) {
+        console.error('⚠️ Session check failed (continuing):', sessionErr.message);
+      }
     }
     console.log("🔍 Searching for user with ID:", userId);
 

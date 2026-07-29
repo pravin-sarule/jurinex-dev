@@ -74,7 +74,38 @@ const UserProfessionalProfile = require('../models/UserProfessionalProfile');
 const Firm = require('../models/Firm');
 const FirmUser = require('../models/FirmUser');
 const { generateToken } = require('../utils/jwt');
+const crypto = require('crypto');
+const { collectDeviceInfo, lookupGeoLocation } = require('../utils/deviceInfo');
 const { createAndSendOTP, verifyOTP, sendPasswordSetEmail } = require('../services/otpService');
+
+// Device-session bookkeeping shared by every token-issuing path: enforce the
+// 3-device limit (oldest active session is signed out), record the new device's
+// IP/browser/OS, and resolve the IP's location in the background. Returns the
+// JWT (which carries `sid` so the session can be revoked remotely).
+const createDeviceSession = async (req, activeUser) => {
+  const sid = crypto.randomUUID();
+  const token = generateToken(activeUser, sid);
+  const device = collectDeviceInfo(req);
+  // Same device logging in again replaces its own session (device-wise list),
+  // THEN the 3-device cap evicts the oldest of what remains.
+  await Session.revokeSameDevice(activeUser.id, device.userAgent);
+  await Session.enforceDeviceLimit(activeUser.id);
+  await Session.create({
+    user_id: activeUser.id,
+    token,
+    sid,
+    ip_address: device.ip,
+    user_agent: device.userAgent,
+    browser: device.browser,
+    os: device.os,
+    device_type: device.deviceType,
+    location: null,
+  });
+  lookupGeoLocation(device.ip)
+    .then((location) => Session.updateLocationBySid(sid, location))
+    .catch(() => {});
+  return token;
+};
 const { getAuthDenial } = require('../utils/authAccess');
 const admin = require('../config/firebase'); // Import Firebase Admin SDK
 const { OAuth2Client } = require('google-auth-library');
@@ -196,10 +227,9 @@ const registerSoloLawyer = async (req, res) => {
     // Assign free plan (non-blocking)
     assignFreePlanToUser(user.id).catch(() => {});
 
-    // Generate token and create session
+    // Generate token and create device session (3-device limit + IP/browser metadata)
     const activeUser = await markUserActiveSession(user.id) || user;
-    const token = generateToken(activeUser);
-    await Session.create({ user_id: activeUser.id, token });
+    const token = await createDeviceSession(req, activeUser);
 
     res.status(201).json({
       success: true,
@@ -548,10 +578,8 @@ const verifyOtpAndLogin = async (req, res) => {
     const updatedUser = await User.findByEmail(email);
 
     const activeUser = await markUserActiveSession(updatedUser.id) || updatedUser;
-    const token = generateToken(activeUser);
-
-    await Session.create({ user_id: activeUser.id, token });
-    console.log(`[AuthController] ✅ Session created for user: ${email}`);
+    const token = await createDeviceSession(req, activeUser);
+    console.log(`[AuthController] ✅ Device session created for user: ${email}`);
 
     let professionalProfile;
     try {
@@ -651,10 +679,8 @@ const firebaseGoogleSignIn = async (req, res) => {
     }
 
     const activeUser = await markUserActiveSession(user.id) || user;
-    const jwtToken = generateToken(activeUser);
-
-    await Session.create({ user_id: activeUser.id, token: jwtToken });
-    console.log(`[GoogleSignIn] ✅ Session created for: ${userEmail}`);
+    const jwtToken = await createDeviceSession(req, activeUser);
+    console.log(`[GoogleSignIn] ✅ Device session created for: ${userEmail}`);
 
     let professionalProfile;
     try {
@@ -811,6 +837,13 @@ const pingActivity = async (req, res) => {
     });
 
     const updatedUser = await User.touchSeen(userId);
+
+    // Keep the device session's "last active" fresh for the Settings panel.
+    try {
+      const pingToken = req.headers.authorization?.split(' ')[1];
+      const pingDecoded = pingToken ? require('../utils/jwt').verifyTokenLenient(pingToken) : null;
+      if (pingDecoded?.sid) await Session.touchBySid(pingDecoded.sid);
+    } catch { /* non-critical */ }
 
     console.log('[AuthController] Activity ping updated', {
       userId,

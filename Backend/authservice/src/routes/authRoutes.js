@@ -42,6 +42,13 @@ router.put('/change-password', protect, changePassword);
 router.post('/set-password', setPassword); // Public endpoint for first-time password setup
 router.post('/activity/ping', softProtect, pingActivity);
 
+// Device sessions — Settings → "Active sessions"
+const { getActiveSessions, revokeSession, revokeSessions, revokeAllOtherSessions } = require('../controllers/sessionController');
+router.get('/sessions', protect, getActiveSessions);
+router.post('/sessions/revoke', protect, revokeSessions);          // selected devices
+router.post('/sessions/revoke-all', protect, revokeAllOtherSessions); // all except current
+router.delete('/sessions/:id', protect, revokeSession);
+
 // Firm admin routes
 router.post('/firm/staff', protect, createFirmStaff);
 router.get('/firm/staff', protect, getFirmStaff);

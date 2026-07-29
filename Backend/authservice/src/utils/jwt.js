@@ -63,7 +63,10 @@ function getAccountType(user) {
   return (v && String(v).trim()) ? String(v).toUpperCase() : 'SOLO';
 }
 
-const generateToken = (user) => {
+// `sid` ties the token to its user_sessions row: the protect middleware rejects
+// tokens whose session was signed out (device limit eviction / remote sign-out).
+// Optional so pre-existing callers and old tokens keep working.
+const generateToken = (user, sid = null) => {
   const numericId = user.id;
   const userUuid = generateUserUUID(numericId);
   const role = user.role || 'user';
@@ -82,6 +85,7 @@ const generateToken = (user) => {
       account_type: accountType,
       domain_role: domainRole,
       role_id: roleId,
+      ...(sid ? { sid } : {}),
     },
     process.env.JWT_SECRET,
     { expiresIn: '24h' }
