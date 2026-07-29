@@ -1,0 +1,14 @@
+{
+  "fixtures": [
+    {
+      "name": "ambiguous_one_liner",
+      "input": "need help with my client's 420 matter",
+      "expect_needs_clarification": true
+    },
+    {
+      "name": "clean_petition_text",
+      "expect_needs_clarification": false,
+      "input": "IN THE HIGH COURT OF JUDICATURE AT BOMBAY, CRIMINAL WRIT PETITION. The petitioner, a director of M/s Sunrise Agro Pvt Ltd, prays for quashing of FIR No. 118/2024 registered at Pune City police station under Section 420 read with Section 34 of the Indian Penal Code. The complainant advanced Rs. 25,00,000 to the company under a supply agreement dated 04.01.2023 for delivery of soybean meal. Deliveries were partly made; disputes arose regarding quality and set-off. Instead of invoking the arbitration clause, the complainant lodged the FIR alleging cheating. The petitioner submits that the dispute is purely civil in nature, arising from a commercial contract, and the criminal process is being misused as a recovery tactic. It is prayed that this Hon'ble Court quash FIR No. 118/2024 and all consequential proceedings."
+    }
+  ]
+}

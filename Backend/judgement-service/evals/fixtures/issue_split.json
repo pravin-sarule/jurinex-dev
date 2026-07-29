@@ -1,0 +1,16 @@
+{
+  "fixtures": [
+    {
+      "name": "ambadas_quash_fir",
+      "expected_issue_count": 3,
+      "expected_topics": ["repeal", "quash", "cheque"],
+      "case_summary": "The petitioner Ambadas, a director of a private company, seeks quashing of FIR No. 118/2024 registered under Section 420 read with Section 34 of the Indian Penal Code, 1860, although the Indian Penal Code stood repealed by the Bharatiya Nyaya Sanhita, 2023 on the date of registration, raising the question of whether prosecution under the repealed IPC provisions can survive in view of Section 6 of the General Clauses Act, 1897 and the savings clause of the BNS. The complainant alleges that the company failed to repay an advance under a supply agreement, and the petitioner contends the dispute is purely civil in nature — a breach of contract given criminal colour — and hence the FIR is an abuse of process liable to be quashed under Section 482 CrPC. Separately, the complainant has also initiated proceedings under Section 138 of the Negotiable Instruments Act against the petitioner personally for dishonour of a cheque issued by the company, and the petitioner contends that as a non-signatory director he cannot be made vicariously liable under Section 141 NI Act without specific averments of his role."
+    },
+    {
+      "name": "single_issue_cheque_bounce",
+      "expected_issue_count": 1,
+      "expected_topics": ["cheque"],
+      "case_summary": "The complainant supplied goods to the accused, who issued a cheque of Rs. 4,80,000 towards payment. The cheque was returned unpaid with the endorsement 'funds insufficient'. A statutory demand notice under Section 138 of the Negotiable Instruments Act was served within time; the accused failed to pay within 15 days. The complainant seeks conviction of the accused under Section 138 NI Act."
+    }
+  ]
+}

@@ -809,6 +809,7 @@ const Sidebar = () => {
     { name: 'Dashboard', path: '/dashboard', icon: ChartBarIcon },
     { name: 'Projects', path: '/documents', icon: DocumentTextIcon },
     { name: 'Citation', path: '/citation', icon: BookOpenIcon },
+    { name: 'Citation Research', path: '/citation-research', icon: ScaleIcon },
     { name: 'Citation Test', path: '/citation-testing', icon: BeakerIcon },
     { name: 'ChatModel', path: '/chatmodel', icon: ChatBubbleLeftRightIcon },
     { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },

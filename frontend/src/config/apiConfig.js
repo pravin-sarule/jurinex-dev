@@ -135,6 +135,13 @@ export const CITATION_V1_SERVICE_URL =
     ? 'http://localhost:8004'
     : 'https://citation-service-v1-120280829617.asia-south1.run.app');
 
+// Judgement service — ADK legal search pipeline (issues -> Indian Kanoon precedents)
+export const JUDGEMENT_SERVICE_URL =
+  import.meta.env.VITE_APP_JUDGEMENT_SERVICE_URL ||
+  (IS_LOCAL_DEV_HOST
+    ? 'http://localhost:8005'
+    : 'https://judgement-service-120280829617.asia-south1.run.app');
+
 // Citation Testing Service — compare Gemini (Google Grounding) vs Claude (Serper) in 1 iteration
 export const CITATION_TESTING_SERVICE_URL =
   import.meta.env.VITE_APP_CITATION_TESTING_SERVICE_URL ||
@@ -233,6 +240,7 @@ const apiConfig = {
   CHAT_SERVICE_URL,
   CITATION_SERVICE_URL,
   CITATION_V1_SERVICE_URL,
+  JUDGEMENT_SERVICE_URL,
   CITATION_TESTING_SERVICE_URL,
   DRAFTING_SERVICE_URL,
   DOCS_BASE_URL,

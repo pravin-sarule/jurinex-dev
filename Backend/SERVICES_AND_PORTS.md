@@ -53,6 +53,7 @@
 | 11 | agent-draft-service | 8000 | Python (FastAPI) |
 | 12 | Visual-Service | 8081 | Python (Flask) |
 | 13 | Template Analyzer Agent | 5017 | Python (FastAPI) |
+| 14 | judgement-service | 8005 | Python (FastAPI + Google ADK) |
 
 *(No separate support-service or drafting-template service in repo; gateway has placeholders for 5004 and 5010.)*
 
@@ -122,6 +123,9 @@ cd Backend\Visual-Service; $env:PORT=8081; python main.py
 
 # 13. Template Analyzer (5017)
 cd "Backend\Template Analyzer Agent"; python -m uvicorn main:app --host 0.0.0.0 --port 5017
+
+# 14. Judgement (8005) — ADK legal search pipeline (Citation Research module)
+cd Backend\judgement-service; .\venv\Scripts\python.exe -m uvicorn api:app --host 0.0.0.0 --port 8005
 ```
 
 **Gateway env (optional):** If you run only document-service on 8080 and want files/docs/chat to use it, set before starting gateway:

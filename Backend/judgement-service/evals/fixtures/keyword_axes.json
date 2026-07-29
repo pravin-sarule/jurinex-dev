@@ -1,0 +1,35 @@
+{
+  "runs_per_fixture": 5,
+  "fixtures": [
+    {
+      "name": "repeal_criminal",
+      "issue": "Whether prosecution under provisions of the Indian Penal Code can continue after its repeal by the Bharatiya Nyaya Sanhita, 2023, in view of Section 6 of the General Clauses Act, 1897.",
+      "must_include": ["general clauses act"],
+      "must_not_include": ["section 358 crpc"]
+    },
+    {
+      "name": "quashing_s482_collision",
+      "issue": "Whether an FIR arising out of a purely civil contractual dispute is liable to be quashed under Section 482 of the Code of Criminal Procedure as an abuse of the process of law.",
+      "must_include": ["section 482 crpc", "482 of the code of criminal procedure|section 482"],
+      "must_not_include": ["section 482 ipc"]
+    },
+    {
+      "name": "cheque_bounce_ni_act",
+      "issue": "Whether the accused is liable for dishonour of cheque for insufficiency of funds after failure to pay within the statutory notice period.",
+      "must_include": ["138"],
+      "must_not_include": ["section 138 ipc"]
+    },
+    {
+      "name": "maintenance_family",
+      "issue": "Whether a wife who is earning but unable to maintain herself is entitled to maintenance from her husband under Section 125 of the Code of Criminal Procedure.",
+      "must_include": ["125"],
+      "must_not_include": ["section 125 ipc"]
+    },
+    {
+      "name": "lis_pendens_property",
+      "issue": "Whether a transfer of immovable property effected during the pendency of a suit is hit by the doctrine of lis pendens under Section 52 of the Transfer of Property Act.",
+      "must_include": ["transfer of property act"],
+      "must_not_include": ["section 52 crpc"]
+    }
+  ]
+}
