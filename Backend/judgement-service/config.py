@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     api_host: str = Field(default="0.0.0.0", validation_alias="API_HOST")
     api_port: int = 8002
     judgement_api_port: int | None = None  # wins over api_port when set
+    # Cloud Run injects PORT and requires the container to listen on it;
+    # when present it beats every service-specific port setting.
+    cloud_run_port: int | None = Field(default=None, validation_alias="PORT")
     debug: bool = False
     cors_origins: str = "http://localhost:5173,http://localhost:3000,http://localhost:5000"
 
@@ -143,7 +146,7 @@ class Settings(BaseSettings):
 
     @property
     def port(self) -> int:
-        return self.judgement_api_port or self.api_port
+        return self.cloud_run_port or self.judgement_api_port or self.api_port
 
     @property
     def db_url(self) -> str | None:
