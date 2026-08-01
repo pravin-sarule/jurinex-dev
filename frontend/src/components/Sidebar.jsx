@@ -809,8 +809,9 @@ const Sidebar = () => {
     { name: 'Citation Research', path: '/citation-research', icon: ScaleIcon },
     { name: 'ChatModel', path: '/chatmodel', icon: ChatBubbleLeftRightIcon },
     { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },
-    { name: 'DeepSeek AI', icon: null, isDeepSeek: true },
-    { name: 'Document Drafting', path: '/draft-selection', icon: PencilSquareIcon },
+    // Temporarily hidden — restore by uncommenting:
+    // { name: 'DeepSeek AI', icon: null, isDeepSeek: true },
+    // { name: 'Document Drafting', path: '/draft-selection', icon: PencilSquareIcon },
     { name: 'User Management', path: '/user-management', icon: UserGroupIcon, firmMemberOnly: true },
   ];
 

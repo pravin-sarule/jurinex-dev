@@ -47,14 +47,16 @@ function ensureLocalhostPort(url, fallbackPort) {
 export const API_BASE_URL = GATEWAY_URL;
 export const GATEWAY_BASE_URL = GATEWAY_URL;
 
-// Service-specific endpoints (gateway proxies; can override with direct URLs via env)
-export const AUTH_SERVICE_URL =
-  import.meta.env.VITE_APP_AUTH_SERVICE_URL ||
-  'http://localhost:5001';
-
 const IS_LOCAL_DEV_HOST =
   typeof window !== 'undefined' &&
   ['localhost', '127.0.0.1'].includes(window.location.hostname);
+
+// Service-specific endpoints (gateway proxies; can override with direct URLs via env)
+export const AUTH_SERVICE_URL =
+  import.meta.env.VITE_APP_AUTH_SERVICE_URL ||
+  (IS_LOCAL_DEV_HOST
+    ? 'http://localhost:5001'
+    : 'https://authservice-120280829617.asia-south1.run.app');
 
 /** Python ADK agentic chat service (replaces legacy Node ChatModel when set). */
 const DEFAULT_AGENTIC_CHAT_HOST =
@@ -97,8 +99,9 @@ export const VISUAL_SERVICE_URL =
  * Port 8095 is AI Chatbot — do not start this service on 8095.
  * Set VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL for a custom host.
  */
-const DEFAULT_AGENTIC_DOCUMENT_HOST =
-  'http://localhost:8092';
+const DEFAULT_AGENTIC_DOCUMENT_HOST = IS_LOCAL_DEV_HOST
+  ? 'http://localhost:8092'
+  : 'https://agentic-document-service-120280829617.asia-south1.run.app';
 
 const rawAgenticDocs =
   import.meta.env.VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL ||
@@ -156,7 +159,7 @@ export const DRAFTING_SERVICE_URL =
 
 // AI Chatbot support agent (port 8095)
 export const AI_CHATBOT_URL =
-  import.meta.env.VITE_APP_AI_CHATBOT_URL || 'https://agentic-chatbot-service-120280829617.asia-south1.run.app';
+  import.meta.env.VITE_APP_AI_CHATBOT_URL || 'https://ai-chatbot-120280829617.asia-south1.run.app';
 
 // Agent-draft service: templates, drafts, fields, sections, autopopulation (JuriNex Agent Draft Service)
 export const AGENT_DRAFT_TEMPLATE_API =
