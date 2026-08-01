@@ -72,6 +72,21 @@ class Issue(BaseModel):
     # + a 2–3 sentence fact-specific explanation, for display.
     title: str | None = None
     explanation: str | None = None
+    # ── Grounds mode extras (None/[] in issues mode) ──
+    # The document's own label for the ground, verbatim ("Ground A",
+    # "Ground 1(a)", "Ground [Implied]" when not numbered in the source).
+    ground_label: str | None = None
+    # Statutes/articles/sections the ground invokes + case law it cites,
+    # copied exactly as written in the source (never expanded or guessed).
+    legal_framework: list[str] = Field(default_factory=list)
+    case_law_cited: list[str] = Field(default_factory=list)
+    # The extractor's own citation of where the ground sits in the document
+    # (e.g. "Page 4, Para 12" or "Section: 'Grounds of Appeal', Para 3").
+    # Display-only — the deterministic `source` ref below remains the
+    # mechanically-attributed one.
+    ground_ref: str | None = None
+    # Extraction confidence for THIS ground: high | medium | low.
+    confidence: str | None = None
     # Doctrine label + statutory hook drive query generation and the judge's
     # doctrine-link guard — queries are built from these, never from party facts.
     doctrine: str | None = None
@@ -117,6 +132,44 @@ class SourcePage(BaseModel):
     file: str
     page: int
     text: str
+
+
+# ─── Grounds mode: grounds extraction (alternative to issue spotting) ────────
+
+class ExtractedGround(BaseModel):
+    """One ground of challenge/appeal as pleaded in the case document,
+    extracted verbatim-grounded (never invented) by the grounds extractor.
+    Bridges the pleaded ground to precedent search via research_question +
+    doctrine + statutory_hook — the same contract the issue pipeline uses.
+
+    NOTE: doubles as a Gemini response_schema — typed lists only, no open
+    dicts (additionalProperties is rejected by the Developer API)."""
+    ground_label: str = ""     # the document's own label, verbatim
+    title: str = ""            # short descriptive title of the ground
+    summary: str = ""          # 100–200 word self-contained summary
+    # ONE-sentence "Whether …?" question capturing the ground's legal
+    # contention — this text drives downstream precedent search.
+    research_question: str = ""
+    doctrine: str = ""
+    statutory_hook: str | None = None
+    statutes: list[str] = Field(default_factory=list)       # as written in source
+    case_law_cited: list[str] = Field(default_factory=list)  # as written in source
+    source_reference: str = ""  # e.g. "Page 4, Para 12" from the document itself
+    confidence: Literal["high", "medium", "low"] = "medium"
+    perspective: str = "petitioner"
+
+
+class GroundsExtractResult(BaseModel):
+    """Grounds extractor output: document metadata + every distinct ground
+    (sub-grounds kept separate, never merged)."""
+    document_type_label: str = ""   # e.g. "Writ Petition", "SLP", "Appeal"
+    party: str = ""                 # whose grounds these are
+    forum: str = ""                 # court seised, when the material shows it
+    procedural_stage: str = ""
+    insufficient_material: bool = False
+    grounds: list[ExtractedGround] = Field(default_factory=list)
+    # Ambiguities / illegible passages / unclear references worth flagging.
+    notes: list[str] = Field(default_factory=list)
 
 
 # ─── Stage 2: Keyword extraction (four axes) ─────────────────────────────────
@@ -270,6 +323,9 @@ class SearchResponse(BaseModel):
     caseContext: CaseContext | None = None
     issues: list[IssueResults] = Field(default_factory=list)
     guardianDropped: int = 0  # count only — dropped docIds never surface
+    # The client's own High Court inferred from the forum (e.g. "Bombay High
+    # Court" for a Maharashtra matter) — its judgments are ranked first.
+    forumCourt: str | None = None
 
 
 # ─── API request contracts ───────────────────────────────────────────────────
@@ -279,8 +335,15 @@ class CaseInput(BaseModel):
     fileRef: str | None = None  # local path or URL to an uploaded document
 
 
+# How suggested research items are derived from the case material:
+#   issues  — issue spotter (default, unchanged behaviour)
+#   grounds — grounds extractor (the grounds pleaded in the filing itself)
+ResearchMode = Literal["issues", "grounds"]
+
+
 class SearchRequest(BaseModel):
     caseInput: CaseInput
+    mode: ResearchMode = "issues"
 
 
 class RefineRequest(BaseModel):
@@ -305,6 +368,11 @@ class AnalyzeResponse(BaseModel):
     clarificationQuestion: str | None = None
     caseId: str | None = None      # set when analysis came from a stored case
     caseTitle: str | None = None
+    # Which extractor produced suggestedIssues (issues | grounds) + the
+    # grounds extraction metadata (total, document type, notes) when the
+    # grounds extractor ran.
+    researchMode: ResearchMode = "issues"
+    groundsMeta: dict[str, Any] | None = None
 
 
 class AnalyzeCaseRequest(BaseModel):
@@ -315,6 +383,7 @@ class AnalyzeCaseRequest(BaseModel):
     caseId: str
     text: str | None = None
     userId: str | None = None
+    mode: ResearchMode = "issues"
 
 
 class RunSearchRequest(BaseModel):

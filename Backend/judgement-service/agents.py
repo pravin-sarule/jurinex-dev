@@ -27,6 +27,7 @@ from google.adk.runners import InMemoryRunner
 from google.genai import types as genai_types
 
 from claude_llm import (
+    GROUNDS_EXTRACTOR_SYSTEM,
     ISSUE_SPOTTER_SYSTEM,
     QUERY_GEN_SYSTEM,
     claude_available,
@@ -39,6 +40,7 @@ from schemas import (
     CaseContextDraft,
     CitationAnalysis,
     DocClassification,
+    GroundsExtractResult,
     Issue,
     IssueList,
     IssueResults,
@@ -56,14 +58,16 @@ from tools import (
     attribute_issue_sources,
     authority_signal,
     band_for,
+    case_court_profile,
     citation_guardian,
     composite_score,
-    court_rank,
     enforce_verifier_rules,
     fact_match_signal,
     find_pinpoint,
+    forum_court_rank,
     good_law_signal,
     ik_client,
+    is_forum_high_court,
     judged_band,
     keyword_signal,
     party_perspective,
@@ -76,6 +80,10 @@ logger = logging.getLogger(__name__)
 
 _APP = "judgement-service"
 MAX_ISSUES = 6
+# Grounds are pleaded by the drafter, not synthesised — filings routinely
+# raise more grounds than a case has distinct issues, so the cap is higher.
+# The user picks which grounds to actually search, so IK spend stays bounded.
+MAX_GROUNDS = 8
 MAX_RESULTS_PER_ISSUE = 10
 MAX_LLM_INPUT_CHARS = 30000
 
@@ -358,6 +366,19 @@ async def verify_judgments(issue: Issue, context: CaseContext,
         f"CLIENT'S FORUM: {context.forum or 'not specified'}\n"
         f"PERSPECTIVE: {issue.perspective or 'petitioner'}\n\n"
     )
+    if issue.ground_label:
+        # Grounds mode: the judgment must be usable for the ground AS
+        # PLEADED — its summary and invoked provisions are the yardstick,
+        # not just the abstract question above.
+        framework = ", ".join(issue.legal_framework[:12]) or "not specified"
+        issue_block += (
+            f"PLEADED GROUND ({issue.ground_label}): "
+            f"{(issue.explanation or issue.issue)[:900]}\n"
+            f"PROVISIONS INVOKED BY THE GROUND: {framework}\n"
+            "The doctrine/shelf check runs against THIS ground's doctrine and "
+            "provisions (old/new-code equivalents of an invoked provision "
+            "count as the same shelf).\n\n"
+        )
     # Deterministic shelf anchors: the judgment must mention at least one of
     # the issue's statutory provisions (old/new-code equivalents included).
     shelf_patterns = statutory_shelf_patterns(issue.statutory_hook, keywords.statutory)
@@ -503,12 +524,161 @@ async def spot_issues(raw_text: str, context: CaseContext) -> list[Issue]:
     return issue_list.issues[:MAX_ISSUES]
 
 
+# ─── Grounds mode: extract the grounds pleaded in the filing itself ─────────
+
+def build_grounds_extract_agent() -> LlmAgent:
+    """Gemini fallback for the grounds extractor — same system prompt and
+    schema as the Claude path, so downstream conversion is identical."""
+    return LlmAgent(
+        name="grounds_extract",
+        model=get_settings().gemini_model,
+        description="Extracts the legal grounds pleaded in a filing.",
+        instruction=GROUNDS_EXTRACTOR_SYSTEM,
+        generate_content_config=_gen_config(0.1),
+        output_schema=GroundsExtractResult,
+        output_key="grounds_extract",
+        disallow_transfer_to_parent=True,
+        disallow_transfer_to_peers=True,
+    )
+
+
+def _grounds_to_issues(result: GroundsExtractResult) -> list[Issue]:
+    """Map each extracted ground onto the Issue contract so the ENTIRE
+    downstream pipeline (query generation, IK fan-out, per-judgment
+    verification with real scores, guardian, reports) runs unchanged.
+    ids are assigned in code; `source` stays deterministic-only."""
+    issues: list[Issue] = []
+    for idx, g in enumerate(result.grounds[:MAX_GROUNDS]):
+        question = g.research_question.strip() or g.summary.strip()[:300]
+        if not question:
+            continue
+        issues.append(Issue(
+            id=idx + 1,
+            issue=question,
+            title=g.title.strip() or None,
+            explanation=g.summary.strip() or None,
+            doctrine=g.doctrine.strip() or None,
+            statutory_hook=(g.statutory_hook or "").strip() or None,
+            perspective=(g.perspective or "petitioner").strip() or None,
+            ground_label=g.ground_label.strip() or None,
+            legal_framework=[s.strip() for s in g.statutes if s.strip()],
+            case_law_cited=[c.strip() for c in g.case_law_cited if c.strip()],
+            ground_ref=g.source_reference.strip() or None,
+            confidence=g.confidence,
+        ))
+    return issues
+
+
+async def extract_grounds(raw_text: str, context: CaseContext,
+                          ) -> tuple[list[Issue], dict[str, Any]]:
+    """Grounds mode's stage 1 (replaces issue spotting): extract the grounds
+    the filing itself raises, Claude first with the Gemini agent as the
+    automatic fallback. Returns (grounds-as-Issues, extraction metadata for
+    display). Sets stage/forum/clarification on the context exactly like
+    the issue spotter does."""
+    user = (
+        f"CASE MATERIAL:\n{raw_text[:MAX_LLM_INPUT_CHARS - 4000]}\n\n"
+        f"STRUCTURED CONTEXT (already extracted and source-verified):\n"
+        f"Facts: {context.facts[:1500]}\n"
+        f"Procedural history: {context.procedural_history[:800]}\n"
+        f"Relief sought: {context.relief_sought[:300]}"
+    )
+    result: GroundsExtractResult | None = None
+    if claude_available():
+        result = await claude_parse(GROUNDS_EXTRACTOR_SYSTEM, user,
+                                    GroundsExtractResult, max_tokens=8000)
+        if result is None:
+            logger.warning("[claude] grounds extractor unavailable — Gemini fallback")
+    if result is None:
+        try:
+            out = await run_agent_once(build_grounds_extract_agent(), user,
+                                       ["grounds_extract"])
+            result = GroundsExtractResult.model_validate(out.get("grounds_extract") or {})
+        except Exception:
+            logger.exception("[grounds] Gemini fallback failed")
+            result = GroundsExtractResult()
+
+    context.procedural_stage = result.procedural_stage.strip() or context.procedural_stage
+    context.forum = result.forum.strip() or context.forum
+    if result.insufficient_material or not result.grounds:
+        context.needs_clarification = True
+        context.clarification_question = (
+            "No pleaded grounds could be identified in this material (it may be "
+            "formal-only, or the grounds section may be missing/illegible). "
+            "Upload the petition/appeal containing the grounds, or switch to "
+            "issue-based research.")
+        return [], {}
+
+    issues = _grounds_to_issues(result)
+    dropped = max(0, len(result.grounds) - len(issues))
+    meta: dict[str, Any] = {
+        "totalGrounds": len(issues),
+        "documentType": result.document_type_label.strip() or None,
+        "party": result.party.strip() or None,
+        "notes": [n for n in result.notes if n.strip()],
+    }
+    if dropped:
+        # No silent caps: the UI tells the user how many grounds were cut.
+        meta["truncatedGrounds"] = dropped
+        logger.info("[grounds] %d ground(s) beyond the cap of %d were dropped",
+                    dropped, MAX_GROUNDS)
+    return issues, meta
+
+
+def _ground_note(issue: Issue) -> str:
+    """Grounds mode: the pleaded ground's own summary + invoked provisions
+    go into query generation, so every query is anchored to what the ground
+    ACTUALLY argues (e.g. a repeal-and-savings ground over IPC→BNS must
+    query repeal/savings law with both codes' provisions — not just the
+    abstract 'Whether…?' question)."""
+    if not issue.ground_label:
+        return ""
+    lines = [f"\n\nPLEADED GROUND ({issue.ground_label}) — build every query from THIS "
+             "ground's doctrine and provisions:"]
+    if issue.explanation:
+        lines.append(issue.explanation[:1200])
+    if issue.legal_framework:
+        lines.append("PROVISIONS INVOKED BY THE GROUND: " + ", ".join(issue.legal_framework[:12]))
+    if issue.case_law_cited:
+        lines.append("CASE LAW CITED IN THE GROUND: " + "; ".join(issue.case_law_cited[:5]))
+    lines.append(
+        "Every anchor query MUST be anchored to one of these provisions or this "
+        "ground's doctrine (with old/new-code equivalents per the mapping rule — "
+        "e.g. a BNS/BNSS/BSA provision is also searched under its IPC/CrPC/"
+        "Evidence Act equivalent and vice versa), so that every judgment fetched "
+        "matches this ground. Draw the factual axis from the ground's own "
+        "fact-specific averments above (the distinctive words a judgment on the "
+        "SAME fact pattern would contain), so results match this exact case — "
+        "never generic filler.")
+    return "\n".join(lines)
+
+
+def _merge_ground_statutes(keywords: KeywordSet, issue: Issue) -> KeywordSet:
+    """Deterministic backstop for grounds mode: every provision the ground
+    itself invokes joins the statutory axis (the LLM may drop one), so the
+    shelf gate and keyword scoring always check the ground's OWN provisions
+    against each fetched judgment. Long composite citations are skipped —
+    as AND-of-words IK queries they match nothing."""
+    if not issue.ground_label or not issue.legal_framework:
+        return keywords
+    existing = {t.strip().lower() for t in keywords.statutory}
+    for statute in issue.legal_framework:
+        term = statute.strip()
+        if term and len(term.split()) <= 8 and term.lower() not in existing:
+            existing.add(term.lower())
+            keywords.statutory.append(term)
+    return keywords
+
+
 async def generate_queries(issue: Issue, context: CaseContext,
                            failed_queries: list[str] | None = None,
                            sibling_issues: list[str] | None = None) -> KeywordSet:
     """Stage 2 on Claude (spec query-gen prompt): support anchors + contra
     queries + four lexical axes, built from doctrine + statutory hook +
     stage — never from party facts. Gemini keyword agent as fallback.
+    In grounds mode the pleaded ground's summary + invoked provisions ride
+    along, and those provisions are merged into the statutory axis after
+    generation (deterministic — never lost to the model).
 
     failed_queries: reformulation mode — the previous round's queries found
     no usable judgment, so the model must produce a genuinely DIFFERENT set
@@ -534,6 +704,7 @@ async def generate_queries(issue: Issue, context: CaseContext,
         listed = "\n".join(f"- {s}" for s in sibling_issues[:5])
         siblings_note = (f"\n\nOTHER ISSUES IN THIS CASE (searched separately — keep THIS "
                          f"issue's queries clearly distinct from theirs):\n{listed}")
+    ground_note = _ground_note(issue)
     if claude_available():
         user = (
             f"ISSUE: {issue.issue}\n"
@@ -544,20 +715,22 @@ async def generate_queries(issue: Issue, context: CaseContext,
             f"PROCEDURAL STAGE: {context.procedural_stage or 'not specified'}\n\n"
             f"CASE SUMMARY (context only — never build queries from party facts):\n"
             f"{context.raw_case_summary[:1500]}"
+            f"{ground_note}"
             f"{siblings_note}"
             f"{retry_note}"
         )
         result = await claude_parse(QUERY_GEN_SYSTEM, user, KeywordSet, max_tokens=4000)
         if result is not None and result.all_terms():
-            return result
+            return _merge_ground_statutes(result, issue)
         logger.warning("[claude] query generation unavailable — Gemini keyword fallback")
     keyword_message = (
         f"Case summary (context only):\n{context.raw_case_summary}\n\n"
         f"Legal issue to generate search terms for:\n{issue.issue}"
+        f"{ground_note}"
         f"{retry_note}"
     )
     out = await run_agent_once(build_keyword_extract_agent(), keyword_message, ["keywords"])
-    return KeywordSet.model_validate(out.get("keywords") or {})
+    return _merge_ground_statutes(KeywordSet.model_validate(out.get("keywords") or {}), issue)
 
 
 # ─── Per-issue pipeline (Stage 2 → fetch → rerank → layers → score) ──────────
@@ -570,7 +743,14 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
     settings = get_settings()
 
     # IK fetch — union across anchor/contra/axis queries, dedupe, cap.
-    pool = await ik_client.fanout_and_fetch(keywords, exclude=exclude)
+    # The court the case itself points at (forum field, else the HC named
+    # in the case material — Maharashtra → Bombay HC) gets its own
+    # targeted anchor searches and top placement.
+    forum_profile = case_court_profile(
+        context.forum, f"{context.procedural_history} {context.raw_case_summary}")
+    pool = await ik_client.fanout_and_fetch(
+        keywords, exclude=exclude,
+        forum_doctype=(forum_profile or {}).get("doctype"))
     if not pool:
         return {"candidates": {}, "scored": []}
 
@@ -655,13 +835,15 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
         surfaced = [r for r in surfaced if r.breakdown.ai_relevance is not None]
     elif not surfaced:
         surfaced = sorted(scored, key=lambda r: r.score, reverse=True)[:MAX_RESULTS_PER_ISSUE]
-    # Support (petitioner-side) authorities lead; within a side, bench-wise
+    # Support (petitioner-side) authorities lead; within a side, the
+    # client's OWN High Court first (binding at the forum), then bench-wise
     # (Supreme Court → High Courts → tribunals → district), top score first.
     # Contra follow clearly labelled; red-flagged (overruled) sink last.
     side_rank = {"support": 0, None: 1, "interim": 2, "contra": 3}
     court_by_id = {c.doc_id: c.court for c in pool}
     surfaced.sort(key=lambda r: (r.red_flag, side_rank.get(r.side, 1),
-                                 court_rank(court_by_id.get(r.doc_id, "")), -r.score))
+                                 forum_court_rank(court_by_id.get(r.doc_id, ""),
+                                                  forum_profile), -r.score))
     surfaced = surfaced[:MAX_RESULTS_PER_ISSUE]
 
     return {
@@ -727,8 +909,11 @@ async def issue_fanout(issues: list[Issue], context: CaseContext,
 
 # ─── Response assembly (deterministic) ───────────────────────────────────────
 
-def _chips(cand: Candidate, result: ScoredResult, court_label: str) -> list[str]:
+def _chips(cand: Candidate, result: ScoredResult, court_label: str,
+           own_court: bool = False) -> list[str]:
     chips = [court_label]
+    if own_court:
+        chips.append("your High Court — binding")
     if cand.num_citedby > 0:
         chips.append(f"cited {cand.num_citedby} times")
     label = result.breakdown.good_law_status_label
@@ -792,6 +977,8 @@ def assemble_response(
     issues_out: list[IssueResults] = []
     total_drops = 0
     session_issues: list[dict[str, Any]] = []
+    forum_profile = case_court_profile(
+        context.forum, f"{context.procedural_history} {context.raw_case_summary}")
 
     for entry in fanout_results:
         issue: Issue = entry["issue"]
@@ -827,7 +1014,8 @@ def assemble_response(
                 opponentArgument=result.opponent_argument,
                 counterStrategy=result.counter_strategy,
                 signals=_signals_payload(result),
-                chips=_chips(cand, result, court_label),
+                chips=_chips(cand, result, court_label,
+                             own_court=is_forum_high_court(cand.court, forum_profile)),
             ))
         keywords = entry.get("keywords")
         issues_out.append(IssueResults(id=issue.id, issue=issue.issue,
@@ -853,11 +1041,13 @@ def assemble_response(
         caseContext=context,
         issues=issues_out,
         guardianDropped=total_drops,
+        forumCourt=(forum_profile or {}).get("label"),
     )
     existing = sessions.load(session_id) or {}
     existing.update({
         "caseContext": context.model_dump(),
         "issues": session_issues,
+        "forumCourt": (forum_profile or {}).get("label"),
     })
     sessions.save(session_id, existing)
     return response
@@ -867,12 +1057,15 @@ def assemble_response(
 
 async def analyze_case(raw_text: str, source_text: str | None = None,
                        pages: list[SourcePage] | None = None,
-                       ) -> tuple[str, CaseContext, list[Issue]]:
+                       mode: str = "issues",
+                       ) -> tuple[str, CaseContext, list[Issue], dict[str, Any]]:
     """Phase 1: Agentic Document Context Service (classify → extract via ADK
     SequentialAgent, then deterministic completeness + anti-invention guard)
-    followed by Stage 1 issue split. No Indian Kanoon spend happens here.
-    The analysis is persisted to the session so /search/run can pick it up.
-    """
+    followed by Stage 1 — issue spotting, or grounds extraction when
+    mode='grounds'. No Indian Kanoon spend happens here. The analysis is
+    persisted to the session so /search/run can pick it up. Returns
+    (session_id, context, issues, grounds_meta) — grounds_meta is {} in
+    issues mode."""
     source = source_text or raw_text
     session_id = sessions.new_session_id()
 
@@ -887,10 +1080,15 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
 
     issues: list[Issue] = []
     issue_keywords: dict[str, Any] = {}
+    grounds_meta: dict[str, Any] = {}
     # Ambiguous input → ask, never guess (Phase D hook, live now).
     if not context.needs_clarification:
-        # Stage 1 on Claude (issue-spotter prompt; Gemini fallback inside).
-        issues = await spot_issues(raw_text, context)
+        # Stage 1: grounds extractor (grounds mode) or issue spotter —
+        # both on Claude with a Gemini fallback inside.
+        if mode == "grounds":
+            issues, grounds_meta = await extract_grounds(raw_text, context)
+        else:
+            issues = await spot_issues(raw_text, context)
         if pages:
             # Deterministic 'file, page N' attribution — never LLM-written.
             attribute_issue_sources(issues, pages)
@@ -920,8 +1118,10 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
         "suggestedIssues": [i.model_dump() for i in issues],
         "issueKeywords": issue_keywords,
         "issues": [],
+        "researchMode": mode,
+        "groundsMeta": grounds_meta,
     })
-    return session_id, context, issues
+    return session_id, context, issues, grounds_meta
 
 
 async def run_issue_search(session_id: str, context: CaseContext,
@@ -940,10 +1140,12 @@ async def run_issue_search(session_id: str, context: CaseContext,
     return assemble_response(session_id, context, fanout_results)
 
 
-async def run_search_pipeline(raw_text: str, source_text: str | None = None) -> SearchResponse:
+async def run_search_pipeline(raw_text: str, source_text: str | None = None,
+                              mode: str = "issues") -> SearchResponse:
     """The one-shot root orchestrator (spec Sections 4 and 11): document
-    context → issue split → fan-out → guardian → assembler."""
-    session_id, context, issues = await analyze_case(raw_text, source_text)
+    context → issue split (or grounds extraction) → fan-out → guardian →
+    assembler."""
+    session_id, context, issues, _meta = await analyze_case(raw_text, source_text, mode=mode)
     if context.needs_clarification:
         return SearchResponse(
             sessionId=session_id,

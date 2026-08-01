@@ -168,6 +168,9 @@ async def get_session(session_id: str) -> dict[str, Any]:
         "sessionId": session_id,
         "caseTitle": session.get("caseTitle"),
         "caseContext": session.get("caseContext"),
+        "researchMode": session.get("researchMode", "issues"),
+        "groundsMeta": session.get("groundsMeta") or None,
+        "forumCourt": session.get("forumCourt") or None,
         "suggestedIssues": session.get("suggestedIssues", []),
         "issues": [
             {key: issue.get(key) for key in ("id", "issue", "title", "keywords", "results")}
@@ -203,12 +206,13 @@ def _gather_case_text(text: str | None, file_ref: str | None) -> str:
 async def analyze(request: SearchRequest, http_request: Request) -> AnalyzeResponse:
     raw_text = await asyncio.to_thread(_gather_case_text, request.caseInput.text,
                                        request.caseInput.fileRef)
-    session_id, context, issues = await analyze_case(raw_text)
+    session_id, context, issues, grounds_meta = await analyze_case(raw_text, mode=request.mode)
     _tag_session(session_id, http_request.headers.get("x-user-id"))
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
         needsClarification=context.needs_clarification,
         clarificationQuestion=context.clarification_question,
+        researchMode=request.mode, groundsMeta=grounds_meta or None,
     )
 
 
@@ -232,32 +236,38 @@ async def analyze_from_case(request: AnalyzeCaseRequest, http_request: Request) 
         llm_text = f"{llm_text}\n\n[LAWYER'S INSTRUCTION]\n{note}"
         full_text = f"{full_text}\n\n{note}"
 
-    session_id, context, issues = await analyze_case(llm_text, source_text=full_text, pages=pages)
+    session_id, context, issues, grounds_meta = await analyze_case(
+        llm_text, source_text=full_text, pages=pages, mode=request.mode)
     _tag_session(session_id, user_id, case_title or None, str(request.caseId))
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
         needsClarification=context.needs_clarification,
         clarificationQuestion=context.clarification_question,
         caseId=request.caseId, caseTitle=case_title or None,
+        researchMode=request.mode, groundsMeta=grounds_meta or None,
     )
 
 
 @app.post("/api/v1/analyze/upload", response_model=AnalyzeResponse)
 async def analyze_upload(http_request: Request, file: UploadFile = File(...),
-                         text: str = Form(default="")) -> AnalyzeResponse:
+                         text: str = Form(default=""),
+                         mode: str = Form(default="issues")) -> AnalyzeResponse:
     data = await file.read()
     pages = await asyncio.to_thread(parse_document_pages, data, file.filename or "")
     doc_text = "\n\n".join(p.text for p in pages if p.text.strip())
     parts = [p for p in (doc_text, text.strip()) if p]
     if not parts:
         raise HTTPException(status_code=400, detail="Uploaded file produced no readable text")
-    session_id, context, issues = await analyze_case("\n\n---\n\n".join(parts), pages=pages)
+    mode = mode if mode in ("issues", "grounds") else "issues"
+    session_id, context, issues, grounds_meta = await analyze_case(
+        "\n\n---\n\n".join(parts), pages=pages, mode=mode)
     _tag_session(session_id, http_request.headers.get("x-user-id"),
                  (file.filename or "").rsplit(".", 1)[0] or None)
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
         needsClarification=context.needs_clarification,
         clarificationQuestion=context.clarification_question,
+        researchMode=mode, groundsMeta=grounds_meta or None,
     )
 
 
@@ -313,7 +323,7 @@ async def search(request: SearchRequest, background: BackgroundTasks) -> SearchR
         raise HTTPException(status_code=400, detail="caseInput must include text and/or a readable fileRef")
 
     raw_text = "\n\n---\n\n".join(parts)
-    response = await run_search_pipeline(raw_text)
+    response = await run_search_pipeline(raw_text, mode=request.mode)
     background.add_task(_vault_write, response)
     return response
 

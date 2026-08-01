@@ -530,14 +530,19 @@ class IndianKanoonClient:
         return meta
 
     async def fanout_and_fetch(self, keywords: KeywordSet, cap: int | None = None,
-                               exclude: set[str] | None = None) -> list[Candidate]:
+                               exclude: set[str] | None = None,
+                               forum_doctype: str | None = None) -> list[Candidate]:
         """Anchor queries first (full precision queries, double weight,
         deeper take), then one IK query per axis term — doctrinal/outcome
         phrases exact-quoted, statutory/factual left as AND-of-words. Union
         results, dedupe by docId, cap the pool. Candidates that matched more
         distinct queries rank earlier (they survive the cap first).
         `exclude`: docIds already tried in a previous round (reformulation
-        retries never re-fetch what was already rejected)."""
+        retries never re-fetch what was already rejected).
+        `forum_doctype`: the client's own High Court's IK doctype — anchor
+        queries are ALSO run restricted to that court, so its (binding)
+        judgments enter the pool even when nationwide recall would have
+        crowded them out."""
         settings = get_settings()
         cap = cap or settings.ik_candidate_cap
         per_query = settings.ik_results_per_query
@@ -555,6 +560,16 @@ class IndianKanoonClient:
             if wire not in seen_wire:
                 seen_wire.add(wire)
                 queries.append((anchor.strip(), wire, 2.0, per_query + 5))
+        if forum_doctype:
+            # Forum focus: same anchors, restricted to the client's own High
+            # Court. Highest weight — these are the keep-it-top candidates.
+            for anchor in keywords.anchor_queries[:4]:
+                if not anchor.strip():
+                    continue
+                wire = build_ik_query(anchor, doctypes=forum_doctype)
+                if wire not in seen_wire:
+                    seen_wire.add(wire)
+                    queries.append((anchor.strip(), wire, 2.5, per_query + 5))
         # Contra queries widen the pool with the adverse line of authority;
         # a result's final side comes from its VERIFIED outcome, not from
         # which query found it.
@@ -915,6 +930,102 @@ def court_rank(court: str) -> int:
         if pattern.search(court or ""):
             return idx
     return len(_COURT_TIERS)
+
+
+# ─── Forum-state High Court focus ────────────────────────────────────────────
+# The client's own High Court BINDS the forum (a Maharashtra matter answers
+# to the Bombay High Court), so its judgments get retrieval focus and top
+# placement. Each profile: (forum keywords → detection), IK doctypes value
+# (targeted search), docsource tokens (recognise that HC in results), label.
+
+_HC_PROFILES: tuple[tuple[tuple[str, ...], str, tuple[str, ...], str], ...] = (
+    (("bombay", "mumbai", "maharashtra", "aurangabad", "nagpur", "goa", "panaji"),
+     "bombay", ("bombay",), "Bombay High Court"),
+    (("delhi",), "delhi", ("delhi",), "Delhi High Court"),
+    (("calcutta", "kolkata", "west bengal"), "kolkata", ("calcutta",), "Calcutta High Court"),
+    (("madras", "chennai", "tamil nadu"), "chennai", ("madras",), "Madras High Court"),
+    (("allahabad", "uttar pradesh", "lucknow", "prayagraj"),
+     "allahabad", ("allahabad",), "Allahabad High Court"),
+    (("punjab", "haryana", "chandigarh"), "punjab", ("punjab",), "Punjab & Haryana High Court"),
+    (("karnataka", "bengaluru", "bangalore"), "karnataka", ("karnataka",), "Karnataka High Court"),
+    (("kerala", "ernakulam", "kochi"), "kerala", ("kerala",), "Kerala High Court"),
+    (("gujarat", "ahmedabad"), "gujarat", ("gujarat",), "Gujarat High Court"),
+    (("rajasthan", "jodhpur", "jaipur"), "rajasthan", ("rajasthan",), "Rajasthan High Court"),
+    (("madhya pradesh", "jabalpur", "indore", "gwalior"),
+     "madhyapradesh", ("madhya pradesh",), "Madhya Pradesh High Court"),
+    (("patna", "bihar"), "patna", ("patna",), "Patna High Court"),
+    (("orissa", "odisha", "cuttack"), "orissa", ("orissa",), "Orissa High Court"),
+    (("gauhati", "guwahati", "assam"), "gauhati", ("gauhati",), "Gauhati High Court"),
+    (("telangana", "hyderabad"), "telangana", ("telangana", "hyderabad"), "Telangana High Court"),
+    (("andhra pradesh", "amaravati", "andhra"), "andhra", ("andhra",), "Andhra Pradesh High Court"),
+    (("jharkhand", "ranchi"), "jharkhand", ("jharkhand",), "Jharkhand High Court"),
+    # 'hattisgarh' matches both the Chhattisgarh and IK's Chattisgarh spelling.
+    (("chhattisgarh", "chattisgarh", "bilaspur"), "chattisgarh", ("hattisgarh",), "Chattisgarh High Court"),
+    (("uttarakhand", "uttaranchal", "nainital"),
+     "uttaranchal", ("uttarakhand", "uttaranchal"), "Uttarakhand High Court"),
+    (("himachal", "shimla"), "himachal_pradesh", ("himachal",), "Himachal Pradesh High Court"),
+    (("jammu", "kashmir", "srinagar"), "jammu", ("jammu", "kashmir"), "Jammu & Kashmir High Court"),
+    (("sikkim", "gangtok"), "sikkim", ("sikkim",), "Sikkim High Court"),
+    (("tripura", "agartala"), "tripura", ("tripura",), "Tripura High Court"),
+    (("meghalaya", "shillong"), "meghalaya", ("meghalaya",), "Meghalaya High Court"),
+    (("manipur", "imphal"), "manipur", ("manipur",), "Manipur High Court"),
+)
+
+
+def forum_court_profile(forum: str | None) -> dict[str, Any] | None:
+    """Infer the client's own High Court from the forum text ('Bombay High
+    Court, Aurangabad Bench', 'Sessions Court, Pune', 'Maharashtra'…).
+    None when nothing can be inferred, or the forum IS the Supreme Court
+    (no state focus applies there)."""
+    text = (forum or "").lower()
+    if not text.strip() or "supreme court" in text:
+        return None
+    for keywords, doctype, match_tokens, label in _HC_PROFILES:
+        if any(k in text for k in keywords):
+            return {"doctype": doctype, "match": match_tokens, "label": label}
+    return None
+
+
+def case_court_profile(forum: str | None, case_text: str | None = None) -> dict[str, Any] | None:
+    """The court the CASE ITSELF points at: the extracted forum field when
+    it resolves, else the High Court (or its state/bench city) mentioned
+    EARLIEST in the case material — cause titles and procedural history
+    name the forum up front, while other states' courts appear later as
+    cited precedents. A 'supreme court' mention that precedes every HC hit
+    means the matter is before the SC → no state focus."""
+    profile = forum_court_profile(forum)
+    if profile or not (case_text or "").strip():
+        return profile
+    text = case_text[:4000].lower()
+    best: tuple[int, dict[str, Any]] | None = None
+    for keywords, doctype, match_tokens, label in _HC_PROFILES:
+        positions = [p for p in (text.find(k) for k in keywords) if p >= 0]
+        if positions and (best is None or min(positions) < best[0]):
+            best = (min(positions),
+                    {"doctype": doctype, "match": match_tokens, "label": label})
+    if best is None:
+        return None
+    sc_pos = text.find("supreme court")
+    return best[1] if sc_pos == -1 or best[0] < sc_pos else None
+
+
+def is_forum_high_court(court: str | None, profile: dict[str, Any] | None) -> bool:
+    """Is this result FROM the client's own High Court? Requires 'high
+    court' in the docsource so a same-state district court never matches."""
+    if not profile:
+        return False
+    c = (court or "").lower()
+    return "high court" in c and any(t in c for t in profile["match"])
+
+
+def forum_court_rank(court: str, profile: dict[str, Any] | None) -> int:
+    """Bench ordering with forum focus: the client's own High Court ranks
+    0 (binding at the forum — kept on top, per user request even above the
+    Supreme Court), then the normal tiers shifted by one. With no profile
+    the relative order is exactly the classic bench order."""
+    if is_forum_high_court(court, profile):
+        return 0
+    return 1 + court_rank(court)
 
 
 def authority_signal(candidate: Candidate) -> tuple[float, str]:

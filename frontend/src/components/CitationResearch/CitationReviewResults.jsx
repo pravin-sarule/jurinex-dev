@@ -538,10 +538,14 @@ function ReportDetail({ sessionId, issueId, item, status, onStatus, onBack }) {
 // ─── Main review layout ──────────────────────────────────────────────────────
 
 export default function CitationReviewResults({
-  searchResponse, caseContext, caseTitle, onEditIssues, onReset,
+  searchResponse, caseContext, caseTitle, researchMode = 'issues', onEditIssues, onReset,
 }) {
   const issues = searchResponse?.issues || [];
   const sessionId = searchResponse?.sessionId;
+  // Grounds-mode sessions label each research unit "Ground", not "Issue".
+  const isGrounds = researchMode === 'grounds';
+  const unitLabel = isGrounds ? 'Ground' : 'Issue';
+  const unitHeading = (issue) => (issue.title ? `${unitLabel} ${issue.id}: ${issue.title}` : issue.issue);
   const [detail, setDetail] = useState(null); // {issueId, item}
   const [openQueries, setOpenQueries] = useState({}); // issueId -> bool
   // Click an issue in the left rail → show only that issue's judgments.
@@ -561,17 +565,28 @@ export default function CitationReviewResults({
     try { sessionStorage.setItem(statusStorageKey, JSON.stringify(statuses)); } catch { /* non-fatal */ }
   }, [statusStorageKey, statuses]);
 
-  // Bench category + sort: support (petitioner side) first, then bench-wise
-  // (Supreme Court → High Courts → other forums), top verified score first.
+  // Bench category + sort: support (petitioner side) first, then the
+  // client's OWN High Court (binding at the forum — e.g. Bombay HC for a
+  // Maharashtra matter), then bench-wise (Supreme Court → High Courts →
+  // other forums), top verified score first. forumCourt comes from the
+  // backend ("Bombay High Court"); matching uses its first word so IK
+  // docsource variants still match.
+  const forumCourtKey = (searchResponse?.forumCourt || '').toLowerCase().split(/\s+/)[0] || null;
+  const isOwnCourt = (court) => {
+    if (!forumCourtKey) return false;
+    const c = (court || '').toLowerCase();
+    return c.includes('high court') && c.includes(forumCourtKey);
+  };
   const benchCat = (court) => (/supreme court/i.test(court || '') ? 'supreme'
     : /high court/i.test(court || '') ? 'high' : 'other');
   const BENCH_ORDER = { supreme: 0, high: 1, other: 2 };
+  const courtRank = (court) => (isOwnCourt(court) ? -1 : BENCH_ORDER[benchCat(court)]);
   const SIDE_ORDER = { support: 0, interim: 2, contra: 3 };
   const scoreOf = (it) => it.signals?.aiRelevance ?? it.signals?.semantic ?? 0;
   const sortResults = (results) => [...results].sort((a, b) => {
     const s = (SIDE_ORDER[a.side] ?? 1) - (SIDE_ORDER[b.side] ?? 1);
     if (s) return s;
-    const c = BENCH_ORDER[benchCat(a.court)] - BENCH_ORDER[benchCat(b.court)];
+    const c = courtRank(a.court) - courtRank(b.court);
     if (c) return c;
     return scoreOf(b) - scoreOf(a);
   });
@@ -648,7 +663,7 @@ export default function CitationReviewResults({
             )}
             <div>
               <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">
-                Issues ({issues.length})
+                {isGrounds ? 'Grounds' : 'Issues'} ({issues.length})
               </div>
               <div className="mt-2 space-y-2">
                 {activeIssueId != null && (
@@ -657,7 +672,7 @@ export default function CitationReviewResults({
                     className="w-full text-left rounded-xl border border-dashed border-[#99F6E4] bg-white px-3 py-2 text-[11px] font-semibold hover:bg-[#F0FDFA]"
                     style={{ color: TEAL_DARK }}
                   >
-                    ← Show all issues
+                    ← Show all {isGrounds ? 'grounds' : 'issues'}
                   </button>
                 )}
                 {issues.map((issue) => {
@@ -672,7 +687,7 @@ export default function CitationReviewResults({
                           : 'border-[#E2E8F0] bg-white text-[#334155] hover:border-[#99F6E4] hover:bg-[#F8FAFC]'
                       }`}
                     >
-                      {issue.title ? `Issue ${issue.id}: ${issue.title}` : issue.issue}
+                      {unitHeading(issue)}
                       <span className="ml-1.5 text-[10px] text-[#94A3B8]">({issue.results?.length || 0})</span>
                     </button>
                   );
@@ -739,6 +754,12 @@ export default function CitationReviewResults({
                     Clear filter
                   </button>
                 )}
+                {searchResponse?.forumCourt && (
+                  <span className="text-[11px] text-[#64748B]">
+                    <span className="font-semibold" style={{ color: TEAL_DARK }}>{searchResponse.forumCourt}</span>
+                    {' '}judgments ranked first — your forum
+                  </span>
+                )}
               </div>
 
               <div className="mt-4 space-y-8">
@@ -754,7 +775,7 @@ export default function CitationReviewResults({
                         <span className="mt-1.5 h-2 w-2 rounded-full shrink-0" style={{ background: TEAL }} />
                         <div className="min-w-0">
                           <h3 className="text-[15px] font-bold text-[#0F172A] font-serif leading-snug">
-                            {issue.title ? `Issue ${issue.id}: ${issue.title}` : issue.issue}
+                            {unitHeading(issue)}
                           </h3>
                           {issue.title && (
                             <p className="mt-0.5 text-[12px] text-[#64748B] leading-relaxed">{issue.issue}</p>

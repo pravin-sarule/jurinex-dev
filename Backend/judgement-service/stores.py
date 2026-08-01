@@ -351,7 +351,13 @@ class PostgresStore:
             return None
         try:
             from psycopg2 import pool as pgpool
-            self._pool = pgpool.ThreadedConnectionPool(1, 5, dsn=url)
+            # TCP keepalives: the remote Postgres (and NATs in between) drop
+            # idle connections; keepalives keep them honest, and _run below
+            # recovers when one dies anyway.
+            self._pool = pgpool.ThreadedConnectionPool(
+                1, 5, dsn=url,
+                keepalives=1, keepalives_idle=30,
+                keepalives_interval=10, keepalives_count=3)
             conn = self._pool.getconn()
             try:
                 with conn.cursor() as cur:
@@ -367,16 +373,54 @@ class PostgresStore:
             self._failed = True
         return self._pool
 
+    def _run(self, op: str, fn, default):
+        """Run one DB operation with dead-connection recovery. A pooled
+        connection the server closed while idle fails with Operational/
+        InterfaceError on first use — before this, that connection went
+        BACK into the pool and the write was silently lost (sessions
+        stopped saving until restart). Now the dead connection is
+        discarded and the operation retried once on a fresh one."""
+        pool = self._get()
+        if pool is None:
+            return default
+        import psycopg2
+        for attempt in (1, 2):
+            conn = None
+            broken = False
+            try:
+                conn = pool.getconn()
+                result = fn(conn)
+                conn.commit()
+                return result
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+                broken = True
+                if attempt == 1:
+                    logger.warning("[stores] %s hit a dead connection (%s) — "
+                                   "retrying on a fresh one", op, exc)
+                else:
+                    logger.warning("[stores] %s failed after retry (%s)", op, exc)
+            except Exception as exc:
+                logger.warning("[stores] %s failed (%s)", op, exc)
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        broken = True
+                return default
+            finally:
+                if conn is not None:
+                    try:
+                        pool.putconn(conn, close=broken)
+                    except Exception:
+                        pass
+        return default
+
     def session_upsert(self, session_id: str, payload: dict[str, Any]) -> bool:
         """Durable copy of a search session (results, reports, statuses) —
         everything survives cache TTLs and service restarts."""
-        pool = self._get()
-        if pool is None:
-            return False
-        conn = None
-        try:
-            from psycopg2.extras import Json
-            conn = pool.getconn()
+        from psycopg2.extras import Json
+
+        def _op(conn) -> bool:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -389,29 +433,14 @@ class PostgresStore:
                     """,
                     (session_id, Json(payload), payload.get("userId")),
                 )
-            conn.commit()
             return True
-        except Exception as exc:
-            logger.warning("[stores] session upsert failed (%s)", exc)
-            if conn is not None:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-            return False
-        finally:
-            if conn is not None:
-                pool.putconn(conn)
+
+        return self._run("session upsert", _op, False)
 
     def session_list(self, user_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         """Research history: lightweight summaries of stored sessions,
         newest first, optionally scoped to one user."""
-        pool = self._get()
-        if pool is None:
-            return []
-        conn = None
-        try:
-            conn = pool.getconn()
+        def _op(conn) -> list[dict[str, Any]]:
             with conn.cursor() as cur:
                 # NULL-owned rows are included: sessions predating user
                 # tagging (and curl/dev runs) would otherwise vanish from
@@ -447,41 +476,26 @@ class PostgresStore:
                 }
                 for r in rows
             ]
-        except Exception as exc:
-            logger.warning("[stores] session list failed (%s)", exc)
-            return []
-        finally:
-            if conn is not None:
-                pool.putconn(conn)
+
+        return self._run("session list", _op, [])
 
     def session_select(self, session_id: str) -> dict[str, Any] | None:
-        pool = self._get()
-        if pool is None:
-            return None
-        conn = None
-        try:
-            conn = pool.getconn()
+        def _op(conn) -> dict[str, Any] | None:
             with conn.cursor() as cur:
                 cur.execute("SELECT payload FROM judgement_sessions WHERE session_id = %s",
                             (session_id,))
                 row = cur.fetchone()
             return row[0] if row else None
-        except Exception as exc:
-            logger.warning("[stores] session select failed (%s)", exc)
-            return None
-        finally:
-            if conn is not None:
-                pool.putconn(conn)
+
+        return self._run("session select", _op, None)
 
     def vault_upsert(self, rows: list[dict[str, Any]]) -> int:
         """Persist GREEN survivors. Called async after the response is sent —
         must never raise into the request path."""
-        pool = self._get()
-        if pool is None or not rows:
+        if not rows:
             return 0
-        conn = None
-        try:
-            conn = pool.getconn()
+
+        def _op(conn) -> int:
             with conn.cursor() as cur:
                 for row in rows:
                     cur.execute(
@@ -495,19 +509,9 @@ class PostgresStore:
                         """,
                         row,
                     )
-            conn.commit()
             return len(rows)
-        except Exception as exc:
-            logger.warning("[stores] vault upsert failed (%s)", exc)
-            if conn is not None:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-            return 0
-        finally:
-            if conn is not None:
-                pool.putconn(conn)
+
+        return self._run("vault upsert", _op, 0)
 
     @property
     def available(self) -> bool:

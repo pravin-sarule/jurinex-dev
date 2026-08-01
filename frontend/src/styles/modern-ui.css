@@ -1,0 +1,161 @@
+/* ==================================================================== */
+/* JuriNex modern-UI polish layer                                        */
+/*                                                                      */
+/* Site-wide "modern & smooth" feel without touching component layout:  */
+/* micro-interactions, soft shadows, entrance animations, thin          */
+/* scrollbars, tasteful focus rings, smooth theme switching. Loaded     */
+/* after index.css from main.jsx. Everything here is additive — no      */
+/* sizes, spacing or positions change.                                  */
+/* ==================================================================== */
+
+/* ---- Typography rendering ------------------------------------------ */
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  /* Theme changes (Settings → Appearance) cross-fade instead of snapping. */
+  transition: filter 0.3s ease, background-color 0.3s ease;
+}
+
+/* Brand-tinted text selection */
+::selection {
+  background: rgba(33, 193, 182, 0.22);
+}
+
+/* ---- Modern thin scrollbars ---------------------------------------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #c7cdd4 transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: #cbd2d9;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: #9aa4af;
+  background-clip: content-box;
+}
+
+/* ---- Micro-interactions -------------------------------------------- */
+/* Interactive elements ease between states instead of snapping.
+   Deliberately NOT `transition: all` — only paint properties, so layout
+   never animates and never janks. */
+button,
+[role='button'],
+a,
+select,
+summary,
+input[type='checkbox'],
+input[type='radio'] {
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.15s ease,
+    opacity 0.18s ease;
+}
+
+/* Gentle press feedback everywhere */
+button:active:not(:disabled),
+[role='button']:active {
+  transform: scale(0.985);
+}
+
+/* Text inputs ease their focus states too */
+input[type='text'],
+input[type='email'],
+input[type='password'],
+input[type='search'],
+input[type='number'],
+textarea {
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+/* ---- Focus visibility (keyboard users) ----------------------------- */
+/* Only :focus-visible — mouse clicks stay clean, tab-navigation gets a
+   clear brand ring. Never removes existing outlines. */
+:focus-visible {
+  outline: 2px solid rgba(33, 193, 182, 0.8);
+  outline-offset: 2px;
+}
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(33, 193, 182, 0.22);
+  border-color: #21c1b6;
+}
+
+/* ---- Cards: soft modern elevation ---------------------------------- */
+/* Matches the app's common card patterns (Settings sections, panels)
+   without touching their dimensions. */
+.bg-white.border.rounded-lg,
+.bg-white.border.rounded-xl,
+.bg-white.border.rounded-2xl {
+  transition: box-shadow 0.22s ease, border-color 0.22s ease;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+.bg-white.border.rounded-lg:hover,
+.bg-white.border.rounded-xl:hover,
+.bg-white.border.rounded-2xl:hover {
+  box-shadow: 0 8px 20px -8px rgba(16, 24, 40, 0.12);
+}
+
+/* ---- Entrance animations ------------------------------------------- */
+@keyframes jnx-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes jnx-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Chat messages rise in softly as they appear */
+.chat-thread-card {
+  animation: jnx-rise-in 0.28s cubic-bezier(0.21, 0.9, 0.35, 1) both;
+}
+
+/* Dropdown menus and floating panels pop in (matches the app's common
+   absolute-positioned white panel pattern) */
+.absolute.bg-white.shadow-lg,
+.absolute.bg-white.shadow-xl,
+.absolute.bg-white.shadow-2xl {
+  animation: jnx-pop-in 0.16s ease-out both;
+}
+
+/* ---- Accessibility: respect reduced-motion ------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  html {
+    scroll-behavior: auto !important;
+  }
+}

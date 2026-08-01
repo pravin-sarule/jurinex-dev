@@ -22,6 +22,7 @@
  */
 
 import jurinexLogo from '../assets/JuriNex_gavel_logo.png';
+import { notificationsEnabled } from './notificationPrefs';
 
 const BRAND_TEAL = '#0aa396';
 const TOAST_ID = 'jurinex-response-toast';
@@ -70,6 +71,8 @@ if (typeof document !== 'undefined') {
 
 export const ensureNotificationPermission = () => {
   if (typeof window === 'undefined' || !('Notification' in window)) return;
+  // User turned JuriNex notifications off in Settings — don't even prompt.
+  if (!notificationsEnabled('push')) return;
   if (Notification.permission !== 'default') return;
   try {
     const result = Notification.requestPermission(() => {});
@@ -292,6 +295,10 @@ export const notifyResponseComplete = ({
   body = 'JuriNex has finished generating your response.',
 } = {}) => {
   if (typeof document === 'undefined') return;
+
+  // Settings → Notifications toggle: off = no toast, no browser notification,
+  // no title flash, no chime — across every completion path in the app.
+  if (!notificationsEnabled('push')) return;
 
   // Streams often signal completion on more than one code path — collapse
   // bursts into a single alert.

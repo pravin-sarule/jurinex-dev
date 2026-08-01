@@ -555,8 +555,6 @@ import {
   MagnifyingGlassCircleIcon,
   PencilSquareIcon,
   ScaleIcon,
-  BookOpenIcon,
-  BeakerIcon,
   ClockIcon,
   UserGroupIcon,
   Bars3Icon,
@@ -808,9 +806,7 @@ const Sidebar = () => {
   const navigationItems = [
     { name: 'Dashboard', path: '/dashboard', icon: ChartBarIcon },
     { name: 'Projects', path: '/documents', icon: DocumentTextIcon },
-    { name: 'Citation', path: '/citation', icon: BookOpenIcon },
     { name: 'Citation Research', path: '/citation-research', icon: ScaleIcon },
-    { name: 'Citation Test', path: '/citation-testing', icon: BeakerIcon },
     { name: 'ChatModel', path: '/chatmodel', icon: ChatBubbleLeftRightIcon },
     { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },
     { name: 'DeepSeek AI', icon: null, isDeepSeek: true },
@@ -835,7 +831,7 @@ const Sidebar = () => {
   );
 
   const MobileHeader = () => (
-    <div className="lg:hidden fixed top-0 left-0 right-0 z-40 bg-[#0d1117] border-b border-gray-900 px-4 py-3 flex items-center justify-between">
+    <div className="jnx-keep-colors lg:hidden fixed top-0 left-0 right-0 z-40 bg-[#0d1117] border-b border-gray-900 px-4 py-3 flex items-center justify-between">
       <JuriNexLogo />
       <button onClick={() => setIsMobileMenuOpen(true)} className="p-2 rounded-lg hover:bg-gray-900 transition-colors duration-200">
         <Bars3Icon className="h-6 w-6 text-gray-400" />
@@ -844,7 +840,9 @@ const Sidebar = () => {
   );
 
   const SidebarContent = ({ isMobileView = false, toggleProfileMenu, isProfileMenuOpen }) => (
-    <div className="flex flex-col h-full bg-[#0d1117]">
+    // jnx-keep-colors: the sidebar is dark by design — exempt it from the
+    // dark theme's root inversion so it keeps its own #0d1117 look.
+    <div className="jnx-keep-colors flex flex-col h-full bg-[#0d1117]">
       <div className={`py-5 border-b border-gray-900 relative ${isSidebarCollapsed && !isMobileView ? 'px-2' : 'px-6'} transition-all duration-300`}>
         {isMobileView ? (
           <div className="flex items-center justify-between">
@@ -1065,7 +1063,7 @@ const Sidebar = () => {
             className="fixed inset-0 bg-black bg-opacity-70 transition-opacity duration-300 backdrop-blur-sm"
             onClick={() => setIsMobileMenuOpen(false)}
           />
-          <div className="relative flex flex-col w-80 max-w-xs bg-[#0d1117] shadow-2xl transform transition-transform duration-300 ease-in-out">
+          <div className="jnx-keep-colors relative flex flex-col w-80 max-w-xs bg-[#0d1117] shadow-2xl transform transition-transform duration-300 ease-in-out">
             <SidebarContent isMobileView={true} toggleProfileMenu={toggleProfileMenu} isProfileMenuOpen={isProfileMenuOpen} />
           </div>
         </div>

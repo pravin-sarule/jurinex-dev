@@ -146,6 +146,22 @@ const deepResearchMarkdownComponents = {
   img: () => null,
 };
 
+/**
+ * Models sometimes wrap citations or emphasis in $$ ... $$ ("$$ Appeal No.
+ * 9/2016 Judgment $$") despite prompt rules forbidding it. remark-math reads
+ * $$ as display math and swallows the surrounding structure into one giant
+ * broken KaTeX span — the whole answer then renders as red, unstructured
+ * text with literal ## and <strong>. Convert prose-looking $$ spans to bold;
+ * only spans that actually look like LaTeX (backslash commands, ^ _ { })
+ * stay math, so genuine equations from the backend's LaTeX conversion
+ * still render.
+ */
+const LATEX_LIKE = /(\\[a-zA-Z]+)|[\^_{}]/;
+const neutralizeNonMathDollarSpans = (text) =>
+  String(text || '').replace(/\$\$([\s\S]*?)\$\$/g, (match, inner) =>
+    LATEX_LIKE.test(inner) ? match : `**${inner.trim()}**`
+  );
+
 /** Canonical URLs the server fetched and validated for this answer. */
 function validatedUrlSet(citations) {
   const urls = new Set();
@@ -201,7 +217,7 @@ const FormattedAssistantContent = React.memo(
         // and rewrite numbered chronologies into tables.
         // preserveIndent keeps list nesting alive: the shared table repair trims
         // every line, which flattened sub-bullets and tore numbered lists apart.
-        ensureTableSeparators(normalizeMarkdownFormatting(content, {
+        ensureTableSeparators(normalizeMarkdownFormatting(neutralizeNonMathDollarSpans(content), {
           html: !forceSafeMarkdown,
           repairOcr: !forceSafeMarkdown,
         }), { preserveIndent: forceSafeMarkdown }),

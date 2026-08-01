@@ -3580,7 +3580,7 @@ const ChatInterface = () => {
             </span>
             {/* Option content */}
             <span style={{
-              flex: 1, fontSize: '15px', lineHeight: '1.65',
+              flex: 1, fontSize: "calc(15px * var(--jnx-text-scale, 1))", lineHeight: '1.65',
               fontFamily: 'Inter, system-ui, sans-serif',
               color: isPicked ? '#0f766e' : '#1a1a1a',
               fontWeight: isPicked ? 600 : 400,
@@ -3603,7 +3603,7 @@ const ChatInterface = () => {
             margin: '0 0 14px',
             fontWeight: 600,
             color: '#1a1a1a',
-            fontSize: '15px',
+            fontSize: "calc(15px * var(--jnx-text-scale, 1))",
             lineHeight: '1.75',
             fontFamily: 'Inter, system-ui, sans-serif',
           }} {...props}>
@@ -3616,7 +3616,7 @@ const ChatInterface = () => {
       return (
         <p style={{
           margin: '0 0 14px',
-          fontSize: '15px',
+          fontSize: "calc(15px * var(--jnx-text-scale, 1))",
           lineHeight: '1.75',
           color: '#232323',
           fontFamily: 'Inter, system-ui, sans-serif',
@@ -3630,20 +3630,20 @@ const ChatInterface = () => {
     strong: ({ children, ...props }) => (
       <strong style={{ fontWeight: 700, color: '#0f766e' }} {...props}>{children}</strong>
     ),
-    h1: ({ node, ...p }) => <h1 style={{ fontSize: '20px', fontWeight: 700, margin: '20px 0 8px', color: '#111', fontFamily: 'Inter, system-ui, sans-serif', textAlign: _draftLineAlign(extractNodeText(node?.children || [])) || undefined }} {...p} />,
-    h2: ({ node, ...p }) => <h2 style={{ fontSize: '17px', fontWeight: 700, margin: '16px 0 6px', color: '#111', fontFamily: 'Inter, system-ui, sans-serif', textAlign: _draftLineAlign(extractNodeText(node?.children || [])) || undefined }} {...p} />,
-    h3: ({ node, ...p }) => <h3 style={{ fontSize: '15px', fontWeight: 700, margin: '14px 0 4px', color: '#222', fontFamily: 'Inter, system-ui, sans-serif', textAlign: _draftLineAlign(extractNodeText(node?.children || [])) || undefined }} {...p} />,
+    h1: ({ node, ...p }) => <h1 style={{ fontSize: "calc(20px * var(--jnx-text-scale, 1))", fontWeight: 700, margin: '20px 0 8px', color: '#111', fontFamily: 'Inter, system-ui, sans-serif', textAlign: _draftLineAlign(extractNodeText(node?.children || [])) || undefined }} {...p} />,
+    h2: ({ node, ...p }) => <h2 style={{ fontSize: "calc(17px * var(--jnx-text-scale, 1))", fontWeight: 700, margin: '16px 0 6px', color: '#111', fontFamily: 'Inter, system-ui, sans-serif', textAlign: _draftLineAlign(extractNodeText(node?.children || [])) || undefined }} {...p} />,
+    h3: ({ node, ...p }) => <h3 style={{ fontSize: "calc(15px * var(--jnx-text-scale, 1))", fontWeight: 700, margin: '14px 0 4px', color: '#222', fontFamily: 'Inter, system-ui, sans-serif', textAlign: _draftLineAlign(extractNodeText(node?.children || [])) || undefined }} {...p} />,
     blockquote: (p) => (
       <blockquote style={{
         margin: '14px 0 16px', padding: '6px 0 6px 14px',
         borderLeft: '3px solid #21C1B6', background: '#f0fdfa',
         color: '#134e4a', fontStyle: 'italic', borderRadius: '0 6px 6px 0',
-        fontSize: '14px', lineHeight: '1.65', fontFamily: 'Inter, system-ui, sans-serif',
+        fontSize: "calc(14px * var(--jnx-text-scale, 1))", lineHeight: '1.65', fontFamily: 'Inter, system-ui, sans-serif',
       }} {...p} />
     ),
     ul: (p) => <ul style={{ margin: '0 0 14px', paddingLeft: '22px' }} {...p} />,
     ol: (p) => <ol style={{ margin: '0 0 14px', paddingLeft: '22px' }} {...p} />,
-    li: (p) => <li style={{ marginBottom: '6px', fontSize: '15px', lineHeight: '1.65', fontFamily: 'Inter, system-ui, sans-serif' }} {...p} />,
+    li: (p) => <li style={{ marginBottom: '6px', fontSize: "calc(15px * var(--jnx-text-scale, 1))", lineHeight: '1.65', fontFamily: 'Inter, system-ui, sans-serif' }} {...p} />,
     hr: (p) => <hr style={{ border: 'none', borderTop: '1px solid #e5e7eb', margin: '16px 0' }} {...p} />,
     table: ({ children, ...props }) => (
       <div style={{ overflowX: 'auto', margin: '18px 0', WebkitOverflowScrolling: 'touch' }}>
@@ -3651,7 +3651,7 @@ const ChatInterface = () => {
           style={{
             width: '100%',
             borderCollapse: 'collapse',
-            fontSize: '17px',
+            fontSize: "calc(17px * var(--jnx-text-scale, 1))",
             lineHeight: '1.5',
             fontFamily: '"Crimson Text", "Times New Roman", Times, serif',
           }}
@@ -3691,7 +3691,7 @@ const ChatInterface = () => {
       inline ? (
         <code style={{
           background: '#f0fdfa', border: '1px solid #99f6e4',
-          borderRadius: '5px', padding: '2px 6px', fontSize: '14px',
+          borderRadius: '5px', padding: '2px 6px', fontSize: "calc(14px * var(--jnx-text-scale, 1))",
           color: '#0f766e', fontFamily: '"IBM Plex Mono", "Courier New", monospace',
         }} {...props}>{children}</code>
       ) : (
@@ -4378,7 +4378,7 @@ const ChatInterface = () => {
                             })()}
                           </div>
                         ) : (
-                          <div style={{ maxWidth: '100%', margin: '0 auto', width: '100%', fontSize: '16px', lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
+                          <div style={{ maxWidth: '100%', margin: '0 auto', width: '100%', fontSize: "calc(16px * var(--jnx-text-scale, 1))", lineHeight: '1.65', color: '#111827', fontFamily: 'Inter, system-ui, sans-serif' }}>
                             {animatedResponseContent && !looksLikeClarificationStream(animatedResponseContent) ? (
                               <FormattedAssistantContent raw={animatedResponseContent} markdownComponents={aiMarkdownComponents} forceSafeMarkdown={activeStreamIsDeepRef.current} />
                             ) : (

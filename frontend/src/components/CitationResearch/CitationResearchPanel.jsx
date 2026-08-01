@@ -8,6 +8,7 @@ import {
   DocumentTextIcon,
   MagnifyingGlassIcon,
   PlusIcon,
+  QueueListIcon,
   ScaleIcon,
   SparklesIcon,
   XMarkIcon,
@@ -25,6 +26,14 @@ const BAND_STYLES = {
   GREEN: 'bg-[#F0FDF4] text-[#166534] border border-[#BBF7D0]',
   YELLOW: 'bg-[#FFFBEB] text-[#92400E] border border-[#FDE68A]',
   RED: 'bg-[#FEF2F2] text-[#991B1B] border border-[#FECACA]',
+};
+
+// Grounds-mode extraction confidence (per ground) — semantic status tints,
+// same palette as the bands.
+const CONFIDENCE_STYLES = {
+  high: 'bg-[#F0FDF4] text-[#166534] border border-[#BBF7D0]',
+  medium: 'bg-[#FFFBEB] text-[#92400E] border border-[#FDE68A]',
+  low: 'bg-[#FEF2F2] text-[#991B1B] border border-[#FECACA]',
 };
 
 const REFINE_MODES = [
@@ -246,6 +255,10 @@ export default function CitationResearchPanel() {
   const { isSidebarCollapsed, isSidebarHidden } = useSidebar();
   const [step, setStep] = useState('input'); // input | issues | results
   const [inputMode, setInputMode] = useState('case'); // case | text
+  // How research items are derived: 'issues' (issue spotter — existing
+  // behaviour, default) or 'grounds' (extract the grounds pleaded in the
+  // filing and fetch verified judgments for each ground).
+  const [researchMode, setResearchMode] = useState('issues');
   const [cases, setCases] = useState([]);
   const [casesLoading, setCasesLoading] = useState(true);
   const [casesPage, setCasesPage] = useState(1);
@@ -263,6 +276,9 @@ export default function CitationResearchPanel() {
 
   const totalSelected = selectedIds.size + customIssues.length;
   const suggested = analysis?.suggestedIssues || [];
+  // Once analysed, the server's researchMode is the truth for this session.
+  const isGrounds = (analysis?.researchMode || researchMode) === 'grounds';
+  const groundsMeta = analysis?.groundsMeta || null;
 
   // Persist the whole research flow (analysis, selections, fetched
   // citations) so navigating away and coming back restores everything.
@@ -274,6 +290,7 @@ export default function CitationResearchPanel() {
       if (raw) {
         const saved = JSON.parse(raw);
         if (saved.inputMode) setInputMode(saved.inputMode);
+        if (saved.researchMode) setResearchMode(saved.researchMode);
         if (saved.selectedCaseId) setSelectedCaseId(saved.selectedCaseId);
         if (typeof saved.caseText === 'string') setCaseText(saved.caseText);
         if (saved.analysis) setAnalysis(saved.analysis);
@@ -292,11 +309,11 @@ export default function CitationResearchPanel() {
     if (!hydrated) return;
     try {
       sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
-        step, inputMode, selectedCaseId, caseText,
+        step, inputMode, researchMode, selectedCaseId, caseText,
         analysis, selectedIds: [...selectedIds], customIssues, searchResponse,
       }));
     } catch { /* storage full — non-fatal */ }
-  }, [hydrated, step, inputMode, selectedCaseId, caseText, analysis, selectedIds, customIssues, searchResponse]);
+  }, [hydrated, step, inputMode, researchMode, selectedCaseId, caseText, analysis, selectedIds, customIssues, searchResponse]);
 
   // The user's existing cases, from the agentic document service.
   useEffect(() => {
@@ -328,7 +345,10 @@ export default function CitationResearchPanel() {
         suggestedIssues: saved.suggestedIssues || [],
         caseTitle: saved.caseTitle || null,
         needsClarification: false,
+        researchMode: saved.researchMode || 'issues',
+        groundsMeta: saved.groundsMeta || null,
       });
+      setResearchMode(saved.researchMode || 'issues');
       setSelectedIds(new Set((saved.suggestedIssues || []).map((i) => i.id)));
       setCustomIssues([]);
       const issuesWithResults = (saved.issues || []).filter((i) => (i.results || []).length > 0);
@@ -340,7 +360,7 @@ export default function CitationResearchPanel() {
             Object.entries(byDoc || {}).forEach(([docId, st]) => { statuses[`${issueId}:${docId}`] = st; }));
           sessionStorage.setItem(`jurinex.reviewStatuses.${sessionId}`, JSON.stringify(statuses));
         } catch { /* non-fatal */ }
-        setSearchResponse({ sessionId, issues: saved.issues });
+        setSearchResponse({ sessionId, issues: saved.issues, forumCourt: saved.forumCourt || null });
         setStep('results');
       } else {
         setSearchResponse(null);
@@ -403,10 +423,10 @@ export default function CitationResearchPanel() {
     setAnalyzing(true);
     try {
       const data = inputMode === 'case'
-        ? await judgementApi.analyzeCase(selectedCaseId, caseText.trim())
+        ? await judgementApi.analyzeCase(selectedCaseId, caseText.trim(), researchMode)
         : (file
-          ? await judgementApi.analyzeUpload(file, caseText.trim())
-          : await judgementApi.analyze({ text: caseText.trim() }));
+          ? await judgementApi.analyzeUpload(file, caseText.trim(), researchMode)
+          : await judgementApi.analyze({ text: caseText.trim(), mode: researchMode }));
       setAnalysis(data);
       setSelectedIds(new Set((data.suggestedIssues || []).map((i) => i.id)));
       setCustomIssues([]);
@@ -609,6 +629,57 @@ export default function CitationResearchPanel() {
                 className="mt-4 w-full bg-white border border-[#E2E8F0] text-[#0F172A] text-sm rounded-xl p-4 outline-none focus:border-[#21C1B6]/50 focus:ring-2 focus:ring-[#21C1B6]/10 leading-relaxed shadow-sm placeholder:text-[#94A3B8]"
               />
 
+              {/* Research method: how judgments are fetched — via spotted
+                  legal issues (existing behaviour) or via the grounds
+                  pleaded in the filing itself. */}
+              <div className="mt-4">
+                <h2 className="text-sm font-bold text-[#0F172A]">Research method</h2>
+                <div className="mt-2 grid sm:grid-cols-2 gap-3">
+                  {[
+                    {
+                      key: 'issues',
+                      icon: SparklesIcon,
+                      label: 'Legal issues',
+                      desc: 'The system spots the researchable legal issues in the case and finds verified precedents for each.',
+                    },
+                    {
+                      key: 'grounds',
+                      icon: QueueListIcon,
+                      label: 'Grounds of the case',
+                      desc: 'Extracts the grounds pleaded in the petition / appeal, builds search keywords from each ground, and fetches Indian Kanoon judgments verified against that ground.',
+                    },
+                  ].map(({ key, icon: ModeIcon, label, desc }) => {
+                    const active = researchMode === key;
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => setResearchMode(key)}
+                        className={`text-left rounded-xl border p-3.5 transition-all ${
+                          active
+                            ? 'border-[#21C1B6] bg-[#F0FDFA] shadow-sm'
+                            : 'border-[#E2E8F0] bg-white hover:border-[#CBD5E1] hover:shadow-sm'
+                        }`}
+                      >
+                        <div className="flex items-start gap-2.5">
+                          <span className={`mt-0.5 h-4 w-4 shrink-0 rounded-full border flex items-center justify-center ${
+                            active ? 'border-[#21C1B6]' : 'border-[#CBD5E1]'
+                          }`}>
+                            {active && <span className="h-2 w-2 rounded-full bg-[#21C1B6]" />}
+                          </span>
+                          <span className="min-w-0">
+                            <span className="flex items-center gap-1.5 text-sm font-semibold text-[#0F172A]">
+                              <ModeIcon className={`h-4 w-4 ${active ? 'text-[#21C1B6]' : 'text-[#94A3B8]'}`} />
+                              {label}
+                            </span>
+                            <span className="mt-1 block text-[11px] text-[#64748B] leading-relaxed">{desc}</span>
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                 {inputMode === 'text' && (
                   <label className="flex items-center gap-2 cursor-pointer text-sm text-[#64748B] hover:text-[#0F172A]">
@@ -667,7 +738,9 @@ export default function CitationResearchPanel() {
         <div className="max-w-4xl mx-auto pb-24">
           <PageHeader
             title="What should we research?"
-            subtitle="Pick the issues you need authority for, or describe it yourself."
+            subtitle={isGrounds
+              ? 'These are the grounds pleaded in the filing — pick the ones you need judgments for, or add your own.'
+              : 'Pick the issues you need authority for, or describe it yourself.'}
             right={(
               <button
                 onClick={runAnalyze}
@@ -698,9 +771,30 @@ export default function CitationResearchPanel() {
             </div>
           )}
 
+          {/* Grounds extraction metadata (grounds mode only) */}
+          {isGrounds && groundsMeta && (
+            <div className="mt-3 rounded-xl border border-[#E2E8F0] bg-white px-4 py-3">
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-[#475569]">
+                <span><span className="font-semibold text-[#0F172A]">{groundsMeta.totalGrounds ?? suggested.length}</span> ground{(groundsMeta.totalGrounds ?? suggested.length) === 1 ? '' : 's'} identified</span>
+                {groundsMeta.documentType && <span>Document: <span className="font-semibold text-[#0F172A]">{groundsMeta.documentType}</span></span>}
+                {groundsMeta.party && <span>Party: <span className="font-semibold text-[#0F172A]">{groundsMeta.party}</span></span>}
+                {groundsMeta.truncatedGrounds > 0 && (
+                  <span className="text-[#92400E]">{groundsMeta.truncatedGrounds} further ground{groundsMeta.truncatedGrounds === 1 ? '' : 's'} beyond the cap not shown</span>
+                )}
+              </div>
+              {Array.isArray(groundsMeta.notes) && groundsMeta.notes.length > 0 && (
+                <ul className="mt-2 space-y-0.5">
+                  {groundsMeta.notes.map((note, ni) => (
+                    <li key={ni} className="text-[11px] text-[#92400E]">⚠ {note}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
           <div className="mt-7 flex items-center justify-between">
             <h2 className="text-sm font-bold text-[#0F172A]">
-              Legal issues <span className="ml-2 font-medium text-[#94A3B8]">{selectedIds.size} of {suggested.length} selected</span>
+              {isGrounds ? 'Grounds of the case' : 'Legal issues'} <span className="ml-2 font-medium text-[#94A3B8]">{selectedIds.size} of {suggested.length} selected</span>
             </h2>
             {selectedIds.size > 0 && (
               <button onClick={() => setSelectedIds(new Set())} className="text-xs font-medium text-[#21C1B6] hover:text-[#1AA49B]">
@@ -712,11 +806,14 @@ export default function CitationResearchPanel() {
           <div className="mt-3 grid md:grid-cols-2 gap-3">
             {suggested.length === 0 && (
               <div className="text-xs text-[#94A3B8] italic col-span-2">
-                No issues were suggested — add your own below.
+                {isGrounds ? 'No pleaded grounds were found — add your own below.' : 'No issues were suggested — add your own below.'}
               </div>
             )}
             {suggested.map((issue) => {
               const active = selectedIds.has(issue.id);
+              const groundHeading = isGrounds
+                ? `${issue.ground_label || `Ground ${issue.id}`}${issue.title ? `: ${issue.title}` : ''}`
+                : (issue.title ? `Issue ${issue.id}: ${issue.title}` : issue.issue);
               return (
                 <button
                   key={issue.id}
@@ -735,11 +832,31 @@ export default function CitationResearchPanel() {
                     </span>
                     <span className="flex-1 min-w-0">
                       <span className="text-[15px] font-semibold text-[#0F172A] leading-snug block font-serif">
-                        {issue.title ? `Issue ${issue.id}: ${issue.title}` : issue.issue}
+                        {groundHeading}
                       </span>
-                      {issue.title && issue.explanation && (
+                      {isGrounds && issue.confidence && (
+                        <span className={`mt-1.5 inline-block px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide ${CONFIDENCE_STYLES[issue.confidence] || CONFIDENCE_STYLES.medium}`}>
+                          {issue.confidence} confidence
+                        </span>
+                      )}
+                      {(isGrounds ? issue.explanation : (issue.title && issue.explanation)) && (
                         <span className="mt-1.5 block text-[12px] text-[#64748B] leading-relaxed">
                           {issue.explanation}
+                        </span>
+                      )}
+                      {isGrounds && Array.isArray(issue.legal_framework) && issue.legal_framework.length > 0 && (
+                        <span className="mt-2 flex flex-wrap gap-1.5">
+                          {issue.legal_framework.map((law, li) => (
+                            <span key={li} className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0]">
+                              {law}
+                            </span>
+                          ))}
+                        </span>
+                      )}
+                      {isGrounds && Array.isArray(issue.case_law_cited) && issue.case_law_cited.length > 0 && (
+                        <span className="mt-1.5 block text-[11px] text-[#64748B]">
+                          <span className="font-semibold">Case law cited:</span>{' '}
+                          <span className="italic">{issue.case_law_cited.join('; ')}</span>
                         </span>
                       )}
                       {Array.isArray(issue.queries) && issue.queries.length > 0 && (
@@ -751,10 +868,12 @@ export default function CitationResearchPanel() {
                           ))}
                         </span>
                       )}
-                      {issue.source && (
+                      {(issue.source || (isGrounds && issue.ground_ref)) && (
                         <span className="mt-2.5 flex items-center gap-1.5 text-[11px] text-[#64748B]">
                           <DocumentTextIcon className="h-3.5 w-3.5 shrink-0 text-[#94A3B8]" />
-                          <span className="truncate">{issue.source}</span>
+                          <span className="truncate">
+                            {[isGrounds ? issue.ground_ref : null, issue.source].filter(Boolean).join(' · ')}
+                          </span>
                         </span>
                       )}
                     </span>
@@ -813,7 +932,7 @@ export default function CitationResearchPanel() {
                 <ChevronLeftIcon className="h-4 w-4" /> Start over
               </button>
               <div className="flex items-center gap-4">
-                <span className="text-xs text-[#64748B]">Searching {totalSelected} issue{totalSelected === 1 ? '' : 's'}</span>
+                <span className="text-xs text-[#64748B]">Searching {totalSelected} {isGrounds ? 'ground' : 'issue'}{totalSelected === 1 ? '' : 's'}</span>
                 <button
                   onClick={runSearch}
                   disabled={searching || totalSelected === 0}
@@ -836,6 +955,7 @@ export default function CitationResearchPanel() {
       searchResponse={searchResponse}
       caseContext={analysis?.caseContext}
       caseTitle={analysis?.caseTitle}
+      researchMode={analysis?.researchMode || 'issues'}
       onEditIssues={() => setStep('issues')}
       onReset={resetAll}
     />

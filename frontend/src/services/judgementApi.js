@@ -52,10 +52,13 @@ export const judgementApi = {
   /**
    * Phase 1 — POST /api/v1/analyze with pasted case text (and/or a server-side
    * fileRef). Returns { sessionId, caseContext, suggestedIssues,
-   * needsClarification, clarificationQuestion }. No search spend happens here.
+   * needsClarification, clarificationQuestion, researchMode, groundsMeta }.
+   * mode: 'issues' (default — issue spotter) | 'grounds' (extract the grounds
+   * pleaded in the filing and research precedents for each ground).
+   * No search spend happens here.
    */
-  analyze({ text, fileRef } = {}) {
-    return postJson('/api/v1/analyze', { caseInput: { text: text || null, fileRef: fileRef || null } });
+  analyze({ text, fileRef, mode = 'issues' } = {}) {
+    return postJson('/api/v1/analyze', { caseInput: { text: text || null, fileRef: fileRef || null }, mode });
   },
 
   /**
@@ -64,15 +67,16 @@ export const judgementApi = {
    * page-numbered chunks) from the agentic document service, so suggested
    * issues come back with 'file, page N' source references.
    */
-  analyzeCase(caseId, text = '') {
-    return postJson('/api/v1/analyze/case', { caseId, text: text || null });
+  analyzeCase(caseId, text = '', mode = 'issues') {
+    return postJson('/api/v1/analyze/case', { caseId, text: text || null, mode });
   },
 
   /** Phase 1 (upload) — POST /api/v1/analyze/upload with a PDF/DOCX + optional note. */
-  async analyzeUpload(file, text = '') {
+  async analyzeUpload(file, text = '', mode = 'issues') {
     const form = new FormData();
     form.append('file', file);
     if (text) form.append('text', text);
+    form.append('mode', mode);
     const response = await fetch(`${JUDGEMENT_SERVICE_URL}/api/v1/analyze/upload`, {
       method: 'POST',
       headers: { ...getAuthHeader() },

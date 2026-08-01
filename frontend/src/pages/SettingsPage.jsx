@@ -1,13 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { User, Mail, Phone, MapPin, Calendar, Shield, Bell, Palette, Globe, Download, Trash2, LogOut, ChevronRight, Check, Lock, Eye, EyeOff, CreditCard, Monitor, Smartphone, Tablet, RefreshCw, MoreVertical } from 'lucide-react';
+import { User, Mail, Phone, MapPin, Calendar, Shield, Bell, Palette, Globe, Download, Trash2, LogOut, ChevronRight, Check, Lock, Eye, EyeOff, CreditCard, Monitor, Smartphone, Tablet, RefreshCw, MoreVertical, Type } from 'lucide-react';
 import { useAuth } from '../context';
-import { useTheme } from '../context/ThemeContext.jsx';
+import { useTheme, THEME_OPTIONS } from '../context/ThemeContext.jsx';
 import api from '../services/api';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import ProfileSetupForm from '../components/ProfileSetupForm';
 import { canUsePermission, PERMISSION_KEYS, shouldEnforceRbac } from '../utils/permissions';
+import { getNotificationPrefs, setNotificationPref } from '../utils/notificationPrefs';
+import { FONT_OPTIONS, getFontPref, applyFontPref, ensureFontFaceLoaded, FONT_SIZE_OPTIONS, getFontSizePref, applyFontSizePref } from '../utils/fontPrefs';
 
 const PasswordInput = React.memo(({ id, placeholder, value, onChange, showPassword, onToggle, autoComplete, disabled }) => {
  const inputRef = useRef(null);
@@ -361,6 +363,234 @@ const LoginDevicesSection = () => {
  );
 };
 
+// Settings → Appearance: three-theme picker. The real restyling lives in
+// index.css keyed on html[data-theme]; swatches carry .jnx-theme-swatch so the
+// dark-mode root filter never distorts the previews.
+const THEME_SWATCHES = {
+ light: { bg: '#ffffff', border: '#e5e7eb', bar1: '#111827', bar2: '#9ca3af', chip: '#21C1B6' },
+ dark: { bg: '#262624', border: '#3a3936', bar1: '#e8e6e0', bar2: '#8a8880', chip: '#21C1B6' },
+ sepia: { bg: '#f6efdd', border: '#e3d5b3', bar1: '#4a3f2a', bar2: '#a08c66', chip: '#0f766e' },
+};
+
+const ThemeSection = () => {
+ const { theme, setTheme } = useTheme();
+
+ const handleSelect = (option) => {
+ if (option.id === theme) return;
+ setTheme(option.id);
+ toast.success(`${option.label} theme applied`);
+ };
+
+ return (
+ <SettingSection icon={Palette} title="Theme">
+ <p className="text-sm text-gray-500 mb-4">
+ Pick how JuriNex looks. The theme applies to the entire site instantly and is remembered on this browser.
+ </p>
+ <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+ {THEME_OPTIONS.map((option) => {
+ const isActive = theme === option.id;
+ const sw = THEME_SWATCHES[option.id];
+ return (
+ <button
+ key={option.id}
+ type="button"
+ onClick={() => handleSelect(option)}
+ className="text-left rounded-lg border p-3 transition-all duration-150"
+ style={{
+ borderColor: isActive ? '#21C1B6' : '#e5e7eb',
+ backgroundColor: isActive ? '#F7FDFC' : '#ffffff',
+ boxShadow: isActive ? '0 0 0 3px rgba(33,193,182,0.15)' : 'none',
+ cursor: 'pointer',
+ }}
+ onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.borderColor = '#21C1B6'; }}
+ onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.borderColor = '#e5e7eb'; }}
+ >
+ <div
+ className="jnx-theme-swatch rounded-md mb-3 p-3"
+ style={{ backgroundColor: sw.bg, border: `1px solid ${sw.border}` }}
+ >
+ <div className="h-2 rounded-full mb-1.5" style={{ backgroundColor: sw.bar1, width: '60%' }} />
+ <div className="h-2 rounded-full mb-1.5" style={{ backgroundColor: sw.bar2, width: '85%' }} />
+ <div className="h-2 rounded-full" style={{ backgroundColor: sw.bar2, width: '40%' }} />
+ <div className="mt-2 h-4 w-10 rounded" style={{ backgroundColor: sw.chip }} />
+ </div>
+ <div className="flex items-center justify-between">
+ <span className="text-sm font-semibold" style={{ color: isActive ? '#0F766E' : '#111827' }}>
+ {option.label}
+ </span>
+ {isActive && (
+ <span className="flex items-center justify-center w-5 h-5 rounded-full flex-shrink-0" style={{ backgroundColor: '#21C1B6' }}>
+ <Check className="w-3 h-3 text-white" />
+ </span>
+ )}
+ </div>
+ <div className="text-xs text-gray-400 mt-0.5">{option.note}</div>
+ </button>
+ );
+ })}
+ </div>
+ </SettingSection>
+ );
+};
+
+// Settings → Appearance: site-wide font size. Applied via CSS zoom on <body>
+// (the app hardcodes px sizes, so rem scaling alone would miss most text).
+const FontSizeSection = () => {
+ const [sizeId, setSizeId] = useState(() => getFontSizePref());
+
+ const handleSelect = (option) => {
+ if (option.id === sizeId) return;
+ applyFontSizePref(option.id);
+ setSizeId(option.id);
+ toast.success(`Font size: ${option.label}`);
+ };
+
+ return (
+ <SettingSection icon={Type} title="Font size">
+ <p className="text-sm text-gray-500 mb-4">
+ Makes the reading text bigger or smaller — layout, buttons and menus stay exactly the same.
+ Applies instantly and is remembered on this browser.
+ </p>
+ <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+ {FONT_SIZE_OPTIONS.map((option) => {
+ const isActive = sizeId === option.id;
+ return (
+ <button
+ key={option.id}
+ type="button"
+ onClick={() => handleSelect(option)}
+ className="rounded-lg border p-3 text-center transition-all duration-150"
+ style={{
+ borderColor: isActive ? '#21C1B6' : '#e5e7eb',
+ backgroundColor: isActive ? '#F7FDFC' : '#ffffff',
+ boxShadow: isActive ? '0 0 0 3px rgba(33,193,182,0.15)' : 'none',
+ cursor: 'pointer',
+ }}
+ onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.borderColor = '#21C1B6'; }}
+ onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.borderColor = '#e5e7eb'; }}
+ >
+ <div
+ className="text-gray-800 font-semibold leading-none mb-2"
+ style={{ fontSize: `${Math.round(18 * option.zoom)}px` }}
+ >
+ Aa
+ </div>
+ <div className="flex items-center justify-center gap-1.5">
+ <span className="text-xs font-medium" style={{ color: isActive ? '#0F766E' : '#4b5563' }}>
+ {option.label}
+ </span>
+ {isActive && (
+ <span className="flex items-center justify-center w-4 h-4 rounded-full flex-shrink-0" style={{ backgroundColor: '#21C1B6' }}>
+ <Check className="w-2.5 h-2.5 text-white" />
+ </span>
+ )}
+ </div>
+ <div className="text-[11px] text-gray-400 mt-0.5">{Math.round(option.zoom * 100)}%</div>
+ </button>
+ );
+ })}
+ </div>
+ </SettingSection>
+ );
+};
+
+// Settings → Appearance: site-wide font picker. Cards preview each font live;
+// selecting one applies it to the entire app instantly (see utils/fontPrefs.js).
+const FontSection = () => {
+ const [fontId, setFontId] = useState(() => getFontPref());
+
+ // Load the Google-hosted fonts once so every card previews in its real face.
+ useEffect(() => {
+ FONT_OPTIONS.forEach(ensureFontFaceLoaded);
+ }, []);
+
+ const handleSelect = (font) => {
+ if (font.id === fontId) return;
+ applyFontPref(font.id);
+ setFontId(font.id);
+ toast.success(`Font changed to ${font.label}`);
+ };
+
+ const current = FONT_OPTIONS.find((f) => f.id === fontId) || FONT_OPTIONS[0];
+
+ return (
+ <SettingSection icon={Type} title="Appearance">
+ <p className="text-sm text-gray-500 mb-4">
+ Current font: <span className="font-semibold text-gray-700">{current.label}</span>
+ {current.note ? ` (${current.note})` : ''}. The selected font applies to the whole site on this browser.
+ </p>
+ <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+ {FONT_OPTIONS.map((font) => {
+ const isActive = font.id === fontId;
+ return (
+ <button
+ key={font.id}
+ type="button"
+ onClick={() => handleSelect(font)}
+ className="text-left rounded-lg border p-4 transition-all duration-150"
+ style={{
+ borderColor: isActive ? '#21C1B6' : '#e5e7eb',
+ backgroundColor: isActive ? '#F7FDFC' : '#ffffff',
+ boxShadow: isActive ? '0 0 0 3px rgba(33,193,182,0.15)' : 'none',
+ cursor: 'pointer',
+ }}
+ onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.borderColor = '#21C1B6'; }}
+ onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.borderColor = '#e5e7eb'; }}
+ >
+ <div className="flex items-center justify-between mb-1">
+ <span
+ className="text-sm font-semibold"
+ style={{ color: isActive ? '#0F766E' : '#111827' }}
+ >
+ {font.label}
+ </span>
+ {isActive && (
+ <span
+ className="flex items-center justify-center w-5 h-5 rounded-full flex-shrink-0"
+ style={{ backgroundColor: '#21C1B6' }}
+ >
+ <Check className="w-3 h-3 text-white" />
+ </span>
+ )}
+ </div>
+ <div className="text-xs text-gray-400 mb-2">{font.note}</div>
+ {/* --jnx-sample-font lets the preview keep ITS font while a site-wide
+ override is active (the override exempts .jnx-font-sample via this var) */}
+ <div
+ className="text-lg text-gray-800 leading-snug jnx-font-sample"
+ style={{ fontFamily: font.stack, '--jnx-sample-font': font.stack }}
+ >
+ AaBbCc 123
+ </div>
+ <div
+ className="text-xs text-gray-500 mt-0.5 jnx-font-sample"
+ style={{ fontFamily: font.stack, '--jnx-sample-font': font.stack }}
+ >
+ The quick brown fox jumps over the lazy dog.
+ </div>
+ </button>
+ );
+ })}
+ </div>
+ </SettingSection>
+ );
+};
+
+// Settings sub-sidebar (Claude-style): one entry per section; the right pane
+// shows only the active section. Sections stay mounted (hidden) so in-progress
+// edits and fetched data survive switching tabs.
+const SETTINGS_NAV = [
+ { id: 'account', label: 'Account', icon: User },
+ { id: 'security', label: 'Password & Security', icon: Lock },
+ { id: 'sessions', label: 'Active sessions', icon: Monitor },
+ { id: 'language', label: 'Language & Region', icon: Globe },
+ { id: 'appearance', label: 'Appearance', icon: Type },
+ { id: 'notifications', label: 'Notifications', icon: Bell },
+ { id: 'privacy', label: 'Privacy & Security', icon: Shield },
+ { id: 'data', label: 'Data & Storage', icon: Download },
+ { id: 'actions', label: 'Account Actions', icon: LogOut },
+];
+
 const ToggleSwitch = React.memo(({ enabled, onChange, label, description }) => (
  <div className="flex items-center justify-between py-3">
  <div className="flex-1">
@@ -387,13 +617,14 @@ ToggleSwitch.displayName = 'ToggleSwitch';
 const SettingsPage = () => {
  const navigate = useNavigate();
  const { user: authUser, loading: authLoading, planInfo, token, fetchAndStorePlan } = useAuth();
- const { theme, toggleTheme } = useTheme();
+ const { theme, setTheme, toggleTheme } = useTheme();
  const [language, setLanguage] = useState('English');
- const [notifications, setNotifications] = useState({
- email: true,
- push: false,
- marketing: false
- });
+ // Persisted per browser; `push` gates ALL JuriNex alerts (response-ready
+ // notification/toast/chime) via responseNotifier → notificationPrefs.
+ const [notifications, setNotifications] = useState(() => getNotificationPrefs());
+ // Which settings section the sub-sidebar has selected.
+ const [activeSection, setActiveSection] = useState('account');
+ const paneClass = (id) => (activeSection === id ? 'space-y-6' : 'hidden');
 
  const [userData, setUserData] = useState({
  fullName: '',
@@ -444,14 +675,25 @@ const SettingsPage = () => {
  const locationRef = useRef(null);
 
  const handleThemeChange = (newTheme) => {
- toggleTheme(newTheme);
+ setTheme(newTheme);
  };
 
  const handleNotificationChange = (type) => {
- setNotifications(prev => ({
- ...prev,
- [type]: !prev[type]
- }));
+ const value = !notifications[type];
+ setNotifications((prev) => ({ ...prev, [type]: value }));
+ setNotificationPref(type, value);
+ if (type === 'push') {
+ if (value) {
+ if ('Notification' in window && Notification.permission === 'default') {
+ Notification.requestPermission().catch(() => {});
+ } else if ('Notification' in window && Notification.permission === 'denied') {
+ toast.info('Browser notifications are blocked for this site — in-app alerts will still show.');
+ }
+ toast.success('JuriNex notifications turned on');
+ } else {
+ toast.info('JuriNex notifications turned off');
+ }
+ }
  };
 
  const handleProfileSave = async () => {
@@ -730,15 +972,44 @@ const SettingsPage = () => {
  />
  
  <div className="bg-white border-b border-gray-200">
- <div className="max-w-4xl mx-auto px-6 py-6">
+ <div className="max-w-6xl mx-auto px-6 py-6">
  <h1 className="text-2xl font-semibold text-gray-900">Settings</h1>
  <p className="text-gray-600 mt-1">Manage your account and application preferences</p>
  </div>
  </div>
 
- <div className="max-w-4xl mx-auto px-6 py-8">
- <div className="space-y-6">
- 
+ <div className="max-w-6xl mx-auto px-6 py-8">
+ <div className="flex flex-col md:flex-row gap-6 md:gap-10 items-start">
+
+ {/* Sub-sidebar: horizontal scroll strip on mobile, sticky column on desktop */}
+ <nav className="w-full md:w-56 flex-shrink-0">
+ <div className="md:sticky md:top-6 flex md:flex-col gap-1 overflow-x-auto md:overflow-visible pb-2 md:pb-0">
+ {SETTINGS_NAV.map((item) => {
+ const ItemIcon = item.icon;
+ const isActive = activeSection === item.id;
+ return (
+ <button
+ key={item.id}
+ type="button"
+ onClick={() => setActiveSection(item.id)}
+ className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm whitespace-nowrap text-left transition-colors flex-shrink-0 md:w-full ${
+ isActive
+ ? 'bg-gray-100 text-gray-900 font-semibold'
+ : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+ }`}
+ >
+ <ItemIcon className={`w-4 h-4 flex-shrink-0 ${isActive ? 'text-[#21C1B6]' : 'text-gray-400'}`} />
+ {item.label}
+ </button>
+ );
+ })}
+ </div>
+ </nav>
+
+ {/* Content pane: only the selected section is visible (others stay mounted) */}
+ <div className="flex-1 min-w-0 w-full">
+
+ <div className={paneClass('account')}>
  <SettingSection icon={User} title="Account">
  <div className="space-y-4">
  <div className="flex items-center justify-between">
@@ -870,7 +1141,9 @@ const SettingsPage = () => {
  )}
  </div>
  </SettingSection>
+ </div>
 
+ <div className={paneClass('security')}>
  <SettingSection icon={Lock} title="Password & Security">
  <div className="space-y-4">
  <div className="flex items-center justify-between">
@@ -988,9 +1261,13 @@ const SettingsPage = () => {
  )}
  </div>
  </SettingSection>
+ </div>
 
+ <div className={paneClass('sessions')}>
  <LoginDevicesSection />
+ </div>
 
+ <div className={paneClass('language')}>
  <SettingSection icon={Globe} title="Language & Region">
  <div className="space-y-4">
  <div>
@@ -1010,30 +1287,40 @@ const SettingsPage = () => {
  </div>
  </div>
  </SettingSection>
+ </div>
 
+ <div className={paneClass('appearance')}>
+ <ThemeSection />
+ <FontSizeSection />
+ <FontSection />
+ </div>
+
+ <div className={paneClass('notifications')}>
  <SettingSection icon={Bell} title="Notifications">
  <div className="space-y-1">
  <ToggleSwitch
- disabled={notifications.email}
+ enabled={notifications.push}
+ onChange={() => handleNotificationChange('push')}
+ label="JuriNex notifications"
+ description="Alerts when response generation completes and other JuriNex updates — browser notification, sound and in-app pop-up"
+ />
+ <ToggleSwitch
+ enabled={notifications.email}
  onChange={() => handleNotificationChange('email')}
  label="Email notifications"
  description="Receive updates about your conversations via email"
  />
  <ToggleSwitch
- disabled={notifications.push}
- onChange={() => handleNotificationChange('push')}
- label="Push notifications"
- description="Get notified about important updates"
- />
- <ToggleSwitch
- disabled={notifications.marketing}
+ enabled={notifications.marketing}
  onChange={() => handleNotificationChange('marketing')}
  label="Marketing emails"
  description="Receive product updates and feature announcements"
  />
  </div>
  </SettingSection>
+ </div>
 
+ <div className={paneClass('privacy')}>
  <SettingSection icon={Shield} title="Privacy & Security">
  <div className="space-y-3">
  <div className="flex items-center justify-between py-3 border-b border-gray-100">
@@ -1059,7 +1346,9 @@ const SettingsPage = () => {
  </div>
  </div>
  </SettingSection>
+ </div>
 
+ <div className={paneClass('data')}>
  <SettingSection icon={Download} title="Data & Storage">
  <div className="space-y-3">
  <button
@@ -1088,7 +1377,9 @@ const SettingsPage = () => {
  </div>
  </div>
  </SettingSection>
+ </div>
 
+ <div className={paneClass('actions')}>
  <SettingSection icon={LogOut} title="Account Actions" className="border-red-200">
  <div className="space-y-3">
  <button
@@ -1116,7 +1407,9 @@ const SettingsPage = () => {
  </div>
  </div>
  </SettingSection>
+ </div>
 
+ </div>
  </div>
  </div>
  </div>

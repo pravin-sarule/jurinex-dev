@@ -106,3 +106,86 @@ div[id^="picker"] {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
 }
+
+/* ------------------------------------------------------------------ */
+/* Site themes (Settings → Appearance → Theme).                        */
+/* ThemeContext stamps data-theme on <html>. A root-level filter       */
+/* re-colors the WHOLE app — including hardcoded light-mode styles —   */
+/* without per-component changes. Filters on the root element do NOT   */
+/* break position:fixed (unlike on body).                              */
+/* ------------------------------------------------------------------ */
+
+html[data-theme='dark'] {
+  /* Claude-style warm dark. invert(0.9) sets the surface darkness; contrast
+     stretches the range so text doesn't wash out; brightness(1.1) is the key
+     to FULLY WHITE body text — it multiplies, so bright text clips to pure
+     white while the near-black background barely lifts (~#161616). Trailing
+     sepia adds Claude's warmth; hue-rotate keeps brand teal as teal. */
+  filter: invert(0.9) hue-rotate(180deg) contrast(1.05) brightness(1.1) sepia(0.03);
+  background: #ffffff; /* inverted by the filter → warm dark backdrop */
+  color-scheme: dark;  /* native scrollbars/controls follow the theme */
+}
+
+/* Photos, logos, videos, canvases — and any component tagged .jnx-keep-colors
+   (dark-by-design UI like the app sidebar, #0d1117) — keep their real colors
+   by counter-inverting. Media inside a .jnx-keep-colors subtree must NOT be
+   double-inverted, hence the :not() guards. Tag only the OUTERMOST container
+   with .jnx-keep-colors — nesting it would re-invert. */
+html[data-theme='dark'] img:not(.jnx-keep-colors *),
+html[data-theme='dark'] video:not(.jnx-keep-colors *),
+html[data-theme='dark'] canvas:not(.jnx-keep-colors *),
+html[data-theme='dark'] iframe:not(.jnx-keep-colors *),
+html[data-theme='dark'] embed:not(.jnx-keep-colors *),
+html[data-theme='dark'] object:not(.jnx-keep-colors *),
+html[data-theme='dark'] .jnx-theme-swatch,
+html[data-theme='dark'] .jnx-keep-colors:not(.jnx-keep-colors .jnx-keep-colors) {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+/* Action buttons keep their designed colors in dark mode. Anything whose
+   background is a brand color (teal #21C1B6 / hover #1AA49B, danger #EF4444 /
+   hover #DC2626 — inline styles serialize to rgb() in Chromium, hex kept as
+   typed in some engines, Tailwind arbitrary classes stay in class) is
+   counter-inverted, restoring both the background AND its white label text.
+   Background-only matching on purpose: teal *borders* mark large containers
+   (cards, active rows) that must stay theme-inverted. */
+html[data-theme='dark'] [style*="background-color: rgb(33, 193, 182)"]:not(.jnx-keep-colors *):not(.jnx-theme-swatch *),
+html[data-theme='dark'] [style*="background: rgb(33, 193, 182)"]:not(.jnx-keep-colors *):not(.jnx-theme-swatch *),
+html[data-theme='dark'] [style*="background-color: rgb(26, 164, 155)"]:not(.jnx-keep-colors *):not(.jnx-theme-swatch *),
+html[data-theme='dark'] [style*="background: rgb(26, 164, 155)"]:not(.jnx-keep-colors *):not(.jnx-theme-swatch *),
+html[data-theme='dark'] [style*="background-color: rgb(239, 68, 68)"]:not(.jnx-keep-colors *):not(.jnx-theme-swatch *),
+html[data-theme='dark'] [style*="background-color: rgb(220, 38, 38)"]:not(.jnx-keep-colors *):not(.jnx-theme-swatch *),
+html[data-theme='dark'] [style*="background-color: #21c1b6" i]:not(.jnx-keep-colors *):not(.jnx-theme-swatch *),
+html[data-theme='dark'] [style*="background: #21c1b6" i]:not(.jnx-keep-colors *):not(.jnx-theme-swatch *),
+html[data-theme='dark'] [style*="background-color: #1aa49b" i]:not(.jnx-keep-colors *):not(.jnx-theme-swatch *),
+html[data-theme='dark'] [style*="background-color: #ef4444" i]:not(.jnx-keep-colors *):not(.jnx-theme-swatch *),
+html[data-theme='dark'] [style*="background-color: #dc2626" i]:not(.jnx-keep-colors *):not(.jnx-theme-swatch *),
+html[data-theme='dark'] [class*="bg-[#21C1B6]"]:not(.jnx-keep-colors *):not(.jnx-theme-swatch *) {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+html[data-theme='sepia'] {
+  filter: sepia(0.32) saturate(0.92) contrast(0.96);
+  background: #faf6ec;
+}
+
+/* ------------------------------------------------------------------ */
+/* Text-size preference (Settings → Appearance → Font size).           */
+/* TEXT ONLY — layout, buttons and menus never scale. Chat/analysis    */
+/* reading surfaces consume --jnx-text-scale via calc() on their own   */
+/* sizes (ChatInterface.css + inline markdown styles), so they are     */
+/* excluded here to avoid double scaling. This rule covers generic     */
+/* text elements elsewhere; the :not() guards stop em-compounding on   */
+/* nested structures (li in li, p in blockquote/td).                   */
+/* ------------------------------------------------------------------ */
+html[data-jnx-textscale] :is(p, li, dd, dt, figcaption, blockquote, td, th):not(
+  .formatted-assistant-markdown *):not(
+  .formatted-assistant-html *):not(
+  .response-content *):not(
+  .analysis-page-ai-response *):not(
+  .chat-thread-card__body *):not(
+  li li):not(
+  blockquote blockquote):not(
+  :is(li, td, th, blockquote) p) {
+  font-size: calc(1em * var(--jnx-text-scale, 1)) !important;
+}
