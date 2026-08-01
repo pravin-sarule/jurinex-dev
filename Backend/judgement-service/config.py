@@ -80,7 +80,10 @@ class Settings(BaseSettings):
     # when present it beats every service-specific port setting.
     cloud_run_port: int | None = Field(default=None, validation_alias="PORT")
     debug: bool = False
-    cors_origins: str = "http://localhost:5173,http://localhost:3000,http://localhost:5000"
+    cors_origins: str = (
+        "https://ailearn.co.in,https://www.ailearn.co.in,"
+        "http://localhost:5173,http://localhost:3000,http://localhost:5000"
+    )
 
     # --- Scoring ---
     scoring_phase: int = 1
