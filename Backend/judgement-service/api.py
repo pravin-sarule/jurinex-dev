@@ -143,18 +143,27 @@ def _tag_session(session_id: str, user_id: str | None, case_title: str | None = 
 
 @app.get("/api/v1/sessions")
 async def list_sessions(http_request: Request) -> dict[str, Any]:
-    """Research history, newest first. Scoped by X-User-Id when present."""
+    """Research history, newest first. Strictly scoped to the X-User-Id
+    caller — no header means no history, never everyone's."""
     user_id = http_request.headers.get("x-user-id")
+    if not user_id:
+        return {"sessions": []}
     rows = await asyncio.to_thread(postgres.session_list, user_id)
     return {"sessions": rows}
 
 
 @app.get("/api/v1/search/{session_id}")
-async def get_session(session_id: str) -> dict[str, Any]:
+async def get_session(session_id: str, http_request: Request) -> dict[str, Any]:
     """Reopen a stored research session: case context, suggested issues,
     every fetched citation, and saved approve/reject decisions."""
     session = sessions.load(session_id)
     if session is None:
+        raise HTTPException(status_code=404, detail="Unknown or expired sessionId")
+    owner = session.get("userId")
+    caller = http_request.headers.get("x-user-id")
+    # Owned sessions open only for their owner; legacy unowned sessions
+    # stay reachable by direct id (they no longer appear in any list).
+    if owner and str(owner) != str(caller or ""):
         raise HTTPException(status_code=404, detail="Unknown or expired sessionId")
     statuses: dict[str, dict[str, str]] = {}
     for issue in session.get("issues", []):

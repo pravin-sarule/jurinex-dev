@@ -439,12 +439,13 @@ class PostgresStore:
 
     def session_list(self, user_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         """Research history: lightweight summaries of stored sessions,
-        newest first, optionally scoped to one user."""
+        newest first, strictly scoped to one user. Unowned (NULL user_id)
+        rows are never listed — history is private per user."""
+        if not user_id:
+            return []
+
         def _op(conn) -> list[dict[str, Any]]:
             with conn.cursor() as cur:
-                # NULL-owned rows are included: sessions predating user
-                # tagging (and curl/dev runs) would otherwise vanish from
-                # everyone's history.
                 cur.execute(
                     """
                     SELECT session_id,
@@ -456,11 +457,11 @@ class PostgresStore:
                                      FROM jsonb_array_elements(payload->'issues') i), 0) AS citation_count,
                            created_at, updated_at
                     FROM judgement_sessions
-                    WHERE (%s::text IS NULL OR user_id = %s::text OR user_id IS NULL)
+                    WHERE user_id = %s::text
                     ORDER BY updated_at DESC
                     LIMIT %s
                     """,
-                    (user_id, user_id, limit),
+                    (user_id, limit),
                 )
                 rows = cur.fetchall()
             return [
