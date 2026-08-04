@@ -79,7 +79,9 @@ from tools import (
 logger = logging.getLogger(__name__)
 
 _APP = "judgement-service"
-MAX_ISSUES = 6
+# Exhaustive issue spotting: the spotter lists EVERY distinct issue and the
+# user picks which ones to actually search, so IK spend stays bounded.
+MAX_ISSUES = 12
 # Grounds are pleaded by the drafter, not synthesised — filings routinely
 # raise more grounds than a case has distinct issues, so the cap is higher.
 # The user picks which grounds to actually search, so IK spend stays bounded.
@@ -168,20 +170,29 @@ def build_issue_split_agent() -> LlmAgent:
         instruction=(
             "You are an expert Indian litigator. Split the case summary provided by "
             "the user into its DISTINCT legal issues for precedent research.\n\n"
+            "Be EXHAUSTIVE: enumerate EVERY distinct issue the summary supports (up "
+            "to 12), never just the most obvious ones — sweep maintainability/"
+            "limitation, validity of the proceeding, the ingredients of EACH offence "
+            "or claim invoked, abuse-of-process angles, evidentiary questions, and "
+            "relief-specific questions. Never drop an issue to keep the list short.\n\n"
             "An issue counts as separate ONLY if it is governed by a different area or "
             "body of law (e.g. repeal/savings law vs. quashing jurisprudence vs. "
             "directors' cheque liability). Do NOT split rephrasings of the same legal "
             "question into multiple issues, and do NOT merge genuinely distinct bodies "
             "of law into one vague issue. A simple single-question case yields exactly "
             "one issue.\n\n"
-            "Frame each issue as a court would: 'Whether ...'. Each issue must be "
-            "SELF-CONTAINED — downstream precedent search sees ONLY the issue text, so "
-            "name the governing provision and the decisive facts inside it wherever the "
-            "summary provides them (e.g. 'Whether the FIR under Section 306 IPC is "
-            "liable to be quashed when the suicide note does not name the accused', "
-            "not 'Whether the FIR should be quashed'). Never add a provision the "
-            "summary does not support. Order issues by importance to the client's "
-            "relief. Number ids from 1. Return strict JSON matching the schema."
+            "Frame each issue as a court would: 'Whether ...?' — ONE SHORT sentence, "
+            "HARD LIMIT 25 words, shape 'Whether <legal question> where <ONE generic "
+            "decisive circumstance>?' (e.g. 'Whether the FIR under Section 306 IPC "
+            "is liable to be quashed when the suicide note does not name the "
+            "accused?'). At most ONE qualifying clause — never chain 'especially "
+            "when…' clauses. Describe facts by legal category only and actors only "
+            "by their legal role ('the planning authority', 'the accused', 'the "
+            "landowner') — no party or person names, no place names, no property "
+            "identifiers (Gat/Survey/CTS/plot numbers), no case or docket numbers, "
+            "no dates. Never add a provision the summary does not support. Order "
+            "issues by importance to the client's relief. Number ids from 1. Return "
+            "strict JSON matching the schema."
         ),
         generate_content_config=_gen_config(0.25),
         output_schema=IssueList,
