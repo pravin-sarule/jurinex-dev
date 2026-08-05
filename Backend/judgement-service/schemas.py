@@ -455,6 +455,22 @@ class CitationAnalysis(BaseModel):
     ratio_decidendi: str = ""
 
 
+class CaseSummaryLine(BaseModel):
+    """One numbered line of the 8-line structured case note."""
+    label: str = ""
+    text: str = ""
+
+
+class JudgmentCaseSummary(BaseModel):
+    """Advocate-grade case summary of ONE judgment (user-locked format):
+    a single-paragraph 95–105-word summary + an exactly-8-line structured
+    note. Grounded on the fetched judgment text ONLY; details the text does
+    not state must read "not stated in the judgment" — never guessed."""
+    summary100: str = ""
+    note: list[CaseSummaryLine] = Field(default_factory=list)
+    verify_line: str = ""
+
+
 class CitationReport(BaseModel):
     docId: str
     issueId: int
@@ -485,6 +501,9 @@ class CitationReport(BaseModel):
     # sources:[{title,uri}]}. Heuristic — always verify officially.
     goodLawCheck: dict[str, Any] = Field(default_factory=dict)
     analysis: CitationAnalysis = Field(default_factory=CitationAnalysis)
+    # Advocate-grade judgment summary (100-word paragraph + 8-line note),
+    # generated from the fetched judgment text and cached in the session.
+    caseSummary: JudgmentCaseSummary = Field(default_factory=JudgmentCaseSummary)
     documentText: str = ""             # Document tab
     generatedOn: str = ""
 

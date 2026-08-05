@@ -18,6 +18,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { toast } from 'react-toastify';
 import judgementApi from '../../services/judgementApi';
+import '../../styles/CitationReport.css';
 
 // Review layout for search results: left "This search" rail, citation
 // cards grouped by issue, and a per-citation Report/Document detail view.
@@ -31,12 +32,6 @@ const STATUS_STYLES = {
   pending: 'bg-[#FFFBEB] text-[#92400E] border border-[#FDE68A]',
   approved: 'bg-[#F0FDF4] text-[#166534] border border-[#BBF7D0]',
   rejected: 'bg-[#FEF2F2] text-[#991B1B] border border-[#FECACA]',
-};
-
-const STRENGTH_STYLES = {
-  Strong: 'bg-[#F0FDF4] text-[#166534] border border-[#BBF7D0]',
-  Moderate: 'bg-[#FFFBEB] text-[#92400E] border border-[#FDE68A]',
-  Weak: 'bg-[#FEF2F2] text-[#991B1B] border border-[#FECACA]',
 };
 
 function courtTag(court = '', title = '') {
@@ -58,27 +53,12 @@ function StatusPill({ status }) {
   );
 }
 
-function ScoreBar({ label, value, hint }) {
-  const pct = Math.round((value || 0) * 100);
-  return (
-    <div>
-      <div className="flex items-center justify-between text-[11px]">
-        <span className="font-semibold text-[#475569] uppercase tracking-wide">{label}</span>
-        <span className="font-bold text-[#0F172A]">{pct}%</span>
-      </div>
-      <div className="mt-1 h-1.5 rounded-full bg-[#F1F5F9] overflow-hidden">
-        <div className="h-full rounded-full" style={{ width: `${pct}%`, background: TEAL }} />
-      </div>
-      {hint && <div className="mt-1 text-[10px] text-[#94A3B8]">{hint}</div>}
-    </div>
-  );
-}
-
 function SectionHeading({ children }) {
   return (
-    <h4 className="flex items-center gap-2 text-[13px] font-bold text-[#0F172A] uppercase tracking-wide">
-      <span className="h-4 w-1 rounded-full" style={{ background: TEAL }} />
-      {children}
+    <h4 className="flex items-center gap-3 text-[13px] font-bold text-[#0F172A] uppercase tracking-[0.08em]">
+      <span className="h-4 w-1 rounded-full shrink-0" style={{ background: TEAL }} />
+      <span className="shrink-0">{children}</span>
+      <span className="h-px flex-1 bg-[#E2E8F0]" />
     </h4>
   );
 }
@@ -202,6 +182,8 @@ function ReportDetail({ sessionId, issueId, item, status, onStatus, onBack }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
+  // Long cached analyses collapse to the essentials; "Show all" expands.
+  const [showFullAnalysis, setShowFullAnalysis] = useState(false);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -290,60 +272,35 @@ function ReportDetail({ sessionId, issueId, item, status, onStatus, onBack }) {
         )}
 
         {report && !loading && tab === 'report' && (
-          <div className="max-w-3xl mx-auto bg-white rounded-2xl border border-[#E2E8F0] shadow-sm p-6 md:p-8">
+          <div className="jnx-report max-w-5xl mx-auto bg-white rounded-2xl border border-[#E2E8F0] shadow-sm p-6 md:p-10">
+            {/* Masthead — formal law-report style */}
             <div className="text-center">
-              <div className="text-[11px] font-bold tracking-[0.2em] uppercase" style={{ color: TEAL_DARK }}>
+              <div className="text-[11px] font-bold tracking-[0.28em] uppercase" style={{ color: TEAL_DARK }}>
                 {report.court || 'Indian Kanoon'}
               </div>
-              <h2 className="mt-2 text-xl font-bold text-[#0F172A] font-serif leading-snug">{report.title}</h2>
+              <h2 className="jnx-report-title mt-2.5 text-[#0F172A] font-serif">
+                {report.title}
+              </h2>
+              <div className="mt-4 mx-auto w-28 border-t-2" style={{ borderColor: TEAL }} />
+              <div className="mt-[3px] mx-auto w-28 border-t border-[#CBD5E1]" />
             </div>
 
-            <div className="mt-5 grid grid-cols-3 divide-x divide-[#E2E8F0] rounded-xl border border-[#E2E8F0] text-center">
+            <div className={`mt-6 grid grid-cols-2 ${report.bench?.length > 0 ? 'md:grid-cols-4' : 'md:grid-cols-3'} divide-x divide-[#E2E8F0] rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] text-center overflow-hidden`}>
               {[['Primary citation', report.docId ? `IK ${report.docId}` : '—'],
                 ['Date of judgment', report.publishDate || (item.year ?? '—')],
-                ['Author', report.author || '—']].map(([label, value]) => (
-                <div key={label} className="px-3 py-3">
-                  <div className="text-[9px] font-semibold uppercase tracking-wider text-[#94A3B8]">{label}</div>
-                  <div className="mt-1 text-xs font-semibold text-[#0F172A] truncate">{value}</div>
+                ['Author', report.author || '—'],
+                ...(report.bench?.length > 0 ? [['Coram / Bench', report.bench.join(' · ')]] : []),
+              ].map(([label, value]) => (
+                <div key={label} className="px-3 py-3.5 min-w-0">
+                  <div className="text-[9px] font-bold uppercase tracking-[0.14em] text-[#94A3B8]">{label}</div>
+                  <div className="mt-1.5 text-xs font-semibold text-[#0F172A] truncate" title={String(value)}>{value}</div>
                 </div>
               ))}
             </div>
 
-            {report.bench?.length > 0 && (
-              <div className="mt-3 rounded-xl border border-[#E2E8F0] px-4 py-3">
-                <div className="text-[9px] font-semibold uppercase tracking-wider text-[#94A3B8]">Coram / Bench</div>
-                <div className="mt-1.5 space-y-1">
-                  {report.bench.map((judge, idx) => (
-                    <div key={idx} className="flex items-center gap-2 text-xs font-medium text-[#334155]">
-                      <UserIcon className="h-3.5 w-3.5 text-[#94A3B8]" /> {judge}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Relevance & accuracy — deterministic, never model-claimed */}
-            <div className="mt-5 rounded-xl border border-[#99F6E4] bg-[#F0FDFA] p-4">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wide text-[#0D9488]">Relevance & accuracy</span>
-                <span className={`px-2 py-0.5 rounded-md text-[11px] font-semibold ${STRENGTH_STYLES[report.applicabilityStrength] || STRENGTH_STYLES.Weak}`}>
-                  {report.applicabilityStrength} match
-                </span>
-              </div>
-              <div className="mt-3 grid md:grid-cols-2 gap-4">
-                <ScoreBar label="On point (semantic)" value={report.semanticMatch}
-                          hint="Closeness of this judgment to your issue" />
-                <ScoreBar label="Factual relevance" value={report.factualRelevance}
-                          hint="Share of your case's fact terms found in this judgment" />
-              </div>
-              <div className="mt-2 text-[10px] text-[#64748B]">
-                Computed mechanically from the fetched judgment text — not an AI estimate.
-              </div>
-            </div>
-
             {/* Web-grounded good-law status (Google Search grounding) */}
             {report.goodLawCheck?.status && (
-              <div className={`mt-4 rounded-xl border p-4 ${
+              <div className={`mt-6 rounded-xl border p-5 ${
                 report.goodLawCheck.status === 'good_law'
                   ? 'border-[#BBF7D0] bg-[#F0FDF4]'
                   : report.goodLawCheck.status === 'unknown'
@@ -391,46 +348,91 @@ function ReportDetail({ sessionId, issueId, item, status, onStatus, onBack }) {
               </div>
             )}
 
-            {report.analysis?.why_this_helps && (
-              <div className="mt-5 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
-                <div className="text-[11px] font-bold uppercase tracking-wide text-[#475569]">Why this helps</div>
-                <p className="mt-1.5 text-[13px] font-semibold text-[#0F172A] font-serif">{report.issue}</p>
-                <p className="mt-2 text-[13px] text-[#334155] leading-relaxed">{report.analysis.why_this_helps}</p>
+            {/* Judgment summary — law-report headnote: serif 100-word paragraph
+                + the 8-line note as a label/value table */}
+            {(report.caseSummary?.summary100 || (report.caseSummary?.note || []).length > 0) && (
+              <div className="mt-6">
+                <SectionHeading>Judgment summary</SectionHeading>
+                <div className="mt-3 rounded-xl border border-[#E2E8F0] overflow-hidden">
+                  {report.caseSummary?.summary100 && (
+                    <div className="px-5 md:px-8 py-6 bg-white">
+                      <p className="jnx-headnote font-serif">
+                        {report.caseSummary.summary100}
+                      </p>
+                    </div>
+                  )}
+                  {(report.caseSummary?.note || []).length > 0 && (
+                    <div className="border-t border-[#E2E8F0] divide-y divide-[#F1F5F9]">
+                      {report.caseSummary.note.map((line, idx) => (
+                        <div key={idx} className="grid grid-cols-[130px_1fr] md:grid-cols-[190px_1fr]">
+                          <div className="px-5 py-3 bg-[#F8FAFC] text-[10px] font-bold uppercase tracking-[0.1em] text-[#64748B] leading-relaxed border-r border-[#F1F5F9]">
+                            {idx + 1}. {line.label}
+                          </div>
+                          <div className="jnx-note-text px-5 py-3">
+                            {line.text}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {report.caseSummary?.verify_line && (
+                    <div className="border-t border-[#FDE68A] bg-[#FFFBEB] px-5 py-2.5 text-[11px] font-semibold text-[#92400E]">
+                      {report.caseSummary.verify_line}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 
-            <div className="mt-6 space-y-2">
+            <div className="mt-7 space-y-3">
               <SectionHeading>I. Citation excerpt</SectionHeading>
-              <div className="rounded-xl border border-[#E2E8F0] bg-white p-4 text-[13px] text-[#334155] italic leading-relaxed">
+              <blockquote className="jnx-excerpt rounded-r-xl border-y border-r border-[#E2E8F0] border-l-4 border-l-[#CBD5E1] bg-white px-5 md:px-7 py-4 text-[#334155] italic font-serif">
                 {report.excerpt || 'No pinpoint excerpt was verified for this citation.'}
-              </div>
+              </blockquote>
             </div>
 
-            <div className="mt-6 space-y-3">
+            <div className="mt-7 space-y-3">
               <SectionHeading>II. Legal analysis and ratio</SectionHeading>
-              <div className="rounded-xl border-l-4 border border-[#E2E8F0] p-4 space-y-4" style={{ borderLeftColor: TEAL }}>
-                <div>
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">Key legal issues</div>
-                  <div className="mt-1.5"><Bullets items={report.analysis?.key_legal_issues} /></div>
+              <div className="rounded-xl border border-[#E2E8F0] overflow-hidden">
+                <div className="grid md:grid-cols-2 md:divide-x divide-y md:divide-y-0 divide-[#F1F5F9]">
+                  <div className="p-5">
+                    <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-[#64748B]">Key legal issues</div>
+                    <div className="mt-2"><Bullets items={report.analysis?.key_legal_issues} /></div>
+                  </div>
+                  <div className="p-5">
+                    <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-[#64748B]">Key facts</div>
+                    <div className="mt-2"><Bullets items={report.analysis?.key_facts} /></div>
+                  </div>
                 </div>
-                <div>
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">Key facts</div>
-                  <div className="mt-1.5"><Bullets items={report.analysis?.key_facts} /></div>
-                </div>
-                <div>
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">Legal analysis</div>
-                  <div className="mt-1.5"><Bullets items={report.analysis?.legal_analysis} /></div>
+                <div className="border-t border-[#F1F5F9] p-5">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-[#64748B]">Legal analysis</div>
+                  <div className="mt-2">
+                    <Bullets items={showFullAnalysis
+                      ? report.analysis?.legal_analysis
+                      : (report.analysis?.legal_analysis || []).slice(0, 5)} />
+                  </div>
+                  {(report.analysis?.legal_analysis || []).length > 5 && (
+                    <button
+                      onClick={() => setShowFullAnalysis((v) => !v)}
+                      className="mt-2.5 text-[11px] font-semibold hover:underline"
+                      style={{ color: TEAL_DARK }}
+                    >
+                      {showFullAnalysis
+                        ? 'Show fewer'
+                        : `Show all ${report.analysis.legal_analysis.length} points`}
+                    </button>
+                  )}
                 </div>
                 {report.analysis?.ratio_decidendi && (
-                  <div>
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">Ratio decidendi</div>
-                    <p className="mt-1.5 text-[13px] text-[#334155] leading-relaxed">{report.analysis.ratio_decidendi}</p>
+                  <div className="border-t border-[#99F6E4] bg-[#F0FDFA] p-5">
+                    <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-[#0D9488]">Ratio decidendi</div>
+                    <p className="jnx-ratio mt-2 text-[#134E4A] font-serif">{report.analysis.ratio_decidendi}</p>
                   </div>
                 )}
               </div>
             </div>
 
-            <div className="mt-6 space-y-3">
+            <div className="mt-7 space-y-3">
               <SectionHeading>III. Citation context</SectionHeading>
               <div className="grid grid-cols-2 gap-3">
                 {[['Total cases cited (index)', report.citesTotal], ['Total cited by (index)', report.citedByTotal]].map(([label, value]) => (
@@ -518,14 +520,14 @@ function ReportDetail({ sessionId, issueId, item, status, onStatus, onBack }) {
         )}
 
         {report && !loading && tab === 'document' && (
-          <div className="max-w-3xl mx-auto bg-white rounded-2xl border border-[#E2E8F0] shadow-sm p-6 md:p-8">
-            <h2 className="text-lg font-bold text-[#0F172A] font-serif">{report.title}</h2>
+          <div className="jnx-report max-w-5xl mx-auto bg-white rounded-2xl border border-[#E2E8F0] shadow-sm p-6 md:p-10">
+            <h2 className="text-xl font-bold text-[#0F172A] font-serif">{report.title}</h2>
             {report.bench?.length > 0 && (
               <div className="mt-1 text-sm text-[#475569]">
                 Bench: <span className="font-semibold" style={{ color: TEAL_DARK }}>{report.bench.join(', ')}</span>
               </div>
             )}
-            <pre className="mt-4 whitespace-pre-wrap font-serif text-[13px] leading-relaxed text-[#1E293B] border border-[#E2E8F0] rounded-xl p-4 max-h-[70vh] overflow-y-auto">
+            <pre className="jnx-doc-text mt-4 whitespace-pre-wrap text-[#1E293B] border border-[#E2E8F0] rounded-xl p-5 md:p-7 max-h-[70vh] overflow-y-auto">
               {report.documentText || 'Full document text unavailable.'}
             </pre>
           </div>

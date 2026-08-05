@@ -47,6 +47,7 @@ from schemas import (
     IssueList,
     IssueResults,
     IssueSpotResult,
+    JudgmentCaseSummary,
     JudgmentVerification,
     KeywordSet,
     ResultItem,
@@ -534,10 +535,13 @@ def build_citation_analysis_agent() -> LlmAgent:
             "judgment against ONE legal issue from their case.\n\n"
             "Produce:\n"
             "- why_this_helps: 1–2 sentences on why this judgment addresses the issue.\n"
-            "- key_legal_issues: the legal questions the JUDGMENT itself dealt with.\n"
-            "- key_facts: the judgment's key facts (short bullets).\n"
-            "- legal_analysis: what the court held/reasoned, incl. how it applied "
-            "earlier authorities, as short bullets.\n"
+            "- key_legal_issues: the legal questions the JUDGMENT itself dealt with "
+            "(at most 4).\n"
+            "- key_facts: the judgment's key facts (at most 5 short bullets).\n"
+            "- legal_analysis: AT MOST 5 short bullets — only the holdings and "
+            "reasoning that matter for the lawyer's issue, each one sentence. Do NOT "
+            "narrate the judgment step by step or repeat the facts; merge related "
+            "points into one bullet.\n"
             "- ratio_decidendi: the binding principle of the judgment, 1–3 sentences.\n\n"
             "GROUNDING RULES (absolute):\n"
             "1. Use ONLY the judgment text provided by the user. Never add case names, "
@@ -565,6 +569,94 @@ async def generate_citation_analysis(issue_text: str, case_summary: str,
     )
     out = await run_agent_once(build_citation_analysis_agent(), message, ["citation_analysis"])
     return CitationAnalysis.model_validate(out.get("citation_analysis") or {})
+
+
+# ─── Advocate-grade judgment summary (100-word paragraph + 8-line note) ──────
+# User-locked prompt: the wording of the task, order, line labels and rules is
+# the user's specification verbatim — only the output channel is adapted from
+# prose to the JudgmentCaseSummary JSON schema. Do not "improve" the rules.
+
+CASE_SUMMARY_SYSTEM = (
+    "You are a legal research assistant preparing case summaries for practising "
+    "advocates in India.\n\n"
+    "INPUT: the full text of ONE court judgment, supplied in the user message.\n\n"
+    "TASK: produce TWO outputs from that judgment, returned as strict JSON "
+    "matching the schema.\n\n"
+    "summary100 — 100-WORD SUMMARY\n"
+    "One single paragraph, 95–105 words, no headings, no bullet points.\n"
+    "Follow this order strictly:\n"
+    "(a) case name, citation, court, bench, date of judgment;\n"
+    "(b) facts in one sentence — only the facts that gave rise to the legal question;\n"
+    "(c) what the court HELD and the reason for it (the ratio, not just the outcome);\n"
+    "(d) the operative order / what survives of the case.\n\n"
+    "note — 8-LINE STRUCTURED NOTE\n"
+    "Exactly 8 entries, in this order, each an object {label, text}:\n"
+    "1. label \"Case\" — name, citation, court, bench strength, date, case number "
+    "and nature of proceeding.\n"
+    "2. label \"Provisions\" — exact sections, articles or rules the case turns on.\n"
+    "3. label \"Facts\" — brief.\n"
+    "4. label \"Issues\" — framed as questions.\n"
+    "5. label \"Held\" — the ratio decidendi and reasoning.\n"
+    "6. label \"Key paragraphs & authorities\" — paragraph numbers where the ratio "
+    "appears; precedents relied on or distinguished.\n"
+    "7. label \"Order & status\" — operative directions; whether appealed, stayed, "
+    "followed, distinguished or overruled.\n"
+    "8. label \"Relevance\" — how it helps or hurts the matter at hand, and whether "
+    "it is binding or merely persuasive.\n\n"
+    "verify_line — exactly: VERIFY: current status of this judgment as on "
+    "<TODAY'S DATE from the user message> before relying on it.\n\n"
+    "RULES\n"
+    "- Use ONLY what is in the judgment supplied. Do not add facts, paragraph "
+    "numbers, citations or case names from memory.\n"
+    "- If a detail is not in the text, write \"not stated in the judgment\". Never "
+    "guess a citation or a paragraph number.\n"
+    "- Report the ratio in your own words; quote only where the exact wording "
+    "matters, and keep any quotation under 15 words with the paragraph number.\n"
+    "- Distinguish clearly between ratio (binding) and obiter (persuasive) if the "
+    "difference is apparent.\n"
+    "- Where there are separate concurring or dissenting opinions, say so and "
+    "summarise the majority view as the holding.\n"
+    "- Plain professional English. No adjectives, no praise of the court, no advocacy.\n"
+    "- If the user message includes a \"Context:\" line describing the client's "
+    "matter, tailor line 8 (Relevance) to that matter. If there is no Context "
+    "line, write line 8 as the general legal proposition the case establishes.\n"
+    "Return strict JSON matching the schema."
+)
+
+
+def build_case_summary_agent() -> LlmAgent:
+    return LlmAgent(
+        name="case_summary",
+        model=get_settings().gemini_model,
+        description="Advocate-grade 100-word summary + 8-line structured note for one judgment.",
+        instruction=CASE_SUMMARY_SYSTEM,
+        generate_content_config=_gen_config(0.1),
+        output_schema=JudgmentCaseSummary,
+        output_key="case_summary",
+        disallow_transfer_to_parent=True,
+        disallow_transfer_to_peers=True,
+    )
+
+
+async def generate_case_summary(title: str, doc_text: str, matter_context: str,
+                                today: str) -> JudgmentCaseSummary:
+    """Summarise ONE fetched judgment in the user-locked report format.
+
+    The judgment's citation, date and operative order usually live at the very
+    start and very end of the text, so long judgments keep head AND tail intact
+    (same budget shape as the verifier) rather than truncating the ending off.
+    """
+    text = doc_text or ""
+    if len(text) > 30000:
+        text = (text[:22000] + "\n[... middle of judgment omitted ...]\n" + text[-8000:])
+    message = (
+        f"TODAY'S DATE: {today}\n\n"
+        + (f"Context: {matter_context[:1200]}\n\n" if matter_context.strip() else "")
+        + f"JUDGMENT TITLE: {title}\n\n"
+        + f"JUDGMENT TEXT:\n{text}"
+    )
+    out = await run_agent_once(build_case_summary_agent(), message, ["case_summary"])
+    return JudgmentCaseSummary.model_validate(out.get("case_summary") or {})
 
 
 # ─── Runner helper ────────────────────────────────────────────────────────────
