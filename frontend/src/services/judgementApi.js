@@ -133,6 +133,27 @@ export const judgementApi = {
   },
 
   /**
+   * Delete a stored research session — its results, citation reports and
+   * approve/reject decisions — permanently. DELETE /api/v1/search/{sessionId}
+   * (owner-scoped by X-User-Id server-side).
+   */
+  async deleteSession(sessionId) {
+    const response = await fetch(`${JUDGEMENT_SERVICE_URL}/api/v1/search/${sessionId}`, {
+      method: 'DELETE',
+      headers: getAuthHeader(),
+    });
+    if (!response.ok) {
+      let detail = `Delete failed (${response.status})`;
+      try {
+        const data = await response.json();
+        if (data?.detail) detail = data.detail;
+      } catch { /* keep default */ }
+      throw new Error(detail);
+    }
+    return response.json();
+  },
+
+  /**
    * Full legal-intelligence report for one surfaced citation —
    * GET /api/v1/search/{sessionId}/report/{issueId}/{docId}.
    * Includes grounded LLM analysis, deterministic semantic/factual

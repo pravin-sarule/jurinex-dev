@@ -11,9 +11,11 @@ import {
   QueueListIcon,
   ScaleIcon,
   SparklesIcon,
+  TrashIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 import { toast } from 'react-toastify';
+import Swal from 'sweetalert2';
 import judgementApi from '../../services/judgementApi';
 import documentApi from '../../services/documentApi';
 import CitationReviewResults from './CitationReviewResults';
@@ -378,10 +380,50 @@ export default function CitationResearchPanel() {
     [history, selectedCaseId],
   );
 
+  const [deletingId, setDeletingId] = useState(null);
+  const deleteHistory = async (entry) => {
+    const label = entry.caseTitle || entry.summary || entry.sessionId;
+    const result = await Swal.fire({
+      title: 'Delete research',
+      text: `Delete "${label}" and all its citation reports? This cannot be undone.`,
+      icon: 'warning',
+      showCancelButton: true,
+      confirmButtonColor: '#DC2626',
+      cancelButtonColor: '#6b7280',
+      confirmButtonText: 'Delete',
+      cancelButtonText: 'Cancel',
+      customClass: { popup: 'rounded-lg', confirmButton: 'rounded-lg', cancelButton: 'rounded-lg' },
+    });
+    if (!result.isConfirmed) return;
+    setDeletingId(entry.sessionId);
+    try {
+      await judgementApi.deleteSession(entry.sessionId);
+      setHistory((prev) => prev.filter((h) => h.sessionId !== entry.sessionId));
+      try { sessionStorage.removeItem(`jurinex.reviewStatuses.${entry.sessionId}`); } catch { /* non-fatal */ }
+      // If the deleted research is the one currently open, reset to input.
+      if (analysis?.sessionId === entry.sessionId) {
+        setAnalysis(null);
+        setSearchResponse(null);
+        setSelectedIds(new Set());
+        setCustomIssues([]);
+        setStep('input');
+      }
+      Swal.fire({ title: 'Deleted!', text: 'The research and its reports are gone.', icon: 'success', timer: 1500, showConfirmButton: false });
+    } catch (err) {
+      Swal.fire({ title: 'Error!', text: err.message || 'Could not delete this research.', icon: 'error', confirmButtonColor: '#21C1B6' });
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  // Row is a div (not a button) so the delete control can nest inside it.
   const HistoryRow = ({ entry }) => (
-    <button
+    <div
       onClick={() => openHistory(entry.sessionId)}
-      className="w-full text-left rounded-xl border border-[#E2E8F0] bg-white px-4 py-3 hover:border-[#21C1B6]/60 hover:shadow-sm transition-all flex items-center gap-3"
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter') openHistory(entry.sessionId); }}
+      className="w-full text-left rounded-xl border border-[#E2E8F0] bg-white px-4 py-3 hover:border-[#21C1B6]/60 hover:shadow-sm transition-all flex items-center gap-3 cursor-pointer"
     >
       <span className="h-9 w-9 rounded-lg bg-[#F0FDFA] flex items-center justify-center shrink-0">
         <MagnifyingGlassIcon className="text-[#21C1B6]" style={{ height: 18, width: 18 }} />
@@ -401,7 +443,18 @@ export default function CitationResearchPanel() {
       <span className="text-[11px] font-bold shrink-0" style={{ color: '#1AA49B' }}>
         {entry.citationCount > 0 ? 'Open →' : 'Continue →'}
       </span>
-    </button>
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); deleteHistory(entry); }}
+        disabled={deletingId === entry.sessionId}
+        title="Delete this research and its reports"
+        className="shrink-0 h-8 w-8 rounded-lg flex items-center justify-center text-[#94A3B8] hover:text-[#DC2626] hover:bg-[#FEF2F2] transition-colors disabled:opacity-50"
+      >
+        {deletingId === entry.sessionId
+          ? <ArrowPathIcon className="animate-spin" style={{ height: 15, width: 15 }} />
+          : <TrashIcon style={{ height: 15, width: 15 }} />}
+      </button>
+    </div>
   );
 
   const contextLine = useMemo(() => {
@@ -803,7 +856,9 @@ export default function CitationResearchPanel() {
             )}
           </div>
 
-          <div className="mt-3 grid md:grid-cols-2 gap-3">
+          {/* Only the cards scroll — the add-your-own box and Run search stay in view. */}
+          <div className="mt-3 max-h-[48vh] overflow-y-auto pr-1.5">
+            <div className="grid md:grid-cols-2 gap-3">
             {suggested.length === 0 && (
               <div className="text-xs text-[#94A3B8] italic col-span-2">
                 {isGrounds ? 'No pleaded grounds were found — add your own below.' : 'No issues were suggested — add your own below.'}
@@ -881,6 +936,7 @@ export default function CitationResearchPanel() {
                 </button>
               );
             })}
+            </div>
           </div>
 
           <div className="mt-9">

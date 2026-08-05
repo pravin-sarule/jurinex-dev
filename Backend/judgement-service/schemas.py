@@ -91,6 +91,13 @@ class Issue(BaseModel):
     # doctrine-link guard — queries are built from these, never from party facts.
     doctrine: str | None = None
     statutory_hook: str | None = None
+    # The SPECIFIC trigger/test within the doctrine (e.g. for s.482 quashing:
+    # civil_colour | settlement | mala_fide | statutory_bar |
+    # vicarious_liability | delay_laches | second_fir). Drives the verifier's
+    # trigger KILL check: a judgment matching the statute but decided on a
+    # DIFFERENT trigger (e.g. a compromise quashing cited for civil-colour)
+    # is rejected however similar its vocabulary.
+    sub_doctrine: str | None = None
     # Whose issue this is ("petitioner"/"respondent"/"neutral") — outcome
     # alignment (support vs contra) is judged against this perspective.
     perspective: str | None = None
@@ -114,6 +121,7 @@ class SpottedIssue(BaseModel):
     issue: str             # "Whether …?" question — drives precedent search
     explanation: str = ""  # 2–3 sentences tying the ground to THIS case's facts
     doctrine: str = ""
+    sub_doctrine: str = ""  # specific trigger within the doctrine (snake_case)
     statutory_hook: str | None = None
     perspective: str = "neutral"
 
@@ -151,6 +159,7 @@ class ExtractedGround(BaseModel):
     # contention — this text drives downstream precedent search.
     research_question: str = ""
     doctrine: str = ""
+    sub_doctrine: str = ""  # specific trigger within the doctrine (snake_case)
     statutory_hook: str | None = None
     statutes: list[str] = Field(default_factory=list)       # as written in source
     case_law_cited: list[str] = Field(default_factory=list)  # as written in source
@@ -203,31 +212,54 @@ class KeywordSet(BaseModel):
 # ─── Relevance judge (grounded verification of fetched judgments) ───────────
 
 class JudgmentVerification(BaseModel):
-    """PROMPT-3 verifier output: is ONE fetched judgment usable for ONE
-    issue? Judged only from the fetched text (closed world). Two KILL
-    checks (outcome unclear, shelf mismatch) → verdict 'reject'. Everything
-    here is re-verified deterministically in code: outcome_evidence must be
-    a verbatim substring of the fetched text, missing doctrine_link forces
-    reject, missing ratio caps the score at 30, and the SIDE is re-derived
-    from the verified outcome + the issue's perspective — the LLM's own
-    side claim never wins over the verified outcome. Court, date and
-    authority weight are computed in code from IK metadata, never asked
-    of the model."""
+    """PROMPT-3 verifier output (v2): can a lawyer actually CITE this ONE
+    fetched judgment IN COURT for this ONE issue? Judged only from the
+    fetched text (closed world). Four KILL checks (outcome unclear, shelf
+    mismatch, trigger/sub-doctrine mismatch, parasitic authority) →
+    verdict 'reject'. Everything here is re-verified deterministically in
+    code: outcome_evidence must be a verbatim substring of the fetched
+    text, missing doctrine_link / trigger_match=False / parasitic=True
+    force reject, missing ratio caps the score at 30, and the SIDE is
+    re-derived from the verified outcome + the issue's perspective — the
+    LLM's own side claim never wins over the verified outcome. Court, date
+    and authority weight are computed in code from IK metadata, never
+    asked of the model."""
     verdict: Literal["support", "contra", "interim", "reject"] = "reject"
-    score: int = 0  # doctrine 40 + stage 20 + ratio 20 + forum/date 20
+    score: int = 0  # trigger 35 + doctrine/statute 20 + ratio 15 + stage 15 + forum/date 15
     outcome: Literal["relief_granted", "relief_refused", "partly",
                      "interim_only", "unclear"] = "unclear"
     outcome_evidence: str = ""     # VERBATIM operative line, substring-verified
     doctrine_link: str = ""        # one line naming the doctrinal connection
+    # v2 trigger check: the SPECIFIC condition that triggered the court's
+    # power in THIS judgment (e.g. "settlement", "civil_colour"), and
+    # whether it matches the issue's sub_doctrine. A settlement quashing
+    # cited for a civil-colour issue fails here whatever its vocabulary.
+    trigger_condition: str = ""
+    trigger_match: bool = True
+    # v2 parasitic check: on-point language only QUOTED from an earlier
+    # authority (not applied to reach this judgment's own conclusion) →
+    # reject and name the quoted case to cite directly instead.
+    parasitic: bool = False
+    cite_source_instead: str | None = None
     stage_match: bool = True
     ratio_para: str | None = None  # e.g. "para 14" — null when no ratio located
     ratio_summary: str | None = None
     distinguish_risk: str | None = None  # the point the opponent will raise
+    # v2 currency flag (never a KILL): appealed/stayed/doubted/referred
+    # indications found in the text, or an explicit could-not-verify note.
+    currency_note: str = ""
     # Adversarial prep: the strongest objection opposing counsel will raise
     # against citing this judgment (incl. binding-vs-persuasive forum), and
     # how to meet it. Grounded on the judgment + the client's stated forum.
     opponent_argument: str = ""
     counter_strategy: str = ""
+    # v2: how counsel should distinguish this judgment when the OPPONENT
+    # cites it (contra results only).
+    contra_handling: str | None = None
+    # v2: the precise, narrow proposition this judgment may be cited for,
+    # drawn from the ratio; scope limit when only a sub-part is usable.
+    usable_for: str | None = None
+    usable_scope_limit: str | None = None
     reject_reason: str | None = None
 
 

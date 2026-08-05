@@ -419,10 +419,31 @@ class IndianKanoonClient:
     def __init__(self) -> None:
         settings = get_settings()
         self._semaphore = asyncio.Semaphore(settings.ik_max_concurrency)
+        self._http: httpx.AsyncClient | None = None
 
     @property
     def _token(self) -> str | None:
         return get_settings().ik_token
+
+    def _client(self) -> httpx.AsyncClient:
+        """Shared keep-alive connection pool. A per-call AsyncClient paid a
+        fresh TCP+TLS handshake on EVERY search/doc call — across the
+        ~20 queries + 12 doc fetches of one issue that handshake tax was
+        the biggest avoidable slice of IK wall time."""
+        if self._http is None or self._http.is_closed:
+            settings = get_settings()
+            self._http = httpx.AsyncClient(
+                timeout=settings.ik_timeout_seconds,
+                limits=httpx.Limits(
+                    max_connections=settings.ik_max_concurrency * 2,
+                    max_keepalive_connections=settings.ik_max_concurrency,
+                ),
+            )
+        return self._http
+
+    async def aclose(self) -> None:
+        if self._http is not None and not self._http.is_closed:
+            await self._http.aclose()
 
     async def _request(self, path: str, params: dict[str, Any] | None = None) -> Any | None:
         token = self._token
@@ -439,8 +460,7 @@ class IndianKanoonClient:
         for attempt in range(1, settings.ik_max_retries + 1):
             try:
                 async with self._semaphore:
-                    async with httpx.AsyncClient(timeout=settings.ik_timeout_seconds) as client:
-                        resp = await client.post(url, params=params or {}, headers=headers)
+                    resp = await self._client().post(url, params=params or {}, headers=headers)
                 if resp.status_code >= 400:
                     logger.warning("[IK] HTTP %s for %s: %s", resp.status_code, path, resp.text[:200])
                     return None
@@ -676,18 +696,28 @@ class EmbeddingTool:
 
     async def embed_candidates(self, candidates: list[Candidate]) -> dict[str, list[float]]:
         """Segment-level embeddings (headnote/top snippet — never the whole
-        judgment). Qdrant cache first; only misses hit the embedding API."""
+        judgment). Qdrant cache first; only misses hit the embedding API.
+        Cache lookups and write-backs run concurrently — sequential remote
+        round-trips here used to add a full pool-size × latency wait."""
         out: dict[str, list[float]] = {}
-        misses: list[Candidate] = []
+        unknown: list[Candidate] = []
         for cand in candidates:
             vec = self._local.get(cand.doc_id)
-            if vec is None:
-                vec = await asyncio.to_thread(qdrant.get_vector, cand.doc_id)
             if vec is not None:
-                self._local[cand.doc_id] = vec
                 out[cand.doc_id] = vec
             else:
-                misses.append(cand)
+                unknown.append(cand)
+
+        misses: list[Candidate] = []
+        if unknown:
+            cached = await asyncio.gather(
+                *(asyncio.to_thread(qdrant.get_vector, c.doc_id) for c in unknown))
+            for cand, vec in zip(unknown, cached):
+                if vec is not None:
+                    self._local[cand.doc_id] = vec
+                    out[cand.doc_id] = vec
+                else:
+                    misses.append(cand)
 
         if misses:
             segments = [f"{c.title}. {c.headline}"[:1500] for c in misses]
@@ -696,10 +726,11 @@ class EmbeddingTool:
                 for cand, vec in zip(misses, vectors):
                     out[cand.doc_id] = vec
                     self._local[cand.doc_id] = vec
-                    await asyncio.to_thread(
+                await asyncio.gather(*(
+                    asyncio.to_thread(
                         qdrant.put_vector, cand.doc_id, vec,
-                        {"title": cand.title, "court": cand.court, "year": cand.year},
-                    )
+                        {"title": cand.title, "court": cand.court, "year": cand.year})
+                    for cand, vec in zip(misses, vectors)))
         return out
 
 

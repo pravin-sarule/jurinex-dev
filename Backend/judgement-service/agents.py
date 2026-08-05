@@ -27,6 +27,7 @@ from google.adk.runners import InMemoryRunner
 from google.genai import types as genai_types
 
 from claude_llm import (
+    CUSTOM_ISSUE_ENRICH_SYSTEM,
     GROUNDS_EXTRACTOR_SYSTEM,
     ISSUE_SPOTTER_SYSTEM,
     QUERY_GEN_SYSTEM,
@@ -52,6 +53,7 @@ from schemas import (
     SearchResponse,
     SignalSet,
     SourcePage,
+    SpottedIssue,
 )
 from stores import sessions
 from tools import (
@@ -265,14 +267,20 @@ def build_keyword_extract_agent() -> LlmAgent:
 
 # ─── Judgment verifier (PROMPT 3 — one judgment vs one issue) ────────────────
 
-# Single source of truth for the verifier prompt — used verbatim by BOTH
-# the Claude verifier (primary) and the Gemini agent (fallback).
+# Single source of truth for the verifier prompt (v2) — used verbatim by
+# BOTH the Claude verifier (primary) and the Gemini agent (fallback).
 JUDGMENT_VERIFIER_SYSTEM = (
             "You are a legal judgment verifier for Indian litigation. Input: ONE "
-            "issue object (issue, doctrine, statutory hook, procedural stage, "
-            "perspective) and the text of ONE fetched judgment (Indian Kanoon). "
-            "Decide whether this judgment is USABLE for this issue. Output strict "
+            "issue object (issue, doctrine, sub-doctrine, statutory hook, "
+            "procedural stage, perspective, client's forum) and the text of ONE "
+            "fetched judgment (Indian Kanoon). Decide whether a lawyer can "
+            "actually CITE this judgment IN COURT for this issue. Output strict "
             "JSON matching the schema.\n\n"
+            "Your default is 'reject'. A judgment earns a non-reject verdict only "
+            "by clearing every KILL check below. Over-inclusion is the costly "
+            "error: a judgment that is distinguished in one sentence at the "
+            "hearing damages counsel's credibility on the authorities that do "
+            "work. When uncertain, reject and say why in one line.\n\n"
             "CHECKS — run in this order; if a KILL check fails, stop and output "
             "verdict 'reject' with a one-line reject_reason:\n"
             "1. OUTCOME (KILL). Read the FINAL paragraphs first. Classify: "
@@ -286,57 +294,118 @@ JUDGMENT_VERIFIER_SYSTEM = (
             "number or term of art must ACTUALLY APPEAR in this judgment's text; "
             "doctrine_link must point to it, never to your outside knowledge. "
             "Overlap of generic words (maintainable, mandatory, non-compliance, "
-            "liable, fraud) across different fields of law = different shelf = "
-            "reject. Transactional vocabulary is NOT law: a stamp-duty/revenue "
-            "case and a civil-procedure case may both speak of deposits, "
-            "withdrawal, interest and security — if the FIELD OF LAW differs from "
-            "the issue's, reject however similar the money-words look. State the "
-            "doctrinal link in ONE line in doctrine_link; if you cannot name it "
-            "from this judgment's own text, reject.\n"
-            "3. STAGE. Same procedural stage as the issue (quashing↔quashing, "
-            "leave-to-defend↔leave-to-defend, trial↔trial). A different stage sets "
-            "stage_match=false and lowers the score — reject only if the standard "
-            "of review makes the judgment inapposite.\n"
-            "4. RATIO. Locate the paragraph(s) where the court STATES THE PRINCIPLE "
+            "liable, fraud, abuse of process) across different fields of law = "
+            "different shelf = reject. Transactional vocabulary is NOT law: a "
+            "stamp-duty/revenue case and a civil-procedure case may both speak of "
+            "deposits, withdrawal, interest and security — if the FIELD OF LAW "
+            "differs from the issue's, reject however similar the money-words "
+            "look. State the doctrinal link in ONE line in doctrine_link; if you "
+            "cannot name it from this judgment's own text, reject.\n"
+            "3. SUB-DOCTRINE / TRIGGER (KILL). Matching the statute is NOT enough. "
+            "Identify the SPECIFIC CONDITION that triggered the court's power in "
+            "THIS judgment and record it in trigger_condition; compare it with the "
+            "issue's SUB-DOCTRINE (when the issue does not specify one, infer it "
+            "from the issue text before comparing). A single provision houses "
+            "several independent sub-doctrines with different tests — for "
+            "quashing under s.482 CrPC / s.528 BNSS the recognised triggers "
+            "include: civil_colour (dispute essentially civil given a criminal "
+            "cloak; ingredients absent on the face of the FIR), settlement "
+            "(parties have compromised; whether to give effect to it), mala_fide "
+            "(maliciously instituted for vendetta/ulterior motive), statutory_bar "
+            "(limitation, sanction, express bar, jurisdiction), "
+            "vicarious_liability (director/partner impleaded without specific "
+            "role), delay_laches (inordinate unexplained delay in lodging), "
+            "second_fir (multiplicity on the same cause). If trigger_condition ≠ "
+            "the issue's sub-doctrine, set trigger_match=false and REJECT with "
+            "reject_reason naming BOTH triggers — even where the statute, stage, "
+            "field of law and the words 'abuse of process' all match. The classic "
+            "trap this kills: a judgment on quashing where the sole ground was a "
+            "COMPROMISE between accused and complainant is a 'settlement' "
+            "judgment — it is NOT authority on civil_colour, however many times "
+            "it says 'abuse of process' or reproduces civil-flavour language.\n"
+            "4. PARASITIC AUTHORITY (KILL). Determine whether this judgment "
+            "supports the issue through its OWN holding, or only through a "
+            "passage it QUOTES from an earlier judgment. If the on-point language "
+            "appears solely inside a block quotation/extract/summary of another "
+            "decision, and this judgment's own trigger_condition differs from the "
+            "issue's sub-doctrine: set parasitic=true, set cite_source_instead to "
+            "the quoted authority's case name AS IT APPEARS IN THIS TEXT, and "
+            "reject with reject_reason 'on-point language is quoted from [case "
+            "name]; cite that authority directly.' Counsel gains nothing citing a "
+            "judgment for a proposition it merely reproduces. Set parasitic=false "
+            "where the court adopts and APPLIES the quoted principle to reach its "
+            "own operative conclusion.\n"
+            "5. STAGE. Same procedural stage as the issue (quashing↔quashing, "
+            "leave-to-defend↔leave-to-defend, discharge↔discharge, trial↔trial). "
+            "A different stage sets stage_match=false and lowers the score — "
+            "reject only if the standard of review makes the judgment inapposite "
+            "(e.g. an appeal against conviction applying beyond-reasonable-doubt "
+            "cited for a prima facie FIR-stage test).\n"
+            "6. RATIO. Locate the paragraph(s) where the court STATES THE PRINCIPLE "
             "('we are of the view', 'it is well settled', numbered principles). "
             "Record ratio_para (e.g. 'para 14') and a one-sentence ratio_summary in "
             "your own words. A fact-recital or arguments paragraph is NOT ratio. If "
             "no ratio is locatable (bare disposal order), set both to null — the "
             "score is capped at 30.\n"
-            "5. SIDE. Compare the verified outcome with the issue's perspective: "
-            "outcome supporting that side → 'support'; opposite → 'contra' (still "
-            "valuable — the opponent will cite it); interim_only → 'interim'. The "
-            "query that found the judgment is irrelevant; ONLY the verified outcome "
-            "decides the side.\n"
-            "6. DISTINGUISH RISK. Facts need not match the client's case — doctrine "
+            "7. SIDE. Compare the verified outcome AND the verified trigger with "
+            "the issue's perspective: same sub-doctrine + outcome favouring that "
+            "side → 'support'; SAME sub-doctrine + outcome against it → 'contra' "
+            "(genuinely adverse — counsel must be prepared; fill contra_handling: "
+            "the one-line distinction to offer if the opponent cites it); "
+            "interim_only → 'interim'. An unfavourable outcome on a DIFFERENT "
+            "sub-doctrine is a trigger-mismatch REJECT, never contra — it is not "
+            "a threat and must not be presented as one. The query that found the "
+            "judgment is irrelevant; ONLY the verified outcome and trigger decide "
+            "the side.\n"
+            "8. DISTINGUISH RISK. Facts need not match the client's case — doctrine "
             "must. Note in one line the likely distinguishing fact the opponent may "
             "raise (distinguish_risk), else null.\n"
-            "7. ADVERSARIAL PREP. opponent_argument: the STRONGEST objection opposing "
-            "counsel will raise against citing this judgment for this issue — apply "
-            "the bindingness rules: a Supreme Court judgment binds all courts "
-            "(Article 141); a judgment of the SAME High Court as CLIENT'S FORUM is "
-            "binding (note Division Bench > Single Judge); a judgment of a DIFFERENT "
-            "High Court or a lower forum has persuasive value only. Also consider "
-            "distinguishable facts and anything in the text that weakens it. "
-            "counter_strategy: 1–2 sentences on how counsel should MEET that "
-            "objection (e.g. 'persuasive but consistent with the Supreme Court's "
-            "settled test — pair it with a binding authority from the client's own "
-            "High Court in this result set', or 'emphasise the identical ratio; the "
-            "factual difference does not touch the principle'). Never invent a case "
-            "name that does not appear in the provided text. If CLIENT'S FORUM is "
-            "not specified, frame the objection generically ('if the matter is "
-            "outside this High Court, this is persuasive only').\n\n"
-            "SCORING (0–100): doctrine match 40, stage match 20, ratio located 20, "
-            "forum/recency 20. Shelf-fail or outcome-unclear = reject regardless of "
-            "the other points.\n\n"
+            "9. CURRENCY (FLAG, never a KILL). Scan the text for any indication "
+            "this judgment was appealed, stayed, doubted, referred to a larger "
+            "bench, or overruled — record it in currency_note. Where the text is "
+            "silent, state that subsequent history could not be verified from "
+            "this text and must be checked before filing. Never assert a judgment "
+            "is good law on the strength of its own text alone.\n"
+            "10. ADVERSARIAL PREP. opponent_argument: the STRONGEST objection "
+            "opposing counsel will raise against citing this judgment for this "
+            "issue — apply the bindingness rules: a Supreme Court judgment binds "
+            "all courts (Article 141); a judgment of the SAME High Court as "
+            "CLIENT'S FORUM is binding (Division Bench > Single Judge; a "
+            "co-ordinate Single Judge is persuasive but ordinarily followed); a "
+            "judgment of a DIFFERENT High Court or a lower forum has persuasive "
+            "value only. Also consider distinguishable facts, the trigger-"
+            "mismatch risk, and anything in the text that weakens it (e.g. relief "
+            "granted only in part, or only as to some accused). counter_strategy: "
+            "1–2 sentences on how counsel should MEET that objection (e.g. "
+            "'persuasive but consistent with the Supreme Court's settled test — "
+            "pair it with a binding authority from the client's own High Court in "
+            "this result set', or 'emphasise the identical ratio; the factual "
+            "difference does not touch the principle'). Never invent a case name "
+            "that does not appear in the provided text. If CLIENT'S FORUM is not "
+            "specified, frame the objection generically ('if the matter is "
+            "outside this High Court, this is persuasive only').\n"
+            "11. USABILITY. For every non-reject verdict set usable_for: a "
+            "one-line statement of the precise, NARROW proposition counsel may "
+            "cite this judgment for, drawn from the ratio. If it is usable only "
+            "for a sub-part (e.g. the s.471 knowledge requirement but not its "
+            "settlement reasoning), say so expressly in usable_scope_limit.\n\n"
+            "SCORING (0–100): sub-doctrine/trigger match 35, doctrine+statute "
+            "match 20, ratio located 15, stage match 15, forum (binding > "
+            "persuasive) and recency 15. Shelf-fail, trigger-mismatch, parasitic "
+            "or outcome-unclear = reject regardless of the other points. A "
+            "judgment scoring below 55 should be rejected even if no KILL check "
+            "fired.\n\n"
             "RULES:\n"
             "- Ground every field in the judgment text. Quote, don't paraphrase, "
             "for outcome_evidence. Never invent a paragraph number or citation — "
             "unknown → null.\n"
+            "- Never invent a case name that does not appear in the provided text.\n"
             "- Judgments may mix English with Hindi/Marathi — always answer in "
             "English.\n"
             "- Court name, bench and date are recorded by the system from metadata; "
-            "do not guess them."
+            "do not guess them.\n"
+            "- You are advising a lawyer who will stand up and cite this. When "
+            "uncertain between accepting and rejecting, reject and say why."
 )
 
 
@@ -354,7 +423,6 @@ def build_judgment_verifier_agent() -> LlmAgent:
     )
 
 
-_VERIFIER_CONCURRENCY = 6
 _VERIFIER_DOC_BUDGET = 22000  # chars of judgment text per verification call
 
 
@@ -393,7 +461,9 @@ async def verify_judgments(issue: Issue, context: CaseContext,
     # Deterministic shelf anchors: the judgment must mention at least one of
     # the issue's statutory provisions (old/new-code equivalents included).
     shelf_patterns = statutory_shelf_patterns(issue.statutory_hook, keywords.statutory)
-    semaphore = asyncio.Semaphore(_VERIFIER_CONCURRENCY)
+    # Sized so the whole top-N verifies in ONE concurrent wave — the
+    # verifier waves are the dominant slice of search wall time.
+    semaphore = asyncio.Semaphore(get_settings().verifier_concurrency)
 
     async def _verify_one(cand: Candidate) -> tuple[str, JudgmentVerification | None]:
         text = cand.doc_text or ""
@@ -533,6 +603,42 @@ async def spot_issues(raw_text: str, context: CaseContext) -> list[Issue]:
     out = await run_agent_once(build_issue_split_agent(), context.raw_case_summary, ["issues"])
     issue_list = IssueList.model_validate(out.get("issues") or {"issues": []})
     return issue_list.issues[:MAX_ISSUES]
+
+
+# ─── Custom issues: user-typed issues get the SAME pipeline treatment ───────
+
+async def enrich_custom_issue(issue: Issue, context: CaseContext) -> Issue:
+    """A user-typed issue arrives as bare text — no doctrine, statutory hook
+    or title — so query generation would run signal-starved compared to
+    system-suggested issues. Normalize it into the exact same shape (short
+    'Whether …?' question + doctrine + hook + perspective) so the identical
+    query-gen → fetch → verify pipeline runs from the same signals. The
+    lawyer's wording is the source of truth — enrichment never changes the
+    legal substance; on any failure the issue searches exactly as typed."""
+    if not claude_available():
+        return issue
+    user = (
+        f"LAWYER'S ISSUE (as typed):\n{issue.issue}\n\n"
+        f"CASE CONTEXT:\n"
+        f"Facts: {context.facts[:1200]}\n"
+        f"Procedural history: {context.procedural_history[:600]}\n"
+        f"Procedural stage: {context.procedural_stage or 'not specified'}\n"
+        f"Relief sought: {context.relief_sought[:300]}"
+    )
+    result = await claude_parse(CUSTOM_ISSUE_ENRICH_SYSTEM, user, SpottedIssue,
+                                max_tokens=1000)
+    if result is None or not result.issue.strip():
+        logger.warning("[custom-issue] enrichment unavailable — searching as typed")
+        return issue
+    return Issue(
+        id=issue.id,
+        issue=result.issue.strip(),
+        title=result.title.strip() or None,
+        explanation=result.explanation.strip() or None,
+        doctrine=result.doctrine.strip() or None,
+        statutory_hook=(result.statutory_hook or "").strip() or None,
+        perspective=result.perspective.strip() or None,
+    )
 
 
 # ─── Grounds mode: extract the grounds pleaded in the filing itself ─────────

@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from agents import (
     analyze_case,
+    enrich_custom_issue,
     generate_citation_analysis,
     run_issue_search,
     run_search_pipeline,
@@ -79,6 +80,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("shutdown")
+async def _close_ik_http_pool() -> None:
+    """Release the IK client's shared keep-alive connection pool."""
+    await ik_client.aclose()
 
 
 @app.get("/health")
@@ -189,6 +196,27 @@ async def get_session(session_id: str, http_request: Request) -> dict[str, Any]:
     }
 
 
+@app.delete("/api/v1/search/{session_id}")
+async def delete_session(session_id: str, http_request: Request) -> dict[str, Any]:
+    """Delete a stored research session — its results, citation reports and
+    approve/reject decisions — from cache AND database. Same visibility rule
+    as opening a session: owned sessions can only be deleted by their owner."""
+    session = sessions.load(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Unknown or expired sessionId")
+    owner = session.get("userId")
+    caller = http_request.headers.get("x-user-id")
+    if owner and str(owner) != str(caller or ""):
+        raise HTTPException(status_code=404, detail="Unknown or expired sessionId")
+    db_deleted = await asyncio.to_thread(sessions.delete, session_id)
+    if not db_deleted and postgres.available:
+        # Durable copy still exists — the session would resurrect on the
+        # next cache miss. Fail honestly so the UI can offer a retry.
+        raise HTTPException(status_code=500,
+                            detail="Could not delete the stored research — please try again")
+    return {"deleted": True, "sessionId": session_id}
+
+
 # ─── Two-phase interactive flow (Citation Research UI) ──────────────────────
 # Phase 1: /analyze → case context + system-suggested issues (no IK spend).
 # Phase 2: /search/run → retrieval for the issues the user selected and/or
@@ -295,10 +323,17 @@ async def search_run(session_id: str, request: RunSearchRequest,
     else:
         chosen = list(suggested)
     next_id = max((i.id for i in suggested), default=0)
+    custom_issues: list[Issue] = []
     for custom in request.customIssues:
         if custom.strip():
             next_id += 1
-            chosen.append(Issue(id=next_id, issue=custom.strip()))
+            custom_issues.append(Issue(id=next_id, issue=custom.strip()))
+    if custom_issues:
+        # User-typed issues get the SAME treatment as suggested ones:
+        # normalized framing + doctrine + statutory hook, so query
+        # generation and verification run from identical signals.
+        chosen.extend(await asyncio.gather(
+            *(enrich_custom_issue(i, context) for i in custom_issues)))
     if not chosen:
         raise HTTPException(status_code=400, detail="No issues selected and none provided")
 

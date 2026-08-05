@@ -47,6 +47,10 @@ class _MemoryTTLCache:
                 self._data = {k: v for k, v in self._data.items() if v[0] > now}
             self._data[key] = (time.time() + ttl, value)
 
+    def delete(self, key: str) -> None:
+        with self._lock:
+            self._data.pop(key, None)
+
 
 class Cache:
     """Redis-backed string cache with transparent in-memory fallback."""
@@ -92,6 +96,17 @@ class Cache:
             except Exception as exc:
                 logger.warning("[stores] Redis set failed (%s)", exc)
         self._memory.set(key, value, ttl)
+
+    def delete(self, key: str) -> None:
+        # Remove from BOTH layers: a value may sit in the memory fallback
+        # from an earlier Redis outage.
+        client = self._client()
+        if client is not None:
+            try:
+                client.delete(key)
+            except Exception as exc:
+                logger.warning("[stores] Redis delete failed (%s)", exc)
+        self._memory.delete(key)
 
     def get_json(self, key: str) -> Any | None:
         raw = self.get(key)
@@ -146,6 +161,13 @@ class SessionStore:
             self._cache.set_json(f"jsession:{session_id}", payload,
                                  get_settings().session_ttl_seconds)
         return payload
+
+    def delete(self, session_id: str) -> bool:
+        """Remove a session everywhere — cache and durable copy. The DB
+        delete runs synchronously (unlike saves) so the caller can report
+        a real outcome; returns the durable layer's success."""
+        self._cache.delete(f"jsession:{session_id}")
+        return postgres.session_delete(session_id)
 
 
 def _session_db_upsert(session_id: str, payload: dict[str, Any]) -> None:
@@ -489,6 +511,15 @@ class PostgresStore:
             return row[0] if row else None
 
         return self._run("session select", _op, None)
+
+    def session_delete(self, session_id: str) -> bool:
+        def _op(conn) -> bool:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM judgement_sessions WHERE session_id = %s",
+                            (session_id,))
+            return True
+
+        return self._run("session delete", _op, False)
 
     def vault_upsert(self, rows: list[dict[str, Any]]) -> int:
         """Persist GREEN survivors. Called async after the response is sent —

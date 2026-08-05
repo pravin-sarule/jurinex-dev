@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     # the ~12-calls-per-issue cost sane. false → Gemini verifier.
     verifier_use_claude: bool = True
     judgement_verifier_claude_model: str = "claude-sonnet-5"
+    # Concurrent verifier calls PER ISSUE. Sized so the full-doc top-N
+    # verifies in ONE wave (two sequential waves used to dominate search
+    # latency); issues each get their own semaphore, so total concurrency
+    # is this × selected issues.
+    verifier_concurrency: int = 12
     # Web-grounded good-law check (Gemini + Google Search tool) on report
     # views — detects overruling/reversal/SLP/stay that text alone cannot.
     good_law_web_check: bool = True
