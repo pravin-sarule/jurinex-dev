@@ -5,8 +5,10 @@ import logging
 import queue
 import re
 import threading
+import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -168,11 +170,57 @@ class FolderWorkflowService:
         self._lock = threading.RLock()
         self._jobs: dict[str, ProcessingJobRecord] = {}
         self._latest_job_by_case: dict[str, str] = {}
+        # ALL job ids per case, oldest first. The signed-URL upload flow enqueues
+        # ONE job per file, so folder status must aggregate across every job —
+        # the latest job alone would report just the last uploaded file.
+        self._jobs_by_case: dict[str, list[str]] = {}
         self._sessions: dict[str, dict[str, ChatSessionRecord]] = {}
         self._prompt_audit: list[PromptAuditRecord] = []
         self._extracted_by_case: dict[str, dict[str, Any]] = {}
+        # Guards _extracted_by_case merges now that documents finalize in parallel.
+        self._autofill_lock = threading.Lock()
         num_workers = getattr(settings, "processing_queue_workers", 4)
         self._job_queue = DocumentProcessingQueue(num_workers=num_workers)
+        # Recover documents orphaned by a restart (uvicorn --reload kills the worker
+        # threads mid-batch): rows still marked in-flight but not updated within the
+        # per-document timeout can never be finished by anyone — fail them so the UI
+        # stops polling an eternally-"processing" batch. Age-gated so a multi-instance
+        # deployment never kills another instance's live work. Background thread so a
+        # slow DB can't delay startup.
+        threading.Thread(
+            target=self._fail_orphaned_processing_rows,
+            name="orphaned-doc-recovery",
+            daemon=True,
+        ).start()
+
+    def _fail_orphaned_processing_rows(self) -> None:
+        if not is_db_available():
+            return
+        try:
+            timeout_s = int(getattr(settings, "document_processing_timeout_seconds", 600))
+            with get_db_connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE user_files
+                    SET status = %s,
+                        processing_progress = 100.0,
+                        current_operation = 'interrupted',
+                        updated_at = NOW()
+                    WHERE status IN ('processing', 'embedding_pending')
+                      AND (is_folder IS NULL OR is_folder = FALSE)
+                      AND COALESCE(updated_at, created_at) < NOW() - make_interval(secs => %s)
+                    """,
+                    [ProcessingState.error.value, timeout_s],
+                )
+                recovered = cur.rowcount or 0
+                conn.commit()
+            if recovered:
+                logger.warning(
+                    "[FolderService] startup recovery: marked %d orphaned in-flight document(s) as failed",
+                    recovered,
+                )
+        except Exception as exc:
+            logger.warning("[FolderService] startup recovery failed: %s", exc)
 
     def queue_documents(
         self,
@@ -259,6 +307,7 @@ class FolderWorkflowService:
                 documents=statuses,
             )
             self._latest_job_by_case[case_id] = job_id
+            self._jobs_by_case.setdefault(case_id, []).append(job_id)
 
         logger.info(
             "[Agent:DocumentClassificationAgent] status=queued task=parallel_document_processing case_id=%s job_id=%s queued_documents=%s",
@@ -1165,9 +1214,10 @@ class FolderWorkflowService:
     def get_processing_status(self, folder_name: str, user_id: str | None = None) -> FolderProcessingStatusResponse:
         case_id = folder_name
         with self._lock:
-            job_id = self._latest_job_by_case.get(case_id)
-            job = self._jobs.get(job_id) if job_id else None
-        if not job:
+            latest_job_id = self._latest_job_by_case.get(case_id)
+            job_ids = list(self._jobs_by_case.get(case_id) or ([latest_job_id] if latest_job_id else []))
+            jobs = [self._jobs[jid] for jid in job_ids if jid in self._jobs]
+        if not jobs:
             db_status = self._build_processing_status_from_db(folder_name, user_id=user_id)
             if db_status is not None:
                 return db_status
@@ -1184,22 +1234,55 @@ class FolderWorkflowService:
                 updated_at=datetime.now(tz=UTC),
             )
 
-        documents = sorted(job.documents.values(), key=lambda item: item.document_name.lower())
+        # Aggregate documents across ALL of the case's jobs — the signed-URL
+        # upload flow enqueues one single-document job per file, so the latest
+        # job alone would report only the last uploaded file. Dedupe by file id,
+        # freshest update wins; then let DB rows fill in any files the memory
+        # jobs don't know about (e.g. queued before a service restart).
+        merged: dict[str, QueuedDocumentStatus] = {}
+        for job in jobs:
+            for doc in job.documents.values():
+                key = str(doc.file_id or doc.document_id)
+                existing = merged.get(key)
+                if existing is None or doc.updated_at >= existing.updated_at:
+                    merged[key] = doc
+        db_status = self._build_processing_status_from_db(folder_name, user_id=user_id)
+        if db_status is not None:
+            for doc in db_status.documents:
+                merged.setdefault(str(doc.file_id or doc.document_id), doc)
+
+        documents = sorted(merged.values(), key=lambda item: item.document_name.lower())
         total = len(documents)
         processed = sum(1 for item in documents if item.status == ProcessingState.processed)
         failed = sum(1 for item in documents if item.status == ProcessingState.error)
+        in_flight = any(
+            item.status in {ProcessingState.queued, ProcessingState.processing, ProcessingState.embedding_pending}
+            for item in documents
+        )
+        if in_flight:
+            folder_status = ProcessingState.processing
+        elif total > 0 and failed == total:
+            folder_status = ProcessingState.error
+        elif total > 0:
+            folder_status = ProcessingState.processed
+        else:
+            folder_status = ProcessingState.queued
         progress = round(sum(item.processing_progress for item in documents) / total, 2) if total else 0.0
+        updated_at = max(
+            (item.updated_at for item in documents),
+            default=max(job.updated_at for job in jobs),
+        )
         return FolderProcessingStatusResponse(
             folderName=folder_name,
             case_id=case_id,
-            job_id=job.job_id,
-            status=job.status,
+            job_id=latest_job_id,
+            status=folder_status,
             progress=progress,
             total_documents=total,
             processed_documents=processed,
             failed_documents=failed,
             documents=documents,
-            updated_at=job.updated_at,
+            updated_at=updated_at,
         )
 
     def extract_case_fields(self, folder_name: str) -> ExtractCaseFieldsResponse:
@@ -1827,7 +1910,12 @@ class FolderWorkflowService:
         document_ids: list[str],
     ) -> None:
         max_workers = max(1, min(self._pipeline._settings.max_parallel_document_workers, len(documents) or 1))
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="doc-worker") as executor:
+        # NOT a `with` block: ThreadPoolExecutor.__exit__ joins worker threads
+        # (shutdown(wait=True)), so a single hung OCR/embedding call would block
+        # this job — and the queue worker running it — forever. The deadline loop
+        # below marks stragglers failed and shutdown(wait=False) lets the job end.
+        executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="doc-worker")
+        try:
             future_map = {}
             for document, document_id in zip(documents, document_ids, strict=False):
                 db_file_id = document.metadata.get("db_file_id") if isinstance(document.metadata, dict) else None
@@ -1867,10 +1955,13 @@ class FolderWorkflowService:
                     return _cb
 
                 future_map[executor.submit(
-                    self._pipeline._process_single_document,
+                    self._process_and_finalize_document,
+                    job_id,
                     case_id,
                     document,
-                    progress_callback=_make_progress_callback(),
+                    document_id,
+                    stored_case,
+                    _make_progress_callback(),
                 )] = {
                     "document_id": document_id,
                     "source_document": document,
@@ -1880,79 +1971,40 @@ class FolderWorkflowService:
             # Covers large PDFs with many Document AI OCR batches + embedding.
             _doc_timeout = int(settings.document_processing_timeout_seconds)
 
-            for future in as_completed(future_map, timeout=None):
+            def _mark_timed_out(future) -> None:
+                future_context = future_map[future]
+                document_id = future_context["document_id"]
+                source_document = future_context["source_document"]
+                db_file_id = source_document.metadata.get("db_file_id") if isinstance(source_document.metadata, dict) else None
+                logger.error(
+                    "[Agent:DocumentClassificationAgent] status=timeout task=parallel_document_processing "
+                    "case_id=%s document_id=%s timeout=%ss — marking as failed",
+                    case_id,
+                    document_id,
+                    _doc_timeout,
+                )
+                self._update_db_file_processing_state(
+                    file_id=db_file_id,
+                    status=ProcessingState.error.value,
+                    processing_progress=100.0,
+                    current_operation="timeout",
+                )
+                self._update_document(
+                    job_id, document_id, ProcessingState.error, 100.0, "timeout",
+                    error=f"Processing timed out after {_doc_timeout}s",
+                )
+
+            def _handle_completed(future) -> None:
+                # The worker task (_process_and_finalize_document) does ALL the
+                # per-document work — including persistence and the final DB
+                # status updates — so 8 documents finalize concurrently instead
+                # of queueing behind this thread. Here we only surface failures.
                 future_context = future_map[future]
                 document_id = future_context["document_id"]
                 source_document = future_context["source_document"]
                 db_file_id = source_document.metadata.get("db_file_id") if isinstance(source_document.metadata, dict) else None
                 try:
-                    bundle = future.result(timeout=_doc_timeout)
-                    self._update_db_file_processing_state(
-                        file_id=db_file_id,
-                        status=ProcessingState.embedding_pending.value,
-                        processing_progress=80.0,
-                        current_operation="vector_indexing",
-                    )
-                    self._update_document(job_id, document_id, ProcessingState.embedding_pending, 80.0, "vector_indexing")
-                    persisted_chunks = self._pipeline.persist_chunks_to_db(db_file_id, bundle.chunks)
-                    self._pipeline._vector_store.upsert_chunks(case_id, persisted_chunks)
-                    logger.info(
-                        "[Upload] Step 4/4: Storing — in-memory vector index updated case_id=%s document=%s chunks=%d",
-                        case_id,
-                        source_document.document_name,
-                        len(persisted_chunks),
-                    )
-                    stored_case.documents.append(bundle.stored_document)
-                    if self._should_collect_autofill(case_id):
-                        self._merge_extracted_case_data(case_id, bundle.process_result.metadata, bundle.stored_document.text)
-                    self._update_db_file_processing_state(
-                        file_id=db_file_id,
-                        status=ProcessingState.processed.value,
-                        processing_progress=100.0,
-                        stored_document_uri=bundle.process_result.stored_document_uri,
-                        extracted_text=bundle.stored_document.text,
-                        summary=self._build_text_summary(bundle.stored_document.text),
-                        metadata={
-                            **bundle.process_result.metadata,
-                            "doc_type": bundle.process_result.doc_type.value,
-                            "chunk_count": bundle.process_result.chunk_count,
-                            "quality_score": bundle.process_result.quality_score,
-                        },
-                        current_operation="completed",
-                    )
-                    self._update_document(
-                        job_id,
-                        document_id,
-                        ProcessingState.processed,
-                        100.0,
-                        "completed",
-                        doc_type=bundle.process_result.doc_type,
-                        stored_document_uri=bundle.process_result.stored_document_uri,
-                        chunk_count=bundle.process_result.chunk_count,
-                        quality_score=bundle.process_result.quality_score,
-                        metadata=bundle.process_result.metadata,
-                    )
-                except TimeoutError as exc:
-                    # future.result(timeout=...) raises concurrent.futures.TimeoutError
-                    # (subclass of TimeoutError in Python 3.11+).
-                    # The worker thread continues running but we stop waiting for it.
-                    logger.error(
-                        "[Agent:DocumentClassificationAgent] status=timeout task=parallel_document_processing "
-                        "case_id=%s document_id=%s timeout=%ss — marking as failed",
-                        case_id,
-                        document_id,
-                        _doc_timeout,
-                    )
-                    self._update_db_file_processing_state(
-                        file_id=db_file_id,
-                        status=ProcessingState.error.value,
-                        processing_progress=100.0,
-                        current_operation="timeout",
-                    )
-                    self._update_document(
-                        job_id, document_id, ProcessingState.error, 100.0, "timeout",
-                        error=f"Processing timed out after {_doc_timeout}s",
-                    )
+                    future.result()
                 except Exception as exc:
                     logger.exception(
                         "[Agent:DocumentClassificationAgent] status=fail task=parallel_document_processing case_id=%s document_id=%s error=%s",
@@ -1968,6 +2020,30 @@ class FolderWorkflowService:
                     )
                     self._update_document(job_id, document_id, ProcessingState.error, 100.0, "failed", error=str(exc))
 
+            # The batch runs in waves of max_workers documents, so the overall budget
+            # is per-doc timeout × number of waves. Each future is handled the moment
+            # it finishes; once the deadline passes, whatever is still running gets
+            # marked failed instead of wedging the batch at 20% forever. (The old
+            # as_completed(timeout=None) + future.result(timeout=...) pattern could
+            # never fire: as_completed only yields futures that are ALREADY done.)
+            waves = max(1, -(-len(future_map) // max_workers))
+            deadline = time.monotonic() + _doc_timeout * waves
+            pending = set(future_map)
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                done, pending = futures_wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+                for future in done:
+                    _handle_completed(future)
+            for future in pending:
+                future.cancel()
+                _mark_timed_out(future)
+        finally:
+            # wait=False: never join a hung worker thread — the timed-out documents are
+            # already marked failed and the queue worker must move on to the next job.
+            executor.shutdown(wait=False, cancel_futures=True)
+
         with self._lock:
             job = self._jobs[job_id]
             job.status = ProcessingState.processed
@@ -1975,6 +2051,70 @@ class FolderWorkflowService:
                 if all(item.status == ProcessingState.error for item in job.documents.values()):
                     job.status = ProcessingState.error
             job.updated_at = datetime.now(tz=UTC)
+
+    def _process_and_finalize_document(
+        self,
+        job_id: str,
+        case_id: str,
+        document: DocumentReference,
+        document_id: str,
+        stored_case: Any,
+        progress_callback,
+    ) -> None:
+        """Full per-document pipeline INCLUDING persistence and finalization.
+
+        Runs inside the doc-worker pool so chunk persistence, vector indexing,
+        autofill extraction, and the final DB update all happen concurrently
+        across documents. Previously everything after OCR+embedding ran serially
+        in the job thread, which dominated multi-document wall-clock time.
+        """
+        db_file_id = document.metadata.get("db_file_id") if isinstance(document.metadata, dict) else None
+        bundle = self._pipeline._process_single_document(case_id, document, progress_callback=progress_callback)
+        self._update_db_file_processing_state(
+            file_id=db_file_id,
+            status=ProcessingState.embedding_pending.value,
+            processing_progress=80.0,
+            current_operation="vector_indexing",
+        )
+        self._update_document(job_id, document_id, ProcessingState.embedding_pending, 80.0, "vector_indexing")
+        persisted_chunks = self._pipeline.persist_chunks_to_db(db_file_id, bundle.chunks)
+        self._pipeline._vector_store.upsert_chunks(case_id, persisted_chunks)
+        logger.info(
+            "[Upload] Step 4/4: Storing — in-memory vector index updated case_id=%s document=%s chunks=%d",
+            case_id,
+            document.document_name,
+            len(persisted_chunks),
+        )
+        stored_case.documents.append(bundle.stored_document)
+        if self._should_collect_autofill(case_id):
+            self._merge_extracted_case_data(case_id, bundle.process_result.metadata, bundle.stored_document.text)
+        self._update_db_file_processing_state(
+            file_id=db_file_id,
+            status=ProcessingState.processed.value,
+            processing_progress=100.0,
+            stored_document_uri=bundle.process_result.stored_document_uri,
+            extracted_text=bundle.stored_document.text,
+            summary=self._build_text_summary(bundle.stored_document.text),
+            metadata={
+                **bundle.process_result.metadata,
+                "doc_type": bundle.process_result.doc_type.value,
+                "chunk_count": bundle.process_result.chunk_count,
+                "quality_score": bundle.process_result.quality_score,
+            },
+            current_operation="completed",
+        )
+        self._update_document(
+            job_id,
+            document_id,
+            ProcessingState.processed,
+            100.0,
+            "completed",
+            doc_type=bundle.process_result.doc_type,
+            stored_document_uri=bundle.process_result.stored_document_uri,
+            chunk_count=bundle.process_result.chunk_count,
+            quality_score=bundle.process_result.quality_score,
+            metadata=bundle.process_result.metadata,
+        )
 
     def _ensure_case(self, user_id: str, case_id: str) -> StoredCase:
         stored_case = self._pipeline._cases.get(case_id)
@@ -1991,15 +2131,32 @@ class FolderWorkflowService:
         # Intake folders are created via /upload-for-processing as temp-xxxx.
         return str(case_id or "").strip().startswith("temp-")
 
+    # Fields that make the intake auto-fill "rich enough" to stop paying for
+    # more per-document LLM extraction (extract_case_fields uses the same set).
+    _AUTOFILL_KEY_FIELDS = (
+        "caseTitle", "caseNumber", "caseType", "courtName", "jurisdiction",
+        "filingDate", "petitioners", "respondents",
+    )
+
     def _merge_extracted_case_data(self, case_id: str, metadata: dict[str, Any], text: str) -> None:
+        # First-wins merge means later documents only fill gaps — once enough key
+        # fields are collected, skip the (slow, billed) LLM extraction entirely.
+        # This is the difference between 1-2 extraction calls per batch and one
+        # per document.
+        with self._autofill_lock:
+            extracted_data = self._extracted_by_case.setdefault(case_id, {})
+            rich_count = sum(1 for key in self._AUTOFILL_KEY_FIELDS if extracted_data.get(key))
+        if rich_count >= 4:
+            return
         extraction = self._pipeline._document_ai.extract(
             DocumentReference(document_name=metadata.get("original_name", "document"), inline_text=text)
         )
         normalized = self._normalize_entities(extraction.entities)
-        extracted_data = self._extracted_by_case.setdefault(case_id, {})
-        for key, value in normalized.items():
-            if value and not extracted_data.get(key):
-                extracted_data[key] = value
+        with self._autofill_lock:
+            extracted_data = self._extracted_by_case.setdefault(case_id, {})
+            for key, value in normalized.items():
+                if value and not extracted_data.get(key):
+                    extracted_data[key] = value
 
     def _normalize_entities(self, entities: dict[str, Any]) -> dict[str, Any]:
         """

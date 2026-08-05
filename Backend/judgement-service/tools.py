@@ -551,7 +551,8 @@ class IndianKanoonClient:
 
     async def fanout_and_fetch(self, keywords: KeywordSet, cap: int | None = None,
                                exclude: set[str] | None = None,
-                               forum_doctype: str | None = None) -> list[Candidate]:
+                               forum_doctype: str | None = None,
+                               anchors_only: bool = False) -> list[Candidate]:
         """Anchor queries first (full precision queries, double weight,
         deeper take), then one IK query per axis term — doctrinal/outcome
         phrases exact-quoted, statutory/factual left as AND-of-words. Union
@@ -562,7 +563,10 @@ class IndianKanoonClient:
         `forum_doctype`: the client's own High Court's IK doctype — anchor
         queries are ALSO run restricted to that court, so its (binding)
         judgments enter the pool even when nationwide recall would have
-        crowded them out."""
+        crowded them out.
+        `anchors_only`: the user hand-picked this issue's queries — fetch
+        with EXACTLY those (plus their forum-restricted re-run); contra and
+        axis-term queries are NOT sent (axis terms still score/pinpoint)."""
         settings = get_settings()
         cap = cap or settings.ik_candidate_cap
         per_query = settings.ik_results_per_query
@@ -590,21 +594,22 @@ class IndianKanoonClient:
                 if wire not in seen_wire:
                     seen_wire.add(wire)
                     queries.append((anchor.strip(), wire, 2.5, per_query + 5))
-        # Contra queries widen the pool with the adverse line of authority;
-        # a result's final side comes from its VERIFIED outcome, not from
-        # which query found it.
-        for contra in keywords.contra_queries[:2]:
-            if not contra.strip():
-                continue
-            wire = build_ik_query(contra)
-            if wire not in seen_wire:
-                seen_wire.add(wire)
-                queries.append((contra.strip(), wire, 1.0, per_query))
-        for term in keywords.all_terms():
-            wire = build_ik_query(term, exact=term.strip().lower() in exact_terms)
-            if wire not in seen_wire:
-                seen_wire.add(wire)
-                queries.append((term, wire, 1.0, per_query))
+        if not anchors_only:
+            # Contra queries widen the pool with the adverse line of
+            # authority; a result's final side comes from its VERIFIED
+            # outcome, not from which query found it.
+            for contra in keywords.contra_queries[:2]:
+                if not contra.strip():
+                    continue
+                wire = build_ik_query(contra)
+                if wire not in seen_wire:
+                    seen_wire.add(wire)
+                    queries.append((contra.strip(), wire, 1.0, per_query))
+            for term in keywords.all_terms():
+                wire = build_ik_query(term, exact=term.strip().lower() in exact_terms)
+                if wire not in seen_wire:
+                    seen_wire.add(wire)
+                    queries.append((term, wire, 1.0, per_query))
         if not queries:
             return []
 
@@ -865,6 +870,11 @@ def enforce_verifier_rules(v: JudgmentVerification, doc_text: str | None,
        them is on a different shelf → reject, whatever the model scored
        (kills the stamp-duty-case-for-an-Order-37-issue false positive:
        shared money words are not shared law).
+    3a. TRIGGER KILL (v2): trigger_match=False → reject. Matching the
+       statute is not enough — a settlement/compromise quashing cited for
+       a civil-colour issue dies here whatever its vocabulary.
+    3b. PARASITIC KILL (v2): parasitic=True → reject, naming the quoted
+       authority counsel should cite directly instead.
     4. No locatable ratio → score capped at 30.
     5. The side is RE-DERIVED from verified outcome + issue perspective;
        'reject' from the model always stands."""
@@ -879,6 +889,17 @@ def enforce_verifier_rules(v: JudgmentVerification, doc_text: str | None,
         elif not out.doctrine_link.strip():
             out.verdict, out.reject_reason = "reject", (
                 out.reject_reason or "no doctrinal link named (shelf check)")
+        elif not out.trigger_match:
+            out.verdict, out.reject_reason = "reject", (
+                out.reject_reason or
+                f"sub-doctrine mismatch: the judgment's trigger is "
+                f"'{out.trigger_condition or 'unknown'}', not the issue's")
+        elif out.parasitic:
+            cited = (out.cite_source_instead or "the quoted authority").strip()
+            out.verdict, out.reject_reason = "reject", (
+                out.reject_reason or
+                f"on-point language is quoted from {cited}; cite that "
+                f"authority directly")
         elif not shelf_present(doc_text, shelf_patterns or []):
             out.verdict, out.reject_reason = "reject", (
                 "issue's statutory anchors never appear in the judgment text "

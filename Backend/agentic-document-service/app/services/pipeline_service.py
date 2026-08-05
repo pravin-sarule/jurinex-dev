@@ -471,37 +471,49 @@ class LegalCasePipelineService:
                 len(text),
             )
 
-        extracted_text_uri = ""
-        if text and document.document_uri and document.document_uri.startswith("gs://"):
-            try:
-                output_text_path = self._build_output_text_path(document)
-                extracted_text_uri = gcs.upload_bytes(
-                    text.encode("utf-8"),
-                    output_text_path,
-                    content_type="text/plain; charset=utf-8",
-                    bucket_type="output",
-                )
-                logger.info(
-                    "[Pipeline] Step 1.5/4: Extracted text uploaded to output bucket uri=%s chars=%d",
-                    extracted_text_uri,
-                    len(text),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[Pipeline] Step 1.5/4: failed to upload extracted text to output bucket document=%s error=%s",
-                    document.document_name,
-                    exc,
-                )
+        # Side-writes (extracted-text upload → OCR-structure DB persist) don't
+        # feed chunking/embedding, so they run in the background OVERLAPPING
+        # those stages instead of adding several seconds of remote I/O to the
+        # critical path. Joined below before the URI is needed for metadata.
+        def _side_writes() -> str:
+            uri = ""
+            if text and document.document_uri and document.document_uri.startswith("gs://"):
+                try:
+                    output_text_path = self._build_output_text_path(document)
+                    uri = gcs.upload_bytes(
+                        text.encode("utf-8"),
+                        output_text_path,
+                        content_type="text/plain; charset=utf-8",
+                        bucket_type="output",
+                    )
+                    logger.info(
+                        "[Pipeline] Step 1.5/4: Extracted text uploaded to output bucket uri=%s chars=%d",
+                        uri,
+                        len(text),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[Pipeline] Step 1.5/4: failed to upload extracted text to output bucket document=%s error=%s",
+                        document.document_name,
+                        exc,
+                    )
+            # _persist_ocr_extraction stores extracted_text_uri in its metadata,
+            # so it must run after the upload — chained here, off the hot path.
+            self._persist_ocr_extraction(
+                file_id=db_file_id,
+                document=document,
+                text=text,
+                structured_json=structured_ocr_json,
+                page_count=page_count,
+                quality_score=quality_score,
+                extracted_text_uri=uri,
+            )
+            return uri
 
-        self._persist_ocr_extraction(
-            file_id=db_file_id,
-            document=document,
-            text=text,
-            structured_json=structured_ocr_json,
-            page_count=page_count,
-            quality_score=quality_score,
-            extracted_text_uri=extracted_text_uri,
-        )
+        from concurrent.futures import ThreadPoolExecutor as _SidePool
+        _side_pool = _SidePool(max_workers=1, thread_name_prefix="doc-side")
+        _side_future = _side_pool.submit(_side_writes)
+        _side_pool.shutdown(wait=False)
 
         doc_type = self._document_ai.classify(document, text)
         logger.info("[Pipeline] Document classified as %s", doc_type.value)
@@ -598,6 +610,19 @@ class LegalCasePipelineService:
                 )
 
         logger.info("[Pipeline] Step 3/4: done — %d vectors stored in bundle", len(chunk_rows))
+
+        # Join the background side-writes; the extracted-text URI goes into the
+        # stored-document metadata below. Chunking + embedding usually take
+        # longer, so this normally returns immediately.
+        try:
+            extracted_text_uri = _side_future.result(timeout=180)
+        except Exception as exc:
+            logger.warning(
+                "[Pipeline] side-writes failed/timed out document=%s error=%s",
+                document.document_name,
+                exc,
+            )
+            extracted_text_uri = ""
 
         structured_ocr_available = isinstance(structured_ocr_json, dict)
         stored_document = StoredDocument(
@@ -753,56 +778,76 @@ class LegalCasePipelineService:
             len(chunks),
         )
         persisted: list[ChunkRecord] = []
+        # Multi-row statements in slices instead of 2 round-trips per chunk: the
+        # DB is remote, so per-chunk execute() was the dominant per-document cost
+        # (a 60-chunk doc = 120 sequential round-trips).
+        _BATCH_ROWS = 200
         try:
             with get_db_connection() as conn, conn.cursor() as cur:
-                for index, chunk in enumerate(chunks):
+                id_by_index: dict[int, str] = {}
+                for start in range(0, len(chunks), _BATCH_ROWS):
+                    batch = chunks[start:start + _BATCH_ROWS]
+                    row_placeholders: list[str] = []
+                    values: list[Any] = []
+                    for offset, chunk in enumerate(batch):
+                        row_placeholders.append("(%s::uuid, %s, %s, %s, %s, %s, %s)")
+                        values.extend([
+                            file_id,
+                            start + offset,
+                            chunk.text,
+                            max(1, int(len(chunk.text.split()) * 1.3)),
+                            None,
+                            None,
+                            chunk.metadata.get("heading") or None,
+                        ])
                     cur.execute(
-                        """
+                        f"""
                         INSERT INTO file_chunks (file_id, chunk_index, content, token_count, page_start, page_end, heading)
-                        VALUES (%s::uuid, %s, %s, %s, %s, %s, %s)
+                        VALUES {", ".join(row_placeholders)}
                         ON CONFLICT (file_id, chunk_index) DO UPDATE
                           SET content = EXCLUDED.content,
                               token_count = EXCLUDED.token_count,
                               page_start = EXCLUDED.page_start,
                               page_end = EXCLUDED.page_end,
                               heading = EXCLUDED.heading
-                        RETURNING id
+                        RETURNING id, chunk_index
                         """,
-                        (
-                            file_id,
-                            index,
-                            chunk.text,
-                            max(1, int(len(chunk.text.split()) * 1.3)),
-                            None,
-                            None,
-                            chunk.metadata.get("heading") or None,
-                        ),
+                        values,
                     )
-                    chunk_row = cur.fetchone() or {}
-                    db_chunk_id = str(chunk_row.get("id") or chunk.chunk_id)
-                    embedding_pg = f"[{','.join(str(float(v)) for v in chunk.embedding)}]"
+                    for row in cur.fetchall():
+                        id_by_index[int(row.get("chunk_index"))] = str(row.get("id"))
+
+                for start in range(0, len(chunks), _BATCH_ROWS):
+                    batch = chunks[start:start + _BATCH_ROWS]
+                    row_placeholders = []
+                    values = []
+                    for offset, chunk in enumerate(batch):
+                        db_chunk_id = id_by_index.get(start + offset) or chunk.chunk_id
+                        embedding_pg = f"[{','.join(str(float(v)) for v in chunk.embedding)}]"
+                        row_placeholders.append("(%s::uuid, %s::vector, %s::uuid)")
+                        values.extend([db_chunk_id, embedding_pg, file_id])
+                        persisted.append(
+                            ChunkRecord(
+                                chunk_id=db_chunk_id,
+                                case_id=chunk.case_id,
+                                document_id=file_id,
+                                document_name=chunk.document_name,
+                                doc_type=chunk.doc_type,
+                                text=chunk.text,
+                                embedding=chunk.embedding,
+                                metadata=chunk.metadata,
+                            )
+                        )
                     cur.execute(
-                        """
+                        f"""
                         INSERT INTO chunk_vectors (chunk_id, embedding, file_id)
-                        VALUES (%s::uuid, %s::vector, %s::uuid)
+                        VALUES {", ".join(row_placeholders)}
                         ON CONFLICT (chunk_id) DO UPDATE
                           SET embedding = EXCLUDED.embedding,
                               file_id = EXCLUDED.file_id,
                               updated_at = NOW()
                         """,
-                        (db_chunk_id, embedding_pg, file_id),
-                    )
-                    persisted.append(
-                        ChunkRecord(
-                            chunk_id=db_chunk_id,
-                            case_id=chunk.case_id,
-                            document_id=file_id,
-                            document_name=chunk.document_name,
-                            doc_type=chunk.doc_type,
-                            text=chunk.text,
-                            embedding=chunk.embedding,
-                            metadata=chunk.metadata,
-                        )
+                        values,
                     )
                 conn.commit()
         except Exception as exc:

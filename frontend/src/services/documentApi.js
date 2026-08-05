@@ -679,12 +679,13 @@ const documentApi = {
 
     try {
       console.log(`[uploadDocumentsForProcessing] 🚀 Signed upload for ${files.length} file(s)...`);
-      const uploadedFiles = [];
       // Keep one temporary folder for the whole upload batch, just like document-service.
       const tempFolderName = `temp-${Math.random().toString(16).slice(2, 14)}`;
       let folderName = tempFolderName;
 
-      for (const file of files) {
+      // All files upload in PARALLEL (generate-url → PUT → complete each) —
+      // the serial for-of loop made an 8-file upload take 8× a single file.
+      const uploadOne = async (file) => {
         const urlResponse = await axios.post(
           `${API_BASE_URL}/${encodeURIComponent(tempFolderName)}/generate-upload-url`,
           {
@@ -723,9 +724,11 @@ const documentApi = {
         );
 
         const completeData = completeResponse.data || {};
-        folderName = completeData.folderName || folderName;
-        uploadedFiles.push(completeData.document || completeData);
-      }
+        if (completeData.folderName) folderName = completeData.folderName;
+        return completeData.document || completeData;
+      };
+
+      const uploadedFiles = await Promise.all(files.map((file) => uploadOne(file)));
 
       if (!folderName) {
         throw new Error('Folder name missing after signed uploads.');

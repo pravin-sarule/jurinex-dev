@@ -101,8 +101,8 @@ export const judgementApi = {
    * Returns the full SearchResponse: issues[] -> results[] with band, score,
    * pinpoint, signals (explainability chips — render one chip per key).
    */
-  runSearch(sessionId, { issueIds = null, customIssues = [] } = {}) {
-    return postJson(`/api/v1/search/${sessionId}/run`, { issueIds, customIssues });
+  runSearch(sessionId, { issueIds = null, customIssues = [], queryOverrides = {} } = {}) {
+    return postJson(`/api/v1/search/${sessionId}/run`, { issueIds, customIssues, queryOverrides });
   },
 
   /** One-shot — POST /api/v1/search (analyze + split + search in one call). */

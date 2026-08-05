@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -27,6 +28,11 @@ logger = logging.getLogger("agentic_document_service.document_ai_ocr")
 _DEFAULT_PAGE_LIMIT = 15
 # Workers used to send page batches to Document AI in parallel.
 _DEFAULT_OCR_WORKERS = 4
+# Hard per-request deadline for one Document AI process call (a batch is ≤15
+# pages). Without it a stalled RPC blocks its worker thread indefinitely and the
+# whole upload batch reads as stuck; with it the batch fails fast and the pypdf
+# fallback still yields text.
+_DOCAI_REQUEST_TIMEOUT_S = 240.0
 
 
 def _get_page_limit() -> int:
@@ -43,6 +49,55 @@ def _get_ocr_workers() -> int:
         return int(getattr(s, "ocr_parallel_workers", _DEFAULT_OCR_WORKERS))
     except Exception:
         return _DEFAULT_OCR_WORKERS
+
+
+# ── Global Document AI concurrency gate ────────────────────────────────────────
+# All documents in a batch process concurrently, so doc-workers × ocr-workers
+# page-batch requests could hit Document AI at once. A 429 makes the whole
+# extraction fall back to pypdf (much worse quality), so instead of letting the
+# stampede happen, every process_document call takes a slot here. Only the
+# Document AI RPC is gated — chunking/embedding/persistence stay fully parallel.
+_docai_semaphore: threading.BoundedSemaphore | None = None
+_docai_semaphore_lock = threading.Lock()
+
+
+def _get_docai_semaphore() -> threading.BoundedSemaphore:
+    global _docai_semaphore
+    with _docai_semaphore_lock:
+        if _docai_semaphore is None:
+            try:
+                from app.core.config import get_settings
+                slots = max(1, int(getattr(get_settings(), "document_ai_max_concurrent_requests", 10)))
+            except Exception:
+                slots = 10
+            _docai_semaphore = threading.BoundedSemaphore(slots)
+        return _docai_semaphore
+
+
+def _process_document_with_retry(client, request, *, attempts: int = 3):
+    """client.process_document with retry on transient errors (429/quota/5xx).
+
+    Without this, one throttled request permanently degrades the file to the
+    pypdf fallback. The semaphore slot is held across retries so a retry burst
+    can never amplify the very stampede that caused the 429.
+    """
+    for attempt in range(attempts):
+        try:
+            return client.process_document(request=request, timeout=_DOCAI_REQUEST_TIMEOUT_S)
+        except Exception as exc:
+            msg = str(exc).lower()
+            transient = any(
+                k in msg
+                for k in ("429", "resource exhausted", "resource_exhausted", "quota", "unavailable", "503", "deadline")
+            )
+            if not transient or attempt >= attempts - 1:
+                raise
+            delay = 2.0 * (2 ** attempt)
+            logger.warning(
+                "[DocumentAI OCR] transient error — retry %d/%d in %.0fs: %s",
+                attempt + 1, attempts - 1, delay, str(exc)[:200],
+            )
+            time.sleep(delay)
 
 
 @dataclass
@@ -501,21 +556,22 @@ def _call_document_ai(
         raw_document=raw_doc,
         process_options=process_options,
     )
-    try:
-        result = client.process_document(request=request)
-    except Exception as exc:
-        # A processor version that doesn't support a chosen OCR option (e.g.
-        # premium math OCR) raises InvalidArgument. Never drop the batch over a
-        # config mismatch — retry once with a plain request.
-        if process_options is not None:
-            logger.warning(
-                "[DocumentAI OCR] process_options rejected (%s) — retrying without options",
-                exc,
-            )
-            plain = documentai.ProcessRequest(name=processor_name, raw_document=raw_doc)
-            result = client.process_document(request=plain)
-        else:
-            raise
+    with _get_docai_semaphore():
+        try:
+            result = _process_document_with_retry(client, request)
+        except Exception as exc:
+            # A processor version that doesn't support a chosen OCR option (e.g.
+            # premium math OCR) raises InvalidArgument. Never drop the batch over a
+            # config mismatch — retry once with a plain request.
+            if process_options is not None:
+                logger.warning(
+                    "[DocumentAI OCR] process_options rejected (%s) — retrying without options",
+                    exc,
+                )
+                plain = documentai.ProcessRequest(name=processor_name, raw_document=raw_doc)
+                result = _process_document_with_retry(client, plain)
+            else:
+                raise
     doc = result.document
     text = _clean_extracted_text(doc.text or "")
     page_count = len(doc.pages)

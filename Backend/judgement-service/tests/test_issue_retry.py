@@ -29,7 +29,7 @@ async def test_empty_issue_triggers_reformulated_retry(monkeypatch):
         assert "Section 482 CrPC" in failed_queries
         return retry_kw
 
-    async def fake_round(issue_arg, ctx_arg, kw, exclude=None):
+    async def fake_round(issue_arg, ctx_arg, kw, exclude=None, anchors_only=False):
         calls["round"] += 1
         if calls["round"] == 1:
             assert kw is first_kw
@@ -60,7 +60,7 @@ async def test_no_retry_when_first_round_has_results(monkeypatch):
         calls["gen"] += 1
         raise AssertionError("must not reformulate when results exist")
 
-    async def fake_round(issue_arg, ctx_arg, kw_arg, exclude=None):
+    async def fake_round(issue_arg, ctx_arg, kw_arg, exclude=None, anchors_only=False):
         calls["round"] += 1
         return {"candidates": {"d9": "cand"}, "scored": ["HIT"]}
 
@@ -82,7 +82,7 @@ async def test_retry_gives_up_honestly_when_still_empty(monkeypatch):
     async def fake_generate(issue_arg, ctx_arg, failed_queries=None):
         return retry_kw
 
-    async def fake_round(issue_arg, ctx_arg, kw_arg, exclude=None):
+    async def fake_round(issue_arg, ctx_arg, kw_arg, exclude=None, anchors_only=False):
         return {"candidates": {}, "scored": []}
 
     monkeypatch.setattr(agents, "generate_queries", fake_generate)

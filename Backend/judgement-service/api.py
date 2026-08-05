@@ -189,7 +189,8 @@ async def get_session(session_id: str, http_request: Request) -> dict[str, Any]:
         "forumCourt": session.get("forumCourt") or None,
         "suggestedIssues": session.get("suggestedIssues", []),
         "issues": [
-            {key: issue.get(key) for key in ("id", "issue", "title", "keywords", "results")}
+            {key: issue.get(key) for key in ("id", "issue", "title", "groundLabel",
+                                             "keywords", "results")}
             for issue in session.get("issues", [])
         ],
         "statuses": statuses,
@@ -295,7 +296,7 @@ async def analyze_upload(http_request: Request, file: UploadFile = File(...),
     parts = [p for p in (doc_text, text.strip()) if p]
     if not parts:
         raise HTTPException(status_code=400, detail="Uploaded file produced no readable text")
-    mode = mode if mode in ("issues", "grounds") else "issues"
+    mode = mode if mode in ("issues", "grounds", "combined") else "issues"
     session_id, context, issues, grounds_meta = await analyze_case(
         "\n\n---\n\n".join(parts), pages=pages, mode=mode)
     _tag_session(session_id, http_request.headers.get("x-user-id"),
@@ -342,7 +343,8 @@ async def search_run(session_id: str, request: RunSearchRequest,
     context.needs_clarification = False
     context.clarification_question = None
 
-    response = await run_issue_search(session_id, context, chosen)
+    response = await run_issue_search(session_id, context, chosen,
+                                      query_overrides=request.queryOverrides or None)
     _tag_session(session_id, http_request.headers.get("x-user-id"))
     background.add_task(_vault_write, response)
     return response

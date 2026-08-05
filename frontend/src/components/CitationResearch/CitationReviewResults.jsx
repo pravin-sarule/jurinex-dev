@@ -542,10 +542,22 @@ export default function CitationReviewResults({
 }) {
   const issues = searchResponse?.issues || [];
   const sessionId = searchResponse?.sessionId;
-  // Grounds-mode sessions label each research unit "Ground", not "Issue".
+  // Grounds-mode sessions label each research unit "Ground", not "Issue";
+  // combined sessions mix both — a unit with a pleaded groundLabel is a
+  // Ground, everything else an Issue.
   const isGrounds = researchMode === 'grounds';
-  const unitLabel = isGrounds ? 'Ground' : 'Issue';
-  const unitHeading = (issue) => (issue.title ? `${unitLabel} ${issue.id}: ${issue.title}` : issue.issue);
+  const unitHeading = (issue) => {
+    if (issue.groundLabel) return `${issue.groundLabel}: ${issue.title || issue.issue}`;
+    const unitLabel = isGrounds ? 'Ground' : 'Issue';
+    return issue.title ? `${unitLabel} ${issue.id}: ${issue.title}` : issue.issue;
+  };
+  // Sidebar grouping: grounds and issues in separate sections, each with
+  // its own judgment count. Legacy grounds sessions (no groundLabel in
+  // stored results) all land in the grounds section.
+  const sidebarGrounds = (isGrounds ? issues : issues.filter((i) => i.groundLabel))
+    .map((entry, idx) => ({ entry, heading: `Ground ${idx + 1}: ${entry.title || entry.issue}` }));
+  const sidebarIssues = (isGrounds ? [] : issues.filter((i) => !i.groundLabel))
+    .map((entry) => ({ entry, heading: entry.issue || `Issue ${entry.id}` }));
   const [detail, setDetail] = useState(null); // {issueId, item}
   const [openQueries, setOpenQueries] = useState({}); // issueId -> bool
   // Click an issue in the left rail → show only that issue's judgments.
@@ -661,39 +673,44 @@ export default function CitationReviewResults({
                 </p>
               </div>
             )}
-            <div>
-              <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">
-                {isGrounds ? 'Grounds' : 'Issues'} ({issues.length})
+            {activeIssueId != null && (
+              <button
+                onClick={() => setActiveIssueId(null)}
+                className="w-full text-left rounded-xl border border-dashed border-[#99F6E4] bg-white px-3 py-2 text-[11px] font-semibold hover:bg-[#F0FDFA]"
+                style={{ color: TEAL_DARK }}
+              >
+                ← Show all
+              </button>
+            )}
+            {[
+              { key: 'issues', label: 'Issues', items: sidebarIssues },
+              { key: 'grounds', label: 'Grounds', items: sidebarGrounds },
+            ].filter((group) => group.items.length > 0).map((group) => (
+              <div key={group.key}>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">
+                  {group.label} ({group.items.length})
+                </div>
+                <div className="mt-2 space-y-2">
+                  {group.items.map(({ entry, heading }) => {
+                    const active = activeIssueId === entry.id;
+                    return (
+                      <button
+                        key={entry.id}
+                        onClick={() => setActiveIssueId(active ? null : entry.id)}
+                        className={`w-full text-left rounded-xl border px-3 py-2.5 text-[11px] leading-relaxed transition-colors ${
+                          active
+                            ? 'border-[#21C1B6] bg-[#F0FDFA] text-[#0F172A] font-semibold'
+                            : 'border-[#E2E8F0] bg-white text-[#334155] hover:border-[#99F6E4] hover:bg-[#F8FAFC]'
+                        }`}
+                      >
+                        {heading}
+                        <span className="ml-1.5 text-[10px] text-[#94A3B8]">({entry.results?.length || 0})</span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-              <div className="mt-2 space-y-2">
-                {activeIssueId != null && (
-                  <button
-                    onClick={() => setActiveIssueId(null)}
-                    className="w-full text-left rounded-xl border border-dashed border-[#99F6E4] bg-white px-3 py-2 text-[11px] font-semibold hover:bg-[#F0FDFA]"
-                    style={{ color: TEAL_DARK }}
-                  >
-                    ← Show all {isGrounds ? 'grounds' : 'issues'}
-                  </button>
-                )}
-                {issues.map((issue) => {
-                  const active = activeIssueId === issue.id;
-                  return (
-                    <button
-                      key={issue.id}
-                      onClick={() => setActiveIssueId(active ? null : issue.id)}
-                      className={`w-full text-left rounded-xl border px-3 py-2.5 text-[11px] leading-relaxed transition-colors ${
-                        active
-                          ? 'border-[#21C1B6] bg-[#F0FDFA] text-[#0F172A] font-semibold'
-                          : 'border-[#E2E8F0] bg-white text-[#334155] hover:border-[#99F6E4] hover:bg-[#F8FAFC]'
-                      }`}
-                    >
-                      {unitHeading(issue)}
-                      <span className="ml-1.5 text-[10px] text-[#94A3B8]">({issue.results?.length || 0})</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+            ))}
           </div>
           <div className="p-4 border-t border-[#E2E8F0] space-y-2">
             <button onClick={onEditIssues}
@@ -764,10 +781,17 @@ export default function CitationReviewResults({
 
               <div className="mt-4 space-y-8">
                 {visibleIssues.map((issue) => {
-                  const queries = issue.keywords
+                  // Fetch queries (what actually searched Indian Kanoon —
+                  // the user's selection when they curated) vs axis terms
+                  // (lexical scoring signals only).
+                  const fetchQueries = issue.keywords
+                    ? [...(issue.keywords.anchor_queries || []), ...(issue.keywords.contra_queries || [])]
+                    : [];
+                  const scoringTerms = issue.keywords
                     ? [...(issue.keywords.doctrinal || []), ...(issue.keywords.statutory || []),
                        ...(issue.keywords.factual || []), ...(issue.keywords.outcome || [])]
                     : [];
+                  const queries = fetchQueries.length > 0 ? fetchQueries : scoringTerms;
                   const open = !!openQueries[issue.id];
                   return (
                     <section key={issue.id}>
@@ -790,12 +814,24 @@ export default function CitationReviewResults({
                             </button>
                           )}
                           {open && (
-                            <div className="mt-2 flex flex-wrap gap-1.5">
-                              {queries.map((query, idx) => (
-                                <span key={idx} className="px-2 py-0.5 rounded-full text-[10px] text-[#0D9488] bg-[#F0FDFA] border border-[#99F6E4]">
-                                  {query}
-                                </span>
-                              ))}
+                            <div className="mt-2 space-y-1.5">
+                              <div className="flex flex-wrap gap-1.5">
+                                {queries.map((query, idx) => (
+                                  <span key={idx} className="px-2 py-0.5 rounded-full text-[10px] text-[#0D9488] bg-[#F0FDFA] border border-[#99F6E4]">
+                                    {query}
+                                  </span>
+                                ))}
+                              </div>
+                              {fetchQueries.length > 0 && scoringTerms.length > 0 && (
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="text-[10px] text-[#94A3B8]">scoring terms:</span>
+                                  {scoringTerms.map((term, idx) => (
+                                    <span key={idx} className="px-2 py-0.5 rounded-full text-[10px] text-[#94A3B8] bg-[#F8FAFC] border border-[#E2E8F0]">
+                                      {term}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
