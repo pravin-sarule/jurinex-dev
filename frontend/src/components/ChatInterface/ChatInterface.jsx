@@ -3298,6 +3298,9 @@ const ChatInterface = () => {
   };
 
   const handleNewChat = () => {
+    // Stop rendering the previous answer here — it keeps generating server-side and
+    // lands in its own session's history.
+    detachActiveStream();
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
