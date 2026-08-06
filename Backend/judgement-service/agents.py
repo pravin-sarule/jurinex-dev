@@ -79,6 +79,7 @@ from tools import (
     party_perspective,
     rerank,
     statutory_shelf_patterns,
+    to_ik_operators,
     verify_context_against_source,
 )
 
@@ -93,7 +94,40 @@ MAX_ISSUES = 12
 # The user picks which grounds to actually search, so IK spend stays bounded.
 MAX_GROUNDS = 8
 MAX_RESULTS_PER_ISSUE = 10
-MAX_LLM_INPUT_CHARS = 30000
+
+
+def _llm_budget() -> int:
+    """Configurable case-material budget (env MAX_LLM_INPUT_CHARS, default
+    120k chars) — the old hardcoded 30k silently hid everything past the
+    first dozen pages from issue spotting."""
+    return get_settings().max_llm_input_chars
+
+
+def _budget_case_text(raw_text: str, budget: int) -> str:
+    """Fit case material into the model budget WITHOUT dropping whole
+    documents. Multi-document texts ([FILE: …] / [DOCUMENT: …] blocks) give
+    every document an even share, keeping each block's head AND tail (grounds
+    and prayers live at the ends). Single texts keep head + tail. The old
+    blind head-slice meant issues in later documents could never be found."""
+    text = raw_text or ""
+    if len(text) <= budget:
+        return text
+    parts = [p for p in re.split(r"(?=\[(?:FILE|DOCUMENT): )", text) if p.strip()]
+    if len(parts) > 1:
+        share = max(2000, budget // len(parts))
+        clipped: list[str] = []
+        for part in parts:
+            if len(part) <= share:
+                clipped.append(part)
+            else:
+                head = share * 3 // 4
+                tail = share - head
+                clipped.append(part[:head] + "\n[... document truncated ...]\n"
+                               + part[-tail:])
+        return "\n\n".join(clipped)
+    head = budget * 3 // 4
+    return (text[:head] + "\n[... middle of material omitted ...]\n"
+            + text[-(budget - head):])
 
 
 def _gen_config(temperature: float) -> genai_types.GenerateContentConfig:
@@ -243,6 +277,9 @@ _KEYWORD_SYNTAX_ADVANCED = (
     "- Boolean operators MUST be capitalized: AND requires all terms, OR "
     "broadens to either, NOT excludes. Group OR-alternatives in parentheses: "
     "(\"malafide\" OR \"ulterior motive\").\n"
+    "- Always write AND / OR / NOT exactly like that — the system converts "
+    "them to Indian Kanoon's wire operators (ANDD / ORR / NOTT) at fetch "
+    "time; never write the doubled forms yourself.\n"
     "- Court filtering (doctypes:) is appended by the system — never write it "
     "yourself.\n\n"
     "PRODUCE:\n"
@@ -861,7 +898,7 @@ async def run_agent_once(agent, message: str, output_keys: list[str]) -> dict[st
     and return the requested session-state outputs (written via output_key)."""
     runner = InMemoryRunner(agent=agent, app_name=_APP)
     session = await runner.session_service.create_session(app_name=_APP, user_id="pipeline")
-    content = genai_types.Content(role="user", parts=[genai_types.Part(text=message[:MAX_LLM_INPUT_CHARS])])
+    content = genai_types.Content(role="user", parts=[genai_types.Part(text=message[:_llm_budget()])])
     async for _event in runner.run_async(user_id="pipeline", session_id=session.id, new_message=content):
         pass
     session = await runner.session_service.get_session(
@@ -878,7 +915,7 @@ async def spot_issues(raw_text: str, context: CaseContext) -> list[Issue]:
     Falls back to the Gemini issue-split agent when Claude is unavailable."""
     if claude_available():
         user = (
-            f"CASE MATERIAL:\n{raw_text[:MAX_LLM_INPUT_CHARS - 4000]}\n\n"
+            f"CASE MATERIAL:\n{_budget_case_text(raw_text, _llm_budget() - 4000)}\n\n"
             f"STRUCTURED CONTEXT (already extracted and source-verified):\n"
             f"Facts: {context.facts[:1500]}\n"
             f"Procedural history: {context.procedural_history[:800]}\n"
@@ -1005,7 +1042,7 @@ async def extract_grounds(raw_text: str, context: CaseContext,
     display). Sets stage/forum/clarification on the context exactly like
     the issue spotter does."""
     user = (
-        f"CASE MATERIAL:\n{raw_text[:MAX_LLM_INPUT_CHARS - 4000]}\n\n"
+        f"CASE MATERIAL:\n{_budget_case_text(raw_text, _llm_budget() - 4000)}\n\n"
         f"STRUCTURED CONTEXT (already extracted and source-verified):\n"
         f"Facts: {context.facts[:1500]}\n"
         f"Procedural history: {context.procedural_history[:800]}\n"
@@ -1082,26 +1119,34 @@ async def extract_fresh(raw_text: str, context: CaseContext, objective: str,
     verifier extras applying to every proposed ground."""
     user = (
         f"CLIENT'S OBJECTIVE (the only instruction you follow):\n{objective[:2000]}\n\n"
-        f"SOURCE DOCUMENTS OF THE CASE:\n{raw_text[:MAX_LLM_INPUT_CHARS - 6000]}\n\n"
+        f"SOURCE DOCUMENTS OF THE CASE:\n{_budget_case_text(raw_text, _llm_budget() - 6000)}\n\n"
         f"STRUCTURED CONTEXT (already extracted and source-verified):\n"
         f"Facts: {context.facts[:1500]}\n"
         f"Procedural history: {context.procedural_history[:800]}\n"
         f"Relief sought: {context.relief_sought[:300]}"
     )
-    result: GroundsExtractResult | None = None
-    if claude_available():
-        result = await claude_parse(FRESH_CASE_SYSTEM, user,
-                                    GroundsExtractResult, max_tokens=8000)
+    async def _fresh_grounds() -> GroundsExtractResult:
+        result: GroundsExtractResult | None = None
+        if claude_available():
+            result = await claude_parse(FRESH_CASE_SYSTEM, user,
+                                        GroundsExtractResult, max_tokens=8000)
+            if result is None:
+                logger.warning("[claude] fresh extractor unavailable — Gemini fallback")
         if result is None:
-            logger.warning("[claude] fresh extractor unavailable — Gemini fallback")
-    if result is None:
-        try:
-            out = await run_agent_once(build_fresh_extract_agent(), user,
-                                       ["fresh_extract"])
-            result = GroundsExtractResult.model_validate(out.get("fresh_extract") or {})
-        except Exception:
-            logger.exception("[fresh] Gemini fallback failed")
-            result = GroundsExtractResult()
+            try:
+                out = await run_agent_once(build_fresh_extract_agent(), user,
+                                           ["fresh_extract"])
+                result = GroundsExtractResult.model_validate(out.get("fresh_extract") or {})
+            except Exception:
+                logger.exception("[fresh] Gemini fallback failed")
+                result = GroundsExtractResult()
+        return result
+
+    # Proposed grounds AND the exhaustive issue spotter run CONCURRENTLY —
+    # raw_text carries the [CLIENT'S OBJECTIVE] header, so spotted issues are
+    # framed for the objective too. Same shape as combined mode.
+    result, spotted = await asyncio.gather(_fresh_grounds(),
+                                           spot_issues(raw_text, context))
 
     # Deterministic backstops: every fresh ground is PROPOSED and labelled —
     # a model that forgot the label still yields "Proposed Ground N" cards.
@@ -1114,7 +1159,7 @@ async def extract_fresh(raw_text: str, context: CaseContext, objective: str,
     context.forum = result.forum.strip() or context.forum
     if not context.relief_sought.strip():
         context.relief_sought = objective[:300]
-    if result.insufficient_material or not result.grounds:
+    if (result.insufficient_material or not result.grounds) and not spotted:
         context.needs_clarification = True
         context.clarification_question = (
             "No researchable ground could be formulated for this fresh matter. "
@@ -1123,23 +1168,34 @@ async def extract_fresh(raw_text: str, context: CaseContext, objective: str,
             "or check that the case's documents have finished processing.")
         return [], {}
 
+    # One extractor being empty is fine — never block when the other found
+    # something researchable.
+    context.needs_clarification = False
+    context.clarification_question = None
+
     # Fresh matters have no drafter-imposed ground count — allow the same
-    # ceiling as issue spotting (the user picks which to search).
-    issues = _grounds_to_issues(result, cap=MAX_ISSUES)
-    dropped = max(0, len(result.grounds) - len(issues))
+    # ceiling as issue spotting; the merged list holds both kinds.
+    ground_issues = _grounds_to_issues(result, cap=MAX_ISSUES)
+    merged = _merge_spotted_issues(ground_issues, spotted)
+    dropped = max(0, len(merged) - MAX_COMBINED_ITEMS) \
+        + max(0, len(result.grounds) - len(ground_issues))
+    merged = merged[:MAX_COMBINED_ITEMS]
+    for idx, item in enumerate(merged):
+        item.id = idx + 1
     meta: dict[str, Any] = {
-        "totalGrounds": len(issues),
+        "totalGrounds": sum(1 for i in merged if i.ground_label),
+        "spottedIssues": sum(1 for i in merged if not i.ground_label),
         "documentType": result.document_type_label.strip() or "Fresh matter — no draft on record",
         "party": result.party.strip() or None,
         "objective": objective[:500],
         "notes": [n for n in result.notes if n.strip()],
     }
     if dropped:
-        # No silent caps: the UI tells the user how many grounds were cut.
+        # No silent caps: the UI tells the user how many items were cut.
         meta["truncatedGrounds"] = dropped
-        logger.info("[fresh] %d proposed ground(s) beyond the cap of %d were dropped",
-                    dropped, MAX_ISSUES)
-    return issues, meta
+        logger.info("[fresh] %d item(s) beyond the cap of %d were dropped",
+                    dropped, MAX_COMBINED_ITEMS)
+    return merged, meta
 
 
 # ─── Combined mode: full grounds extraction + full issue spotting, merged ───
@@ -1176,6 +1232,33 @@ def _same_question(a: frozenset[str], b: frozenset[str]) -> bool:
     return len(a & b) / min(len(a), len(b)) >= 0.7
 
 
+def _merge_spotted_issues(base: list[Issue], spotted: list[Issue]) -> list[Issue]:
+    """Combined/fresh dedup: keep every ground; add a spotted issue only when
+    no ground already raises the same legal question. Order of checks:
+    (1) question-text overlap (works even in degraded mode where the fallback
+    spotter labels nothing), (2) sub-doctrine trigger (a distinct trigger is a
+    distinct issue even on the same statute — delay_laches vs civil_colour),
+    (3) doctrine+hook shelf only when the spotted item has no trigger."""
+    ground_triggers = {_dedup_key(g.sub_doctrine) for g in base if g.sub_doctrine}
+    ground_shelves = {(_dedup_key(g.doctrine), _dedup_key(g.statutory_hook))
+                      for g in base if g.doctrine and g.statutory_hook}
+    ground_questions = [_question_tokens(g.issue) for g in base]
+    merged: list[Issue] = list(base)
+    for issue in spotted:
+        tokens = _question_tokens(issue.issue)
+        if any(_same_question(tokens, gq) for gq in ground_questions):
+            continue
+        trigger = _dedup_key(issue.sub_doctrine)
+        if trigger:
+            if trigger in ground_triggers:
+                continue
+        elif issue.doctrine and issue.statutory_hook and (
+                _dedup_key(issue.doctrine), _dedup_key(issue.statutory_hook)) in ground_shelves:
+            continue
+        merged.append(issue)
+    return merged
+
+
 async def extract_combined(raw_text: str, context: CaseContext,
                            ) -> tuple[list[Issue], dict[str, Any]]:
     """Combined mode's stage 1: the grounds extractor AND the exhaustive
@@ -1192,30 +1275,7 @@ async def extract_combined(raw_text: str, context: CaseContext,
         extract_grounds(raw_text, context),
         spot_issues(raw_text, context),
     )
-
-    ground_triggers = {_dedup_key(g.sub_doctrine) for g in grounds if g.sub_doctrine}
-    ground_shelves = {(_dedup_key(g.doctrine), _dedup_key(g.statutory_hook))
-                     for g in grounds if g.doctrine and g.statutory_hook}
-    ground_questions = [_question_tokens(g.issue) for g in grounds]
-    merged: list[Issue] = list(grounds)
-    for issue in spotted:
-        # Text similarity first — it works even in degraded mode, where the
-        # fallback spotter labels nothing.
-        tokens = _question_tokens(issue.issue)
-        if any(_same_question(tokens, gq) for gq in ground_questions):
-            continue
-        trigger = _dedup_key(issue.sub_doctrine)
-        if trigger:
-            # A sub-doctrine names the SPECIFIC question — a distinct
-            # trigger is a distinct issue even on the same statute (e.g.
-            # delay_laches vs civil_colour, both s.482 quashing).
-            if trigger in ground_triggers:
-                continue
-        elif issue.doctrine and issue.statutory_hook and (
-                _dedup_key(issue.doctrine), _dedup_key(issue.statutory_hook)) in ground_shelves:
-            # No trigger to compare — fall back to the doctrine+hook shelf.
-            continue
-        merged.append(issue)
+    merged = _merge_spotted_issues(grounds, spotted)
 
     if not merged:
         # Both extractors came back empty — clarification (set by them) stands.
@@ -1275,6 +1335,17 @@ def _ground_note(issue: Issue) -> str:
         "SAME fact pattern would contain), so results match this exact case — "
         "never generic filler.")
     return "\n".join(lines)
+
+
+def _wire_queries(keywords: KeywordSet) -> KeywordSet:
+    """Store and display anchor/contra queries in Indian Kanoon's EXACT wire
+    syntax (ANDD / ORR / NOTT, parentheses stripped) — what the card shows is
+    byte-for-byte what hits the API. The model writes readable AND/OR/NOT;
+    this deterministic pass converts it once, at generation time. Simple
+    keyword queries pass through unchanged."""
+    keywords.anchor_queries = [to_ik_operators(q) for q in keywords.anchor_queries]
+    keywords.contra_queries = [to_ik_operators(q) for q in keywords.contra_queries]
+    return keywords
 
 
 def _merge_ground_statutes(keywords: KeywordSet, issue: Issue) -> KeywordSet:
@@ -1347,7 +1418,7 @@ async def generate_queries(issue: Issue, context: CaseContext,
         system = QUERY_GEN_SYSTEM_ADVANCED if style == "advanced" else QUERY_GEN_SYSTEM_SIMPLE
         result = await claude_parse(system, user, KeywordSet, max_tokens=4000)
         if result is not None and result.all_terms():
-            return _merge_ground_statutes(result, issue)
+            return _wire_queries(_merge_ground_statutes(result, issue))
         logger.warning("[claude] query generation unavailable — Gemini keyword fallback")
     keyword_message = (
         f"Case summary (context only):\n{context.raw_case_summary}\n\n"
@@ -1356,7 +1427,8 @@ async def generate_queries(issue: Issue, context: CaseContext,
         f"{retry_note}"
     )
     out = await run_agent_once(build_keyword_extract_agent(style), keyword_message, ["keywords"])
-    return _merge_ground_statutes(KeywordSet.model_validate(out.get("keywords") or {}), issue)
+    return _wire_queries(_merge_ground_statutes(
+        KeywordSet.model_validate(out.get("keywords") or {}), issue))
 
 
 # ─── Per-issue pipeline (Stage 2 → fetch → rerank → layers → score) ──────────

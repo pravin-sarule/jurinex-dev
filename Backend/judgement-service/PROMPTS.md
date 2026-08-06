@@ -300,6 +300,9 @@ INDIAN KANOON QUERY SYNTAX (use it in EVERY query):
 - Boolean operators MUST be capitalized: AND requires all terms, OR broadens to
   either, NOT excludes. Group OR-alternatives in parentheses so precedence is
   explicit: ("malafide" OR "ulterior motive").
+- Always write AND / OR / NOT exactly like that — the system converts them to
+  Indian Kanoon's wire operators (ANDD / ORR / NOTT) at fetch time
+  (tools.to_ik_operators); never write the doubled forms yourself.
 - Court filtering is appended by the system — NEVER write doctypes: yourself.
 
 RULES:

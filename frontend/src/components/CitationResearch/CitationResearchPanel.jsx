@@ -698,6 +698,9 @@ export default function CitationResearchPanel() {
     }
     if (inputMode === 'case' && freshMode && !caseText.trim()) {
       toast.info('Describe what the client wants — the objective drives a fresh matter\'s grounds');
+      // Make the blocker impossible to miss: jump to the empty objective box.
+      caseTextRef.current?.focus();
+      caseTextRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
     }
     if (inputMode === 'text' && files.length === 0) {

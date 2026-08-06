@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     gemini_embedding_model: str = "models/gemini-embedding-001"
     embedding_dim: int = 768
 
+    # Case material budget for the analysis stages (chars). The old hardcoded
+    # 28–30k fed the issue spotter barely a dozen pages — multi-hundred-page
+    # cases lost most of their documents. ~120k chars ≈ 30k tokens: trivial
+    # for Gemini flash; ~$0.45/call on Claude Opus when credits allow.
+    max_llm_input_chars: int = 120_000
+
     # --- Claude API (issue spotting + query generation + verification) ---
     anthropic_api_key: str | None = None
     judgement_claude_model: str | None = None  # wins over claude_model when set

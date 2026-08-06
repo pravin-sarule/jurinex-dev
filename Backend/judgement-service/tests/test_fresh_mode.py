@@ -10,6 +10,7 @@ from schemas import (
     CaseContext,
     ExtractedGround,
     GroundsExtractResult,
+    Issue,
 )
 
 
@@ -62,8 +63,12 @@ def test_fresh_extraction_labels_and_maps(monkeypatch):
         captured["user"] = user
         return _result()
 
+    async def _no_spotted(raw_text, ctx):
+        return []
+
     monkeypatch.setattr(agents, "claude_available", lambda: True)
     monkeypatch.setattr(agents, "claude_parse", _fake_parse)
+    monkeypatch.setattr(agents, "spot_issues", _no_spotted)
     context = _context()
     issues, meta = asyncio.run(agents.extract_fresh(
         "SOURCE DOC TEXT", context, "we act for the supplier; recover the unpaid invoices"))
@@ -85,13 +90,49 @@ def test_fresh_empty_result_asks_for_clarification(monkeypatch):
     async def _fake_parse(*args, **kwargs):
         return GroundsExtractResult(insufficient_material=True)
 
+    async def _no_spotted(raw_text, ctx):
+        return []
+
     monkeypatch.setattr(agents, "claude_available", lambda: True)
     monkeypatch.setattr(agents, "claude_parse", _fake_parse)
+    monkeypatch.setattr(agents, "spot_issues", _no_spotted)
     context = _context()
     issues, meta = asyncio.run(agents.extract_fresh("x", context, "quash it"))
     assert issues == []
     assert context.needs_clarification is True
     assert "fresh matter" in (context.clarification_question or "")
+
+
+def test_fresh_merges_spotted_issues(monkeypatch):
+    """Fresh mode now spots issues too: proposed grounds first, then the
+    spotted issues no ground already covers, ids renumbered."""
+    async def _fake_parse(system, user, model, **kwargs):
+        return _result()
+
+    async def _spotted(raw_text, ctx):
+        return [
+            # Duplicate of proposed ground 2's trigger — must be dropped.
+            Issue(id=1, issue="Whether interest is payable on the delayed invoices?",
+                  doctrine="contract — interest", sub_doctrine="interest_stipulation",
+                  statutory_hook="Section 34 CPC"),
+            # Genuinely new question (distinct trigger) — must survive.
+            Issue(id=2, issue="Whether the commercial court has pecuniary jurisdiction over the claim?",
+                  doctrine="jurisdiction", sub_doctrine="pecuniary_jurisdiction",
+                  statutory_hook="Section 12 Commercial Courts Act"),
+        ]
+
+    monkeypatch.setattr(agents, "claude_available", lambda: True)
+    monkeypatch.setattr(agents, "claude_parse", _fake_parse)
+    monkeypatch.setattr(agents, "spot_issues", _spotted)
+    context = _context()
+    issues, meta = asyncio.run(agents.extract_fresh(
+        "SOURCE DOC TEXT", context, "recover the unpaid invoices"))
+
+    assert meta["totalGrounds"] == 2 and meta["spottedIssues"] == 1
+    assert [i.id for i in issues] == [1, 2, 3]
+    assert issues[0].ground_label and issues[1].ground_label
+    assert not issues[2].ground_label
+    assert "pecuniary jurisdiction" in issues[2].issue
 
 
 def test_fresh_mode_is_a_valid_research_mode():

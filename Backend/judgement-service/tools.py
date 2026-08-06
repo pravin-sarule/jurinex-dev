@@ -294,7 +294,6 @@ def verify_context_against_source(draft: CaseContextDraft, source_text: str,
 # ─── Case fetcher (agentic document service) ─────────────────────────────────
 
 _MAX_FILE_TEXT = 120_000       # per-file cap for the anti-invention source text
-_MAX_LLM_BUDGET = 28_000       # spread across files for the LLM-facing digest
 
 
 async def fetch_case_pages(case_id: str, auth_header: str | None = None,
@@ -382,7 +381,10 @@ async def fetch_case_pages(case_id: str, auth_header: str | None = None,
         raise LookupError(f"case {case_id} documents have no extracted text yet")
 
     full_text = "\n\n".join(text for _, text in file_texts)
-    per_file_budget = max(2000, _MAX_LLM_BUDGET // len(file_texts))
+    # Spread the configurable LLM budget across files so EVERY document
+    # contributes to issue spotting (the old fixed 28k gave an 18-file case
+    # half a page per document).
+    per_file_budget = max(2000, get_settings().max_llm_input_chars // len(file_texts))
     llm_text = "\n\n".join(
         f"[FILE: {name}]\n{text[:per_file_budget]}" for name, text in file_texts
     )
@@ -391,9 +393,37 @@ async def fetch_case_pages(case_id: str, auth_header: str | None = None,
 
 # ─── Indian Kanoon client (Section 7) ────────────────────────────────────────
 
+_QUOTED_SEG_RE = re.compile(r'("[^"]*")')
+_IK_OP_MAP = {"AND": "ANDD", "OR": "ORR", "NOT": "NOTT"}
+
+
+def to_ik_operators(query: str) -> str:
+    """Indian Kanoon's Boolean operators are ANDD / ORR / NOTT — case
+    sensitive, space delimited (official API docs; AND/OR/NOT are treated as
+    ordinary words). Queries are authored and DISPLAYED in the readable
+    AND / OR / NOT form; this translates them to the wire format at fetch
+    time. Quoted phrases are never touched (a phrase may legitimately
+    contain 'AND'), lowercase words stay words, and parentheses — which the
+    IK docs do not document — are dropped so they never reach the engine as
+    junk tokens (ANDD is implicit between terms, so precedence degrades
+    gracefully)."""
+    parts = _QUOTED_SEG_RE.split(query or "")
+    out: list[str] = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1:  # quoted phrase — verbatim
+            out.append(part)
+            continue
+        part = part.replace("(", " ").replace(")", " ")
+        part = re.sub(r"\b(AND|OR|NOT)\b", lambda m: _IK_OP_MAP[m.group(1)], part)
+        out.append(part)
+    return re.sub(r"\s+", " ", "".join(out)).strip()
+
+
 def build_ik_query(term: str, exact: bool = False, doctypes: str | None = None) -> str:
     """Decorate one search term into a precise IK query.
 
+    - Boolean operators are translated to IK's wire format (AND→ANDD,
+      OR→ORR, NOT→NOTT) — display keeps the readable form.
     - exact=True wraps a multi-word term in double quotes so IK matches the
       phrase verbatim instead of ANDing the words anywhere in the document
       (terms that already carry their own quotes are left alone).
@@ -401,7 +431,7 @@ def build_ik_query(term: str, exact: bool = False, doctypes: str | None = None) 
       law-commission reports and district-court noise never enter the
       candidate pool. Empty IK_DOCTYPES disables the filter.
     """
-    query = term.strip()
+    query = to_ik_operators(term.strip())
     if exact and " " in query and '"' not in query:
         query = f'"{query}"'
     dt = get_settings().ik_doctypes if doctypes is None else doctypes
