@@ -2087,6 +2087,42 @@ const ChatInterface = () => {
     setPendingQuestion('');
   };
 
+  /**
+   * Detach this UI from an in-flight answer WITHOUT stopping it.
+   *
+   * Cancelling the reader closes only our end of the SSE connection. The backend runs
+   * `_event_generator()` as a detached task, so the answer still finishes and is saved to
+   * chat history under the session id the client claimed before streaming began — which
+   * is why this is safe to call whenever the user navigates between conversations.
+   *
+   * Without it, an in-flight stream kept writing into the SHARED streaming state
+   * (animatedResponseContent / pendingQuestion / isGenerating / streamBufferRef), so the
+   * previous answer visibly bled into whichever chat you opened next.
+   */
+  const detachActiveStream = () => {
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      clearTimeout(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    if (streamUpdateTimeoutRef.current) {
+      clearTimeout(streamUpdateTimeoutRef.current);
+      streamUpdateTimeoutRef.current = null;
+    }
+    if (streamReaderRef.current) {
+      // Server-side generation continues; we simply stop consuming it here.
+      streamReaderRef.current.cancel().catch(() => { });
+      streamReaderRef.current = null;
+    }
+    activeStreamIsDeepRef.current = false;
+    streamBufferRef.current = '';
+    setIsAnimatingResponse(false);
+    setAnimatedResponseContent('');
+    setIsGenerating(false);
+    setLoadingChat(false);
+    setPendingQuestion('');
+  };
+
   useEffect(() => {
     return () => {
       if (animationFrameRef.current) {
