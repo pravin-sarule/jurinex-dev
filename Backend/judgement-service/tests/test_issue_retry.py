@@ -1,4 +1,4 @@
-"""Per-issue reformulation retry: an issue with NO usable judgment gets a
+﻿"""Per-issue reformulation retry: an issue with NO usable judgment gets a
 genuinely different query set and ONE fresh round; already-fetched docs are
 excluded; an issue that found results never triggers a retry."""
 
@@ -21,7 +21,7 @@ async def test_empty_issue_triggers_reformulated_retry(monkeypatch):
     retry_kw = KeywordSet(statutory=["482 Cr.P.C."], anchor_queries=["b1"])
     calls = {"gen": 0, "round": 0}
 
-    async def fake_generate(issue_arg, ctx_arg, failed_queries=None):
+    async def fake_generate(issue_arg, ctx_arg, failed_queries=None, style="simple"):
         calls["gen"] += 1
         # the reformulation call must carry every previously tried query
         assert failed_queries is not None
@@ -79,7 +79,7 @@ async def test_retry_gives_up_honestly_when_still_empty(monkeypatch):
     kw = KeywordSet(statutory=["Section 96 CPC"], anchor_queries=["a1"])
     retry_kw = KeywordSet(statutory=["Section 104 CPC"])
 
-    async def fake_generate(issue_arg, ctx_arg, failed_queries=None):
+    async def fake_generate(issue_arg, ctx_arg, failed_queries=None, style="simple"):
         return retry_kw
 
     async def fake_round(issue_arg, ctx_arg, kw_arg, exclude=None, anchors_only=False):
@@ -89,4 +89,4 @@ async def test_retry_gives_up_honestly_when_still_empty(monkeypatch):
     monkeypatch.setattr(agents, "_issue_round", fake_round)
 
     out = await agents._process_issue(issue, _ctx(), pre_keywords=kw)
-    assert out["scored"] == []  # honest empty — never padded
+    assert out["scored"] == []  # honest empty â€” never padded

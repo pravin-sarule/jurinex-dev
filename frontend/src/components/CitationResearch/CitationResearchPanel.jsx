@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowPathIcon,
   ArrowUpTrayIcon,
@@ -18,7 +18,6 @@ import Swal from 'sweetalert2';
 import judgementApi from '../../services/judgementApi';
 import documentApi from '../../services/documentApi';
 import CitationReviewResults from './CitationReviewResults';
-import { useSidebar } from '../../context/SidebarContext';
 
 // Palette matches the app's light theme: slate text/borders, the brand
 // teal (#21C1B6 / hover #1AA49B) as accent, and tinted status colours
@@ -27,6 +26,52 @@ const BAND_STYLES = {
   GREEN: 'bg-[#F0FDF4] text-[#166534] border border-[#BBF7D0]',
   YELLOW: 'bg-[#FFFBEB] text-[#92400E] border border-[#FDE68A]',
   RED: 'bg-[#FEF2F2] text-[#991B1B] border border-[#FECACA]',
+};
+
+// ── Case-card helpers (registry-style cards in the case picker) ─────────────
+
+/** "COMM. SUIT 412 / 2025" style reference line from whatever fields exist. */
+const caseRefOf = (cs) => {
+  const clean = (v) => {
+    const s = (v ?? '').toString().trim();
+    return s && !/^\d+$/.test(s) ? s : '';
+  };
+  const prefix = clean(cs.case_prefix) || clean(cs.case_type);
+  const num = (cs.case_number ?? '').toString().trim();
+  const year = (cs.case_year ?? '').toString().trim()
+    || ((cs.filing_date || cs.created_at || '').toString().slice(0, 4));
+  const left = [prefix, num].filter(Boolean).join(' ');
+  return ([left, year].filter(Boolean).join(' / ') || 'Case file').toUpperCase();
+};
+
+/** [petitioner, respondent] — from the party lists, else by splitting the title on "vs". */
+const partiesOf = (cs) => {
+  const nameOf = (p) => (typeof p === 'string' ? p : p?.fullName || p?.name || '');
+  const withOthers = (list) => {
+    const first = nameOf((list || [])[0]).trim();
+    if (!first) return '';
+    return (list.length > 1) ? `${first} & others` : first;
+  };
+  const p1 = withOthers(cs.petitioners);
+  const p2 = withOthers(cs.respondents);
+  if (p1 || p2) return [p1 || (cs.case_title || cs.name || cs.id), p2];
+  const title = (cs.case_title || cs.name || '').toString();
+  const parts = title.split(/\s+v(?:s|ersus)?\.?\s+/i);
+  if (parts.length >= 2) return [parts[0].trim(), parts.slice(1).join(' v. ').trim()];
+  return [title || cs.id, ''];
+};
+
+/** Compact relative time for the card footer. */
+const timeAgo = (iso) => {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const days = Math.floor((Date.now() - then) / 86400000);
+  if (days <= 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return `${days} days ago`;
+  if (days < 14) return 'Last week';
+  return new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 };
 
 // Grounds-mode extraction confidence (per ground) — semantic status tints,
@@ -253,7 +298,6 @@ function IssueResults({ sessionId, issue }) {
 }
 
 export default function CitationResearchPanel() {
-  const { isSidebarCollapsed, isSidebarHidden } = useSidebar();
   const [step, setStep] = useState('input'); // input | issues | results
   const [inputMode, setInputMode] = useState('case'); // case | text
   // How research items are derived: 'issues' (issue spotter — existing
@@ -276,6 +320,20 @@ export default function CitationResearchPanel() {
   const [freshMode, setFreshMode] = useState(false);
   const [files, setFiles] = useState([]);
   const [uploadTitle, setUploadTitle] = useState('');
+  // Advanced search: opt-in Boolean AND/OR query generation. Off = the
+  // standard keyword queries the system has always used.
+  const [advancedSearch, setAdvancedSearch] = useState(false);
+
+  // Description boxes grow with their content instead of scrolling inside.
+  // height:auto first so shrinking works; scrollHeight then includes the
+  // rows-attribute minimum, so short content keeps the designed height.
+  const caseTextRef = useRef(null);
+  const customDraftRef = useRef(null);
+  const autoGrow = (el) => {
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight + 2}px`;
+  };
   const addFiles = (picked) => {
     const incoming = Array.from(picked || []);
     if (!incoming.length) return;
@@ -300,6 +358,17 @@ export default function CitationResearchPanel() {
   const [queryPicks, setQueryPicks] = useState({});
   const [queryDrafts, setQueryDrafts] = useState({}); // issueId -> input text
 
+  // Auto-grow effects live below every state they read (TDZ-safe).
+  useEffect(() => { autoGrow(caseTextRef.current); }, [caseText, freshMode, inputMode, step]);
+  // The sticky-bar composer behaves like a chat input: one line tall,
+  // grows to ~3 lines, then scrolls internally.
+  useEffect(() => {
+    const el = customDraftRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight + 2, 96)}px`;
+  }, [customDraft, step]);
+
   const totalSelected = selectedIds.size + customIssues.length;
   const suggested = analysis?.suggestedIssues || [];
   // Once analysed, the server's researchMode is the truth for this session.
@@ -321,6 +390,7 @@ export default function CitationResearchPanel() {
         // researchMode is NOT restored — new analyses always run combined;
         // reopened sessions render from analysis.researchMode instead.
         if (saved.selectedCaseId) setSelectedCaseId(saved.selectedCaseId);
+        if (typeof saved.advancedSearch === 'boolean') setAdvancedSearch(saved.advancedSearch);
         if (typeof saved.caseText === 'string') setCaseText(saved.caseText);
         if (saved.analysis) setAnalysis(saved.analysis);
         if (Array.isArray(saved.selectedIds)) setSelectedIds(new Set(saved.selectedIds));
@@ -339,11 +409,11 @@ export default function CitationResearchPanel() {
     if (!hydrated) return;
     try {
       sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
-        step, inputMode, researchMode, selectedCaseId, caseText,
+        step, inputMode, researchMode, selectedCaseId, caseText, advancedSearch,
         analysis, selectedIds: [...selectedIds], customIssues, queryPicks, searchResponse,
       }));
     } catch { /* storage full — non-fatal */ }
-  }, [hydrated, step, inputMode, researchMode, selectedCaseId, caseText, analysis, selectedIds, customIssues, queryPicks, searchResponse]);
+  }, [hydrated, step, inputMode, researchMode, selectedCaseId, caseText, advancedSearch, analysis, selectedIds, customIssues, queryPicks, searchResponse]);
 
   // The user's existing cases, from the agentic document service.
   useEffect(() => {
@@ -424,6 +494,13 @@ export default function CitationResearchPanel() {
     () => history.filter((h) => (inputMode === 'case' ? !!h.caseId : !h.caseId)),
     [history, inputMode],
   );
+
+  // Latest research per case — drives the "N issues" badge on case cards.
+  const researchByCase = useMemo(() => {
+    const map = {};
+    history.forEach((h) => { if (h.caseId && !map[h.caseId]) map[h.caseId] = h; });
+    return map;
+  }, [history]);
 
   const [deletingId, setDeletingId] = useState(null);
   const deleteHistory = async (entry) => {
@@ -528,28 +605,61 @@ export default function CitationResearchPanel() {
       <div className="grid md:grid-cols-2 gap-3">
         {cases.slice((casesPage - 1) * casesPerPage, casesPage * casesPerPage).map((cs) => {
           const active = selectedCaseId === cs.id;
+          const [petitioner, respondent] = partiesOf(cs);
+          const research = researchByCase[String(cs.id)];
+          const court = (() => {
+            const s = (cs.court_name || '').toString().trim();
+            return s && !/^\d+$/.test(s) ? s : '';
+          })();
+          const footer = [court, timeAgo(cs.updated_at || cs.created_at)].filter(Boolean);
           return (
             <button
               key={cs.id}
               onClick={() => setSelectedCaseId(active ? null : cs.id)}
-              className={`text-left rounded-xl border p-4 transition-all ${
+              className={`text-left rounded-xl border transition-all overflow-hidden flex flex-col ${
                 active
-                  ? 'border-[#21C1B6] bg-[#F0FDFA] shadow-sm'
+                  ? 'border-[#21C1B6] bg-[#F0FDFA] ring-1 ring-[#21C1B6]/25 shadow-sm'
                   : 'border-[#E2E8F0] bg-white hover:border-[#CBD5E1] hover:shadow-sm'
               }`}
             >
-              <div className="flex items-start gap-3">
-                <span className={`h-9 w-9 rounded-lg flex items-center justify-center shrink-0 ${active ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
-                  <BriefcaseIcon className={`h-5 w-5 ${active ? 'text-[#21C1B6]' : 'text-[#94A3B8]'}`} />
-                </span>
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold text-[#0F172A] leading-snug truncate">
-                    {cs.case_title || cs.name || cs.id}
-                  </div>
-                  <div className="text-[11px] text-[#94A3B8] mt-1">
-                    Issues will be generated from this case's documents, with page references.
-                  </div>
+              <div className="p-4 flex-1 min-w-0 w-full">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[10.5px] font-bold tracking-[0.12em] uppercase text-[#64748B] truncate">
+                    {caseRefOf(cs)}
+                  </span>
+                  {research ? (
+                    <span className="shrink-0 inline-flex items-center gap-1.5 rounded-full bg-[#F0FDF4] border border-[#BBF7D0] px-2 py-0.5 text-[10px] font-bold text-[#166534]">
+                      <span className="h-1.5 w-1.5 rounded-full bg-[#22C55E]" />
+                      {research.issueCount} issue{research.issueCount === 1 ? '' : 's'}
+                    </span>
+                  ) : (
+                    <span className="shrink-0 rounded-full bg-[#F8FAFC] border border-[#E2E8F0] px-2 py-0.5 text-[10px] font-semibold text-[#94A3B8]">
+                      No research yet
+                    </span>
+                  )}
                 </div>
+                <div className="mt-2.5 min-w-0">
+                  <div className="text-[15px] font-bold text-[#0F172A] leading-snug truncate">{petitioner}</div>
+                  {respondent ? (
+                    <>
+                      <div className="text-[11px] italic text-[#94A3B8] leading-tight my-1">v.</div>
+                      <div className="text-[15px] font-bold text-[#0F172A] leading-snug truncate">{respondent}</div>
+                    </>
+                  ) : (
+                    <div className="text-[12px] text-[#94A3B8] mt-1.5">Respondent not yet on record.</div>
+                  )}
+                </div>
+              </div>
+              <div className={`w-full px-4 py-2.5 border-t flex items-center gap-1.5 text-[11px] text-[#64748B] ${
+                active ? 'border-[#99F6E4]/70' : 'border-[#F1F5F9]'
+              }`}>
+                {footer.map((part, fi) => (
+                  <React.Fragment key={fi}>
+                    {fi > 0 && <span className="text-[#CBD5E1]">·</span>}
+                    <span className={fi === 0 ? 'truncate' : 'shrink-0'}>{part}</span>
+                  </React.Fragment>
+                ))}
+                {footer.length === 0 && <span className="text-[#94A3B8]">Case documents on record</span>}
               </div>
             </button>
           );
@@ -596,13 +706,14 @@ export default function CitationResearchPanel() {
     }
     setAnalyzing(true);
     try {
+      const queryStyle = advancedSearch ? 'advanced' : 'simple';
       const data = inputMode === 'case'
         ? (freshMode
-          ? await judgementApi.analyzeCaseFresh(selectedCaseId, caseText.trim())
-          : await judgementApi.analyzeCase(selectedCaseId, caseText.trim(), researchMode))
+          ? await judgementApi.analyzeCaseFresh(selectedCaseId, caseText.trim(), queryStyle)
+          : await judgementApi.analyzeCase(selectedCaseId, caseText.trim(), researchMode, queryStyle))
         // Upload tab: the document is the case material; the optional
         // description steers which grounds and issues come back.
-        : await judgementApi.analyzeUpload(files, caseText.trim(), researchMode, uploadTitle.trim());
+        : await judgementApi.analyzeUpload(files, caseText.trim(), researchMode, uploadTitle.trim(), queryStyle);
       setAnalysis(data);
       setSelectedIds(new Set((data.suggestedIssues || []).map((i) => i.id)));
       setCustomIssues([]);
@@ -656,11 +767,34 @@ export default function CitationResearchPanel() {
     });
   };
 
-  const addCustomIssue = () => {
+  // A user-typed issue gets the SAME treatment as system-suggested ones:
+  // the backend enriches it + generates its queries, and it lands in the
+  // card grid with its own SEARCH QUERIES panel. If that call fails, the
+  // text degrades to the legacy path (analysed live when the search runs).
+  const [addingIssue, setAddingIssue] = useState(false);
+  const addCustomIssue = async () => {
     const text = customDraft.trim();
-    if (!text) return;
-    setCustomIssues((prev) => [...prev, text]);
-    setCustomDraft('');
+    if (!text || addingIssue) return;
+    if (!analysis?.sessionId) {
+      setCustomIssues((prev) => [...prev, text]);
+      setCustomDraft('');
+      return;
+    }
+    setAddingIssue(true);
+    try {
+      const r = await judgementApi.addIssue(analysis.sessionId, text);
+      setAnalysis((prev) => (prev
+        ? { ...prev, suggestedIssues: [...(prev.suggestedIssues || []), r.issue] }
+        : prev));
+      setSelectedIds((prev) => new Set([...prev, r.issue.id]));
+      setCustomDraft('');
+    } catch {
+      setCustomIssues((prev) => [...prev, text]);
+      setCustomDraft('');
+      toast.info('Added — it will be analysed when the search runs');
+    } finally {
+      setAddingIssue(false);
+    }
   };
 
   const runSearch = async () => {
@@ -730,7 +864,7 @@ export default function CitationResearchPanel() {
   // ── Step 1: case input ──────────────────────────────────────────────────
   if (step === 'input') {
     return (
-      <div className="min-h-full bg-[#F8FAFC] p-6 md:p-10">
+      <div className="min-h-full bg-[#F8FAFC] pt-6 px-6 pb-20 md:pt-10 md:px-10 md:pb-28">
         <div className="max-w-6xl mx-auto">
           <PageHeader
             title="Citation Research"
@@ -741,7 +875,8 @@ export default function CitationResearchPanel() {
             {/* Left column: pick a case (or paste/upload) and analyse it */}
             <div className="min-w-0">
               {/* Source selector: an existing case, or pasted/uploaded input */}
-              <div className="flex gap-2">
+              {/* Segmented source toggle — active tab is the dark pill. */}
+              <div className="inline-flex items-center gap-1 rounded-xl border border-[#E2E8F0] bg-white p-1 shadow-sm">
                 {[
                   { key: 'case', label: 'My cases', icon: BriefcaseIcon },
                   { key: 'text', label: 'Upload document', icon: DocumentTextIcon },
@@ -749,10 +884,10 @@ export default function CitationResearchPanel() {
                   <button
                     key={key}
                     onClick={() => setInputMode(key)}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
                       inputMode === key
-                        ? 'border-[#21C1B6] bg-[#F0FDFA] text-[#21C1B6]'
-                        : 'border-[#E2E8F0] bg-white text-[#64748B] hover:text-[#0F172A] hover:border-[#CBD5E1]'
+                        ? 'bg-[#0F172A] text-white shadow-sm'
+                        : 'text-[#64748B] hover:text-[#0F172A]'
                     }`}
                   >
                     <TabIcon className="h-4 w-4" /> {label}
@@ -866,6 +1001,7 @@ export default function CitationResearchPanel() {
               )}
 
               <textarea
+                ref={caseTextRef}
                 value={caseText}
                 onChange={(e) => setCaseText(e.target.value)}
                 rows={inputMode === 'case' ? (freshMode ? 5 : 3) : 4}
@@ -874,16 +1010,39 @@ export default function CitationResearchPanel() {
                     ? 'Describe what the client wants (required) — e.g. "we act for the accused director; the FIR arises from a supply-contract dispute and we want it quashed" or "we act for the supplier; recover the unpaid invoices with interest"'
                     : 'Optional instruction, e.g. "we act for the workmen; focus on the wage revision demand"')
                   : 'Optional description — e.g. "we act for the accused; seek regular bail" — the analysis of the uploaded document (its grounds and issues) is steered by this'}
-                className="mt-4 w-full bg-white border border-[#E2E8F0] text-[#0F172A] text-sm rounded-xl p-4 outline-none focus:border-[#21C1B6]/50 focus:ring-2 focus:ring-[#21C1B6]/10 leading-relaxed shadow-sm placeholder:text-[#94A3B8]"
+                className="mt-4 w-full bg-white border border-[#E2E8F0] text-[#0F172A] text-sm rounded-xl p-4 outline-none focus:border-[#21C1B6]/50 focus:ring-2 focus:ring-[#21C1B6]/10 leading-relaxed shadow-sm placeholder:text-[#94A3B8] resize-none overflow-hidden"
               />
+
+              {/* Advanced search: opt-in Boolean query generation — off by
+                  default, the system uses its standard keyword queries. */}
+              <label className={`mt-4 flex items-start gap-3 rounded-xl border p-3.5 cursor-pointer transition-colors ${
+                advancedSearch ? 'border-[#21C1B6] bg-[#F0FDFA]' : 'border-[#E2E8F0] bg-white hover:border-[#21C1B6]/40'
+              }`}>
+                <input
+                  type="checkbox"
+                  checked={advancedSearch}
+                  onChange={(e) => setAdvancedSearch(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-[#CBD5E1] accent-[#21C1B6]"
+                />
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-[#0F172A]">
+                    Advanced search — Boolean queries
+                  </span>
+                  <span className="block mt-0.5 text-[12px] text-[#64748B] leading-relaxed">
+                    Builds precision queries with <span className="font-mono font-semibold">AND</span> / <span className="font-mono font-semibold">OR</span> operators
+                    and grouped synonyms, e.g. <span className="font-mono">"quashing of FIR" AND ("malafide" OR "ulterior motive")</span>.
+                    Leave off to use the standard keyword queries.
+                  </span>
+                </span>
+              </label>
 
               {/* One research method: pleaded grounds + spotted issues are
                   extracted together in a single combined pass. */}
-              <div className="mt-4">
+              <div className="mt-6">
                 <button
                   onClick={runAnalyze}
                   disabled={analyzing}
-                  className="w-full flex items-center justify-center gap-2 px-6 py-2.5 rounded-lg text-sm font-semibold bg-[#21C1B6] hover:bg-[#1AA49B] text-white shadow-sm disabled:opacity-60 transition-colors"
+                  className="w-full flex items-center justify-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold bg-[#21C1B6] hover:bg-[#1AA49B] text-white shadow-sm disabled:opacity-60 transition-colors"
                 >
                   {analyzing ? <ArrowPathIcon className="h-4 w-4 animate-spin" /> : <SparklesIcon className="h-4 w-4" />}
                   {analyzing ? 'Analysing…' : 'Analyse case'}
@@ -922,9 +1081,170 @@ export default function CitationResearchPanel() {
 
   // ── Step 2: pick / add issues ───────────────────────────────────────────
   if (step === 'issues') {
+    // Combined mode groups the cards: pleaded grounds first, spotted issues
+    // after — each under its own labelled section when both exist.
+    const pleadedItems = suggested.filter((i) => isGrounds || !!i.ground_label);
+    const spottedItems = suggested.filter((i) => !isGrounds && !i.ground_label);
+    const showGroupLabels = pleadedItems.length > 0 && spottedItems.length > 0;
+
+    const groupLabel = (label, count) => (
+      <div className="mt-6 mb-3 flex items-center gap-2.5">
+        <span className="text-[11px] font-bold uppercase tracking-wider text-[#0F766E]">{label}</span>
+        <span className="text-[11px] font-bold text-[#0F766E] bg-[#F0FDFA] border border-[#99F6E4] rounded-full px-2 py-px">{count}</span>
+        <span className="h-px flex-1 bg-[#E2E8F0]" />
+      </div>
+    );
+
+    const renderIssueCard = (issue) => {
+      const active = selectedIds.has(issue.id);
+      // Pleaded grounds keep their verbatim label + title heading; issues
+      // show the plain "Whether …?" question with no extra clutter.
+      const isPleaded = isGrounds || !!issue.ground_label;
+      const groundHeading = isPleaded
+        ? `${issue.ground_label || `Ground ${issue.id}`}${issue.title ? `: ${issue.title}` : ''}`
+        : issue.issue;
+      return (
+        <div
+          key={issue.id}
+          className={`text-left rounded-xl border bg-white p-4 sm:p-5 transition-colors ${
+            active
+              ? 'border-[#21C1B6] ring-1 ring-[#21C1B6]/25 shadow-sm'
+              : 'border-[#E2E8F0]'
+          }`}
+        >
+          <div className="flex items-start gap-3">
+            {/* Only the checkbox (and heading) toggles selection — the card
+                body holds its own controls and never reacts to clicks. */}
+            <button
+              type="button"
+              onClick={() => toggleIssue(issue.id)}
+              title={active ? 'Exclude from the search' : 'Include in the search'}
+              className={`mt-0.5 h-5 w-5 shrink-0 rounded-md border flex items-center justify-center transition-colors ${
+                active ? 'bg-[#21C1B6] border-[#21C1B6]' : 'border-[#CBD5E1] bg-white hover:border-[#21C1B6]'
+              }`}
+            >
+              {active && <CheckIcon className="h-3.5 w-3.5 text-white" />}
+            </button>
+            <span className="flex-1 min-w-0">
+              <span className="flex items-start justify-between gap-3">
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => toggleIssue(issue.id)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') toggleIssue(issue.id); }}
+                  className="text-[15px] font-semibold text-[#0F172A] leading-snug font-serif cursor-pointer"
+                >
+                  {groundHeading}
+                </span>
+                {isPleaded && issue.confidence && (
+                  <span className={`shrink-0 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide ${CONFIDENCE_STYLES[issue.confidence] || CONFIDENCE_STYLES.medium}`}>
+                    {issue.confidence}
+                  </span>
+                )}
+              </span>
+              {isPleaded && issue.explanation && (
+                <span className="mt-1.5 block text-[12.5px] text-[#64748B] leading-relaxed">
+                  {issue.explanation}
+                </span>
+              )}
+              {isPleaded && Array.isArray(issue.legal_framework) && issue.legal_framework.length > 0 && (
+                <span className="mt-2 flex flex-wrap gap-1.5">
+                  {issue.legal_framework.map((law, li) => (
+                    <span key={li} className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0]">
+                      {law}
+                    </span>
+                  ))}
+                </span>
+              )}
+              {isPleaded && Array.isArray(issue.case_law_cited) && issue.case_law_cited.length > 0 && (
+                <span className="mt-1.5 block text-[11px] text-[#64748B]">
+                  <span className="font-semibold">Case law cited:</span>{' '}
+                  <span className="italic">{issue.case_law_cited.join('; ')}</span>
+                </span>
+              )}
+              {Array.isArray(issue.queries) && issue.queries.length > 0 && (
+                <span className="mt-3 block rounded-lg border border-[#EEF2F6] bg-[#F8FAFC] p-2.5">
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">Search queries</span>
+                    <span className="text-[10px] text-[#B6C2D2]">untick to exclude</span>
+                  </span>
+                  <span className="mt-1.5 block space-y-1.5">
+                    {/* System queries — checkbox picks which ones the search uses */}
+                    {issue.queries.map((q, qi) => {
+                      const checked = picksFor(issue).selected.includes(q);
+                      return (
+                        <span key={qi} className="flex items-start gap-2">
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); toggleQuery(issue, q); }}
+                            title={checked ? 'Exclude this query from the search' : 'Include this query in the search'}
+                            className={`mt-0.5 h-3.5 w-3.5 shrink-0 rounded border flex items-center justify-center transition-colors ${
+                              checked ? 'bg-[#21C1B6] border-[#21C1B6]' : 'border-[#CBD5E1] bg-white hover:border-[#21C1B6]'
+                            }`}
+                          >
+                            {checked && <CheckIcon className="h-2.5 w-2.5 text-white" />}
+                          </button>
+                          <span className={`text-[12px] leading-snug ${checked ? 'text-[#0D9488]' : 'text-[#94A3B8] line-through'}`}>
+                            {q}
+                          </span>
+                        </span>
+                      );
+                    })}
+                    {/* The user's own queries — searched exactly like system anchors */}
+                    {picksFor(issue).custom.map((q) => (
+                      <span key={`own-${q}`} className="flex items-start gap-2">
+                        <span className="mt-0.5 h-3.5 w-3.5 shrink-0 rounded border bg-[#21C1B6] border-[#21C1B6] flex items-center justify-center">
+                          <CheckIcon className="h-2.5 w-2.5 text-white" />
+                        </span>
+                        <span className="flex-1 min-w-0 text-[12px] leading-snug text-[#0D9488] font-medium">{q}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); removeOwnQuery(issue, q); }}
+                          title="Remove your query"
+                          className="shrink-0 text-[#94A3B8] hover:text-[#DC2626]"
+                        >
+                          <XMarkIcon className="h-3.5 w-3.5" />
+                        </button>
+                      </span>
+                    ))}
+                    {/* + add your own query for THIS issue */}
+                    <span className="flex items-center gap-1.5 pt-0.5" onClick={(e) => e.stopPropagation()}>
+                      <PlusIcon className="h-3.5 w-3.5 shrink-0 text-[#21C1B6]" />
+                      <input
+                        value={queryDrafts[issue.id] || ''}
+                        onChange={(e) => setQueryDrafts((prev) => ({ ...prev, [issue.id]: e.target.value }))}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addOwnQuery(issue); } }}
+                        placeholder='Add your own query, e.g. "mala fide intention" quash FIR'
+                        className="flex-1 min-w-0 bg-transparent border-b border-dashed border-[#CBD5E1] focus:border-[#21C1B6] text-[12px] text-[#0F172A] outline-none py-0.5 placeholder:text-[#B6C2D2]"
+                      />
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); addOwnQuery(issue); }}
+                        className="shrink-0 text-[11px] font-semibold text-[#21C1B6] hover:text-[#1AA49B]"
+                      >
+                        Add
+                      </button>
+                    </span>
+                  </span>
+                </span>
+              )}
+              {(issue.source || issue.ground_ref) && (
+                <span className="mt-3 pt-2.5 border-t border-[#F1F5F9] flex items-center gap-1.5 text-[11px] text-[#64748B]">
+                  <DocumentTextIcon className="h-3.5 w-3.5 shrink-0 text-[#94A3B8]" />
+                  <span className="truncate">
+                    {[issue.ground_ref, issue.source].filter(Boolean).join(' · ')}
+                  </span>
+                </span>
+              )}
+            </span>
+          </div>
+        </div>
+      );
+    };
+
     return (
-      <div className="min-h-full bg-[#F8FAFC] p-6 md:p-10">
-        <div className="max-w-4xl mx-auto pb-24">
+      <div className="min-h-full bg-[#F8FAFC] p-4 sm:p-6 md:p-10">
+        <div className="max-w-5xl mx-auto">
           <PageHeader
             title="What should we research?"
             subtitle={isGrounds
@@ -962,23 +1282,40 @@ export default function CitationResearchPanel() {
             </div>
           )}
 
-          {/* Extraction metadata (grounds + combined + fresh modes) */}
+          {/* Extraction summary (grounds + combined + fresh modes) — labelled
+              stat cells so the numbers read at a glance. */}
           {(isGrounds || isCombined || isFresh) && groundsMeta && (
-            <div className="mt-3 rounded-xl border border-[#E2E8F0] bg-white px-4 py-3">
-              <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-[#475569]">
-                <span><span className="font-semibold text-[#0F172A]">{groundsMeta.totalGrounds ?? suggested.length}</span> {isFresh ? 'proposed' : 'pleaded'} ground{(groundsMeta.totalGrounds ?? suggested.length) === 1 ? '' : 's'}</span>
+            <div className="mt-3 rounded-xl border border-[#E2E8F0] bg-white px-4 py-3 sm:px-5 shadow-sm">
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">{isFresh ? 'Proposed grounds' : 'Pleaded grounds'}</div>
+                  <div className="text-sm font-bold text-[#0F172A] mt-0.5">{groundsMeta.totalGrounds ?? suggested.length}</div>
+                </div>
                 {groundsMeta.spottedIssues != null && (
-                  <span><span className="font-semibold text-[#0F172A]">{groundsMeta.spottedIssues}</span> spotted issue{groundsMeta.spottedIssues === 1 ? '' : 's'}</span>
+                  <div className="sm:border-l sm:border-[#F1F5F9] sm:pl-6">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">Spotted issues</div>
+                    <div className="text-sm font-bold text-[#0F172A] mt-0.5">{groundsMeta.spottedIssues}</div>
+                  </div>
                 )}
-                {groundsMeta.documentType && <span>Document: <span className="font-semibold text-[#0F172A]">{groundsMeta.documentType}</span></span>}
-                {groundsMeta.party && <span>Party: <span className="font-semibold text-[#0F172A]">{groundsMeta.party}</span></span>}
-                {groundsMeta.truncatedGrounds > 0 && (
-                  <span className="text-[#92400E]">{groundsMeta.truncatedGrounds} further ground{groundsMeta.truncatedGrounds === 1 ? '' : 's'} beyond the cap not shown</span>
+                {groundsMeta.documentType && (
+                  <div className="sm:border-l sm:border-[#F1F5F9] sm:pl-6 min-w-0">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">Document</div>
+                    <div className="text-sm font-semibold text-[#0F172A] mt-0.5 truncate">{groundsMeta.documentType}</div>
+                  </div>
+                )}
+                {groundsMeta.party && (
+                  <div className="sm:border-l sm:border-[#F1F5F9] sm:pl-6 min-w-0 flex-1">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">Parties</div>
+                    <div className="text-sm font-semibold text-[#0F172A] mt-0.5 truncate">{groundsMeta.party}</div>
+                  </div>
                 )}
               </div>
-              {Array.isArray(groundsMeta.notes) && groundsMeta.notes.length > 0 && (
-                <ul className="mt-2 space-y-0.5">
-                  {groundsMeta.notes.map((note, ni) => (
+              {(groundsMeta.truncatedGrounds > 0 || (Array.isArray(groundsMeta.notes) && groundsMeta.notes.length > 0)) && (
+                <ul className="mt-2.5 pt-2.5 border-t border-[#F1F5F9] space-y-0.5">
+                  {groundsMeta.truncatedGrounds > 0 && (
+                    <li className="text-[11px] text-[#92400E]">⚠ {groundsMeta.truncatedGrounds} further ground{groundsMeta.truncatedGrounds === 1 ? '' : 's'} beyond the cap not shown</li>
+                  )}
+                  {(groundsMeta.notes || []).map((note, ni) => (
                     <li key={ni} className="text-[11px] text-[#92400E]">⚠ {note}</li>
                   ))}
                 </ul>
@@ -986,219 +1323,125 @@ export default function CitationResearchPanel() {
             </div>
           )}
 
-          <div className="mt-7 flex items-center justify-between">
+          <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-sm font-bold text-[#0F172A]">
-              {isGrounds ? 'Grounds of the case' : isCombined ? 'Grounds & issues' : isFresh ? 'Proposed grounds for this matter' : 'Legal issues'} <span className="ml-2 font-medium text-[#94A3B8]">{selectedIds.size} of {suggested.length} selected</span>
+              {isGrounds ? 'Grounds of the case' : isCombined ? 'Grounds & issues' : isFresh ? 'Proposed grounds for this matter' : 'Legal issues'}
+              <span className="ml-2 font-medium text-[#94A3B8]">{selectedIds.size} of {suggested.length} selected</span>
             </h2>
-            {selectedIds.size > 0 && (
-              <button onClick={() => setSelectedIds(new Set())} className="text-xs font-medium text-[#21C1B6] hover:text-[#1AA49B]">
-                Clear all
-              </button>
-            )}
-          </div>
-
-          {/* Only the cards scroll — the add-your-own box and Run search stay in view. */}
-          <div className="mt-3 max-h-[48vh] overflow-y-auto pr-1.5">
-            <div className="grid md:grid-cols-2 gap-3">
-            {suggested.length === 0 && (
-              <div className="text-xs text-[#94A3B8] italic col-span-2">
-                {isGrounds ? 'No pleaded grounds were found — add your own below.'
-                  : isCombined ? 'No grounds or issues were found — add your own below.'
-                    : isFresh ? 'No grounds could be proposed — describe your objective more precisely and re-analyse.'
-                      : 'No issues were suggested — add your own below.'}
-              </div>
-            )}
-            {suggested.map((issue) => {
-              const active = selectedIds.has(issue.id);
-              // Pleaded grounds keep their verbatim label + title heading;
-              // issues show the plain "Whether …?" question as the heading
-              // with no title/explanation clutter (user's preferred style).
-              const isPleaded = isGrounds || !!issue.ground_label;
-              const groundHeading = isPleaded
-                ? `${issue.ground_label || `Ground ${issue.id}`}${issue.title ? `: ${issue.title}` : ''}`
-                : issue.issue;
-              return (
-                <div
-                  key={issue.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => toggleIssue(issue.id)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) toggleIssue(issue.id); }}
-                  className={`text-left rounded-xl border p-4 transition-all cursor-pointer ${
-                    active
-                      ? 'border-[#21C1B6] bg-[#F0FDFA] shadow-sm'
-                      : 'border-[#E2E8F0] bg-white hover:border-[#CBD5E1] hover:shadow-sm'
-                  }`}
-                >
-                  <div className="flex items-start gap-3">
-                    <span className={`mt-0.5 h-5 w-5 shrink-0 rounded-md border flex items-center justify-center transition-colors ${
-                      active ? 'bg-[#21C1B6] border-[#21C1B6]' : 'border-[#CBD5E1] bg-white'
-                    }`}>
-                      {active && <CheckIcon className="h-3.5 w-3.5 text-white" />}
-                    </span>
-                    <span className="flex-1 min-w-0">
-                      <span className="text-[15px] font-semibold text-[#0F172A] leading-snug block font-serif">
-                        {groundHeading}
-                      </span>
-                      {isPleaded && issue.confidence && (
-                        <span className={`mt-1.5 inline-block px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide ${CONFIDENCE_STYLES[issue.confidence] || CONFIDENCE_STYLES.medium}`}>
-                          {issue.confidence} confidence
-                        </span>
-                      )}
-                      {isPleaded && issue.explanation && (
-                        <span className="mt-1.5 block text-[12px] text-[#64748B] leading-relaxed">
-                          {issue.explanation}
-                        </span>
-                      )}
-                      {isPleaded && Array.isArray(issue.legal_framework) && issue.legal_framework.length > 0 && (
-                        <span className="mt-2 flex flex-wrap gap-1.5">
-                          {issue.legal_framework.map((law, li) => (
-                            <span key={li} className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0]">
-                              {law}
-                            </span>
-                          ))}
-                        </span>
-                      )}
-                      {isPleaded && Array.isArray(issue.case_law_cited) && issue.case_law_cited.length > 0 && (
-                        <span className="mt-1.5 block text-[11px] text-[#64748B]">
-                          <span className="font-semibold">Case law cited:</span>{' '}
-                          <span className="italic">{issue.case_law_cited.join('; ')}</span>
-                        </span>
-                      )}
-                      {Array.isArray(issue.queries) && issue.queries.length > 0 && (
-                        <span className="mt-2.5 block space-y-1.5">
-                          {/* System queries — checkbox picks which ones the search uses */}
-                          {issue.queries.map((q, qi) => {
-                            const checked = picksFor(issue).selected.includes(q);
-                            return (
-                              <span key={qi} className="flex items-start gap-2">
-                                <button
-                                  type="button"
-                                  onClick={(e) => { e.stopPropagation(); toggleQuery(issue, q); }}
-                                  title={checked ? 'Exclude this query from the search' : 'Include this query in the search'}
-                                  className={`mt-0.5 h-3.5 w-3.5 shrink-0 rounded border flex items-center justify-center transition-colors ${
-                                    checked ? 'bg-[#21C1B6] border-[#21C1B6]' : 'border-[#CBD5E1] bg-white hover:border-[#21C1B6]'
-                                  }`}
-                                >
-                                  {checked && <CheckIcon className="h-2.5 w-2.5 text-white" />}
-                                </button>
-                                <span className={`text-[12px] leading-snug ${checked ? 'text-[#0D9488]' : 'text-[#94A3B8] line-through'}`}>
-                                  {q}
-                                </span>
-                              </span>
-                            );
-                          })}
-                          {/* The user's own queries — searched exactly like system anchors */}
-                          {picksFor(issue).custom.map((q) => (
-                            <span key={`own-${q}`} className="flex items-start gap-2">
-                              <span className="mt-0.5 h-3.5 w-3.5 shrink-0 rounded border bg-[#21C1B6] border-[#21C1B6] flex items-center justify-center">
-                                <CheckIcon className="h-2.5 w-2.5 text-white" />
-                              </span>
-                              <span className="flex-1 min-w-0 text-[12px] leading-snug text-[#0D9488] font-medium">{q}</span>
-                              <button
-                                type="button"
-                                onClick={(e) => { e.stopPropagation(); removeOwnQuery(issue, q); }}
-                                title="Remove your query"
-                                className="shrink-0 text-[#94A3B8] hover:text-[#DC2626]"
-                              >
-                                <XMarkIcon className="h-3.5 w-3.5" />
-                              </button>
-                            </span>
-                          ))}
-                          {/* + add your own query for THIS issue */}
-                          <span className="flex items-center gap-1.5 pt-0.5" onClick={(e) => e.stopPropagation()}>
-                            <PlusIcon className="h-3.5 w-3.5 shrink-0 text-[#21C1B6]" />
-                            <input
-                              value={queryDrafts[issue.id] || ''}
-                              onChange={(e) => setQueryDrafts((prev) => ({ ...prev, [issue.id]: e.target.value }))}
-                              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addOwnQuery(issue); } }}
-                              placeholder='Add your own query, e.g. "mala fide intention" quash FIR'
-                              className="flex-1 min-w-0 bg-transparent border-b border-dashed border-[#CBD5E1] focus:border-[#21C1B6] text-[12px] text-[#0F172A] outline-none py-0.5 placeholder:text-[#B6C2D2]"
-                            />
-                            <button
-                              type="button"
-                              onClick={(e) => { e.stopPropagation(); addOwnQuery(issue); }}
-                              className="shrink-0 text-[11px] font-semibold text-[#21C1B6] hover:text-[#1AA49B]"
-                            >
-                              Add
-                            </button>
-                          </span>
-                        </span>
-                      )}
-                      {(issue.source || issue.ground_ref) && (
-                        <span className="mt-2.5 flex items-center gap-1.5 text-[11px] text-[#64748B]">
-                          <DocumentTextIcon className="h-3.5 w-3.5 shrink-0 text-[#94A3B8]" />
-                          <span className="truncate">
-                            {[issue.ground_ref, issue.source].filter(Boolean).join(' · ')}
-                          </span>
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-            </div>
-          </div>
-
-          <div className="mt-9">
-            <h2 className="text-sm font-bold text-[#0F172A]">Search in your own words</h2>
-            <p className="text-xs text-[#64748B] mt-1">Add a proposition or question in plain language. Each one is searched separately.</p>
-            <div className="mt-3 rounded-xl border border-[#E2E8F0] bg-white p-3 shadow-sm focus-within:border-[#21C1B6]/50 focus-within:ring-2 focus-within:ring-[#21C1B6]/10">
-              <textarea
-                value={customDraft}
-                onChange={(e) => setCustomDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addCustomIssue(); }
-                }}
-                rows={2}
-                placeholder="e.g. Whether bail may be granted pending appeal under Article 136"
-                className="w-full bg-transparent text-sm text-[#0F172A] outline-none resize-none leading-relaxed placeholder:text-[#94A3B8]"
-              />
-              <div className="flex items-center justify-between mt-2">
-                <span className="text-[11px] text-[#94A3B8]">Enter to add</span>
+            <div className="flex items-center gap-4">
+              {selectedIds.size < suggested.length && (
                 <button
-                  onClick={addCustomIssue}
-                  className="flex items-center gap-1 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-white hover:bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0]"
+                  onClick={() => setSelectedIds(new Set(suggested.map((i) => i.id)))}
+                  className="text-xs font-semibold text-[#21C1B6] hover:text-[#1AA49B]"
                 >
-                  <PlusIcon className="h-3.5 w-3.5" /> Add
+                  Select all
                 </button>
-              </div>
+              )}
+              {selectedIds.size > 0 && (
+                <button onClick={() => setSelectedIds(new Set())} className="text-xs font-semibold text-[#64748B] hover:text-[#0F172A]">
+                  Clear all
+                </button>
+              )}
             </div>
-            {customIssues.length > 0 && (
+          </div>
+
+          {suggested.length === 0 && (
+            <div className="mt-3 rounded-xl border border-dashed border-[#CBD5E1] bg-white px-4 py-8 text-center text-xs text-[#94A3B8]">
+              {isGrounds ? 'No pleaded grounds were found — add your own below.'
+                : isCombined ? 'No grounds or issues were found — add your own below.'
+                  : isFresh ? 'No grounds could be proposed — describe your objective more precisely and re-analyse.'
+                    : 'No issues were suggested — add your own below.'}
+            </div>
+          )}
+
+          {pleadedItems.length > 0 && (
+            <>
+              {showGroupLabels && groupLabel(isFresh ? 'Proposed grounds' : 'Pleaded grounds', pleadedItems.length)}
+              <div className={`grid grid-cols-1 md:grid-cols-2 gap-3.5 ${showGroupLabels ? '' : 'mt-3'}`}>
+                {pleadedItems.map(renderIssueCard)}
+              </div>
+            </>
+          )}
+
+          {spottedItems.length > 0 && (
+            <>
+              {showGroupLabels && groupLabel('Spotted issues', spottedItems.length)}
+              <div className={`grid grid-cols-1 md:grid-cols-2 gap-3.5 ${showGroupLabels ? '' : 'mt-3'}`}>
+                {spottedItems.map(renderIssueCard)}
+              </div>
+            </>
+          )}
+
+          {/* Searches the user typed themselves — the composer for adding
+              them lives in the sticky bar below, chat-input style. */}
+          {customIssues.length > 0 && (
+            <div className="mt-8">
+              <h2 className="text-sm font-bold text-[#0F172A]">Your own searches ({customIssues.length})</h2>
               <div className="mt-3 grid gap-2">
                 {customIssues.map((text, idx) => (
                   <div key={idx} className="flex items-start justify-between gap-3 rounded-xl border border-[#21C1B6] bg-[#F0FDFA] px-4 py-3">
                     <span className="text-sm font-medium text-[#0F172A] leading-snug font-serif">{text}</span>
                     <button
                       onClick={() => setCustomIssues((prev) => prev.filter((_, i) => i !== idx))}
-                      className="text-[#94A3B8] hover:text-[#21C1B6] shrink-0"
+                      title="Remove this search"
+                      className="text-[#94A3B8] hover:text-[#DC2626] shrink-0"
                     >
                       <XMarkIcon className="h-4 w-4" />
                     </button>
                   </div>
                 ))}
               </div>
-            )}
-          </div>
+            </div>
+          )}
 
-          <div className={`fixed bottom-0 right-0 border-t border-[#E2E8F0] bg-white/95 backdrop-blur px-6 py-3 shadow-[0_-2px_10px_rgba(15,23,42,0.04)] transition-all duration-300 z-40 ${
-            isSidebarHidden ? 'left-0' : (isSidebarCollapsed ? 'lg:left-20' : 'lg:left-72')
-          } left-0`}>
-            <div className="max-w-4xl mx-auto flex items-center justify-between gap-4">
-              <button onClick={resetAll} className="flex items-center gap-1 text-xs font-medium text-[#64748B] hover:text-[#0F172A]">
-                <ChevronLeftIcon className="h-4 w-4" /> Start over
-              </button>
-              <div className="flex items-center gap-4">
-                <span className="text-xs text-[#64748B]">Searching {totalSelected} {isGrounds ? 'ground' : 'issue'}{totalSelected === 1 ? '' : 's'}</span>
+          {/* Action bar: sticky INSIDE the page flow — it reserves its own
+              space at the end of the content, so it can never hide anything.
+              (The AI Help pill lifts above action bars via .jnx-assistant-fab
+              in index.css.) */}
+          <div data-jnx-actionbar className="sticky bottom-0 z-30 mt-10 -mx-4 sm:-mx-6 md:mx-0 md:bottom-4">
+            <div className="border-t border-[#E2E8F0] bg-white/95 backdrop-blur px-4 py-3 sm:px-6 md:rounded-2xl md:border md:shadow-[0_10px_35px_rgba(15,23,42,0.14)]">
+              {/* Chat-style composer: search in your own words. One line tall,
+                  grows to ~3 lines, then scrolls internally like a chat input. */}
+              <div className="flex items-end gap-2 pb-3 mb-3 border-b border-[#F1F5F9]">
+                <textarea
+                  ref={customDraftRef}
+                  value={customDraft}
+                  onChange={(e) => setCustomDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addCustomIssue(); }
+                  }}
+                  rows={1}
+                  placeholder='Search in your own words — e.g. Whether bail may be granted pending appeal under Article 136'
+                  className="flex-1 min-w-0 bg-[#F8FAFC] border border-[#E2E8F0] rounded-xl px-3.5 py-2 text-sm text-[#0F172A] outline-none resize-none overflow-y-auto leading-relaxed placeholder:text-[#94A3B8] focus:border-[#21C1B6]/50 focus:ring-2 focus:ring-[#21C1B6]/10"
+                />
                 <button
-                  onClick={runSearch}
-                  disabled={searching || totalSelected === 0}
-                  className="flex items-center gap-2 px-7 py-2.5 rounded-lg text-sm font-semibold bg-[#21C1B6] hover:bg-[#1AA49B] text-white shadow-sm disabled:opacity-60 transition-colors"
+                  onClick={addCustomIssue}
+                  disabled={!customDraft.trim() || addingIssue}
+                  title="Add this search — it gets its own card and queries, like the suggested ones"
+                  className="shrink-0 flex items-center gap-1 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white hover:bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0] disabled:opacity-50"
                 >
-                  {searching ? <ArrowPathIcon className="h-4 w-4 animate-spin" /> : <MagnifyingGlassIcon className="h-4 w-4" />}
-                  {searching ? 'Searching…' : 'Run search'}
+                  {addingIssue
+                    ? (<><ArrowPathIcon className="h-3.5 w-3.5 animate-spin" /> Analysing…</>)
+                    : (<><PlusIcon className="h-3.5 w-3.5" /> Add</>)}
                 </button>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <button onClick={resetAll} className="flex items-center gap-1 text-xs font-medium text-[#64748B] hover:text-[#0F172A]">
+                  <ChevronLeftIcon className="h-4 w-4" /> Start over
+                </button>
+                <div className="flex items-center gap-4 ml-auto">
+                  <span className="text-xs text-[#64748B] hidden sm:inline">
+                    Searching {totalSelected} {isGrounds ? 'ground' : 'issue'}{totalSelected === 1 ? '' : 's'}
+                  </span>
+                  <button
+                    onClick={runSearch}
+                    disabled={searching || totalSelected === 0}
+                    className="flex items-center gap-2 px-7 py-2.5 rounded-lg text-sm font-semibold bg-[#21C1B6] hover:bg-[#1AA49B] text-white shadow-sm disabled:opacity-60 transition-colors"
+                  >
+                    {searching ? <ArrowPathIcon className="h-4 w-4 animate-spin" /> : <MagnifyingGlassIcon className="h-4 w-4" />}
+                    {searching ? 'Searching…' : `Run search${totalSelected > 0 ? ` (${totalSelected})` : ''}`}
+                  </button>
+                </div>
               </div>
             </div>
           </div>

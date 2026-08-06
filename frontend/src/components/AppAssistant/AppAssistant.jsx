@@ -1018,7 +1018,7 @@ export default function AppAssistant() {
         onClick={() => setOpen(v => !v)}
         whileHover={{ scale: 1.04, y: -2 }}
         whileTap={{ scale: 0.94 }}
-        className="fixed bottom-6 right-6 z-40 flex items-center gap-2.5 px-4 py-2.5 rounded-2xl text-white font-semibold text-[13px] select-none"
+        className="jnx-assistant-fab fixed bottom-6 right-6 z-40 flex items-center gap-2.5 px-4 py-2.5 rounded-2xl text-white font-semibold text-[13px] select-none"
         style={{
           background: open ? "linear-gradient(135deg,#0f2a28,#0d4240)" : T.btnGrad,
           boxShadow: open

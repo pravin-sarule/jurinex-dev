@@ -856,44 +856,121 @@ def side_for_verified_outcome(outcome: str, perspective: str | None) -> str | No
     return "support" if granted == wants_relief else "contra"
 
 
+# v3 abstraction-ladder stop-list: a trigger "match" justified only by one of
+# these genus phrases is spurious (K5) — deterministically rejected.
+_ABSTRACTION_GENUS = (
+    "breach of contract", "abuse of process", "natural justice",
+    "maintainability", "damages", "interpretation of the agreement",
+    "principles of equity",
+)
+
+# Adverse subsequent-history markers in currency_note (cap 60). The standard
+# "could not be verified from this text" boilerplate must NOT match.
+_CURRENCY_DOUBT_RE = re.compile(
+    r"(?i)\b(stay(?:ed)?\b|doubt(?:ed)?\b|overrul|larger bench|appeal\s+(?:is\s+)?pending|"
+    r"slp\s+pending|reversed|set aside in appeal)")
+
+
+def _v3_recompute_score(out: JudgmentVerification) -> int:
+    """v3 scoring arithmetic, recomputed deterministically from the verified
+    fields — the model's own final_score never stands unchecked. Components
+    then caps; the 90+ ceiling requires a binding forum and a full match."""
+    sb = out.score_breakdown
+    forum_pts = max(0, min(10, sb.forum_points))
+    has_ratio = bool(out.ratio_para or out.ratio_summary)
+    components = (
+        (30 if out.trigger_match else 0)
+        + (15 if out.lens_match else 0)
+        + (10 if out.relief_head_match else 0)
+        + (10 if out.doctrine_link.strip() else 0)
+        + (15 if (has_ratio and out.load_bearing) else 0)
+        + (10 if out.stage_match else 0)
+        + forum_pts
+    )
+    caps: list[tuple[str, int]] = []
+    if forum_pts <= 3:
+        caps.append(("persuasive forum", 70))
+    if not out.stage_match:
+        caps.append(("stage mismatch", 65))
+    if not out.lens_match:
+        caps.append(("decisional lens mismatch", 45))
+    if not out.load_bearing:
+        caps.append(("obiter (not load-bearing)", 40))
+    if not has_ratio:
+        caps.append(("no ratio locatable", 30))
+    adverse_currency = bool(_CURRENCY_DOUBT_RE.search(out.currency_note or ""))
+    if adverse_currency:
+        caps.append(("currency doubt", 60))
+    final = min([components] + [c for _, c in caps])
+    if final >= 90 and not (forum_pts >= 7 and out.trigger_match
+                            and out.relief_head_match and out.stage_match
+                            and out.load_bearing and not adverse_currency):
+        final = 89  # 90+ is reserved for binding, fully-matched authority
+    sb.component_sum = components
+    sb.caps_applied = [name for name, _ in caps]
+    sb.final_score = final
+    return final
+
+
 def enforce_verifier_rules(v: JudgmentVerification, doc_text: str | None,
                            perspective: str | None,
                            shelf_patterns: list[str] | None = None) -> JudgmentVerification:
-    """Deterministic enforcement of the verifier spec — the model's claims
-    never stand unchecked:
+    """Deterministic enforcement of the verifier spec (v3) — the model's
+    claims never stand unchecked:
     1. outcome_evidence must be a VERBATIM substring of the fetched text;
        otherwise the outcome is unproven → unclear.
-    2. OUTCOME KILL: outcome unclear → reject (can't cite a case whose
-       operative order we can't prove).
-    3. SHELF KILL: no named doctrine_link → reject; and when the issue has
+    2. OUTCOME KILL: outcome unclear → reject.
+    K2. LENS KILL: lens_match=False → reject (a deferential-review judgment
+       is not authority on a first-instance substantive question).
+    K3. SHELF KILL: no named doctrine_link → reject; and when the issue has
        statutory anchors, a judgment whose FULL TEXT never mentions any of
-       them is on a different shelf → reject, whatever the model scored
-       (kills the stamp-duty-case-for-an-Order-37-issue false positive:
-       shared money words are not shared law).
-    3a. TRIGGER KILL (v2): trigger_match=False → reject. Matching the
-       statute is not enough — a settlement/compromise quashing cited for
-       a civil-colour issue dies here whatever its vocabulary.
-    3b. PARASITIC KILL (v2): parasitic=True → reject, naming the quoted
-       authority counsel should cite directly instead.
-    4. No locatable ratio → score capped at 30.
-    5. The side is RE-DERIVED from verified outcome + issue perspective;
-       'reject' from the model always stands."""
-    out = v.model_copy()
-    out.score = max(0, min(100, out.score))
+       them is on a different shelf → reject.
+    K4. RELIEF-HEAD KILL: relief_head_match=False → reject, naming both heads.
+    K5. TRIGGER KILL: trigger_match=False → reject; an abstraction_test_phrase
+       from the genus stop-list ("breach of contract", "abuse of process", …)
+       is a spurious match → reject.
+    K6. PARASITIC KILL — INDEPENDENT of K5: parasitic=True → reject, naming
+       the quoted authority to cite directly instead.
+    SCORE: recomputed from components (trigger 30, lens 15, relief head 10,
+       shelf 10, load-bearing ratio 15, stage 10, forum ≤10) then caps
+       (persuasive 70 / stage 65 / lens 45 / obiter 40 / no-ratio 30 /
+       currency 60); <60 → reject; 90+ needs binding forum + full match.
+    SIDE re-derived from verified outcome + issue perspective; reject ⇒
+       score 0 and include_in_output False."""
+    out = v.model_copy(deep=True)
     out.outcome, out.outcome_evidence = verify_outcome_evidence(
         out.outcome, out.outcome_evidence, doc_text)
     if out.verdict != "reject":
         if out.outcome == "unclear":
             out.verdict, out.reject_reason = "reject", (
                 out.reject_reason or "outcome unclear / operative line not verifiable")
+        elif not out.lens_match:
+            lens = (out.judgment_profile.decisional_lens or "unknown").strip()
+            out.verdict, out.reject_reason = "reject", (
+                out.reject_reason or
+                f"decisional-lens mismatch: the judgment decided through a "
+                f"'{lens}' lens, not the issue's own standard")
         elif not out.doctrine_link.strip():
             out.verdict, out.reject_reason = "reject", (
                 out.reject_reason or "no doctrinal link named (shelf check)")
+        elif not out.relief_head_match:
+            head = (out.judgment_profile.relief_head or "unknown").strip()
+            issue_head = (out.issue_relief_head or "the issue's relief head").strip()
+            out.verdict, out.reject_reason = "reject", (
+                out.reject_reason or
+                f"relief-head mismatch: the judgment is on '{head}', "
+                f"not '{issue_head}'")
         elif not out.trigger_match:
             out.verdict, out.reject_reason = "reject", (
                 out.reject_reason or
                 f"sub-doctrine mismatch: the judgment's trigger is "
                 f"'{out.trigger_condition or 'unknown'}', not the issue's")
+        elif ((out.abstraction_test_phrase or "").strip().lower().strip('".')
+              in _ABSTRACTION_GENUS):
+            out.verdict, out.reject_reason = "reject", (
+                f"trigger match rests on the genus phrase "
+                f"'{out.abstraction_test_phrase.strip()}' — spurious "
+                f"(abstraction-ladder rule)")
         elif out.parasitic:
             cited = (out.cite_source_instead or "the quoted authority").strip()
             out.verdict, out.reject_reason = "reject", (
@@ -904,15 +981,25 @@ def enforce_verifier_rules(v: JudgmentVerification, doc_text: str | None,
             out.verdict, out.reject_reason = "reject", (
                 "issue's statutory anchors never appear in the judgment text "
                 "(different shelf)")
-    if out.ratio_para is None and out.ratio_summary is None:
-        out.score = min(out.score, 30)
     if out.verdict != "reject":
-        derived = side_for_verified_outcome(out.outcome, perspective)
-        # 'partly' derives no side — keep the model's verdict (it read which
-        # part of the split outcome bears on this issue). Everything else is
-        # re-derived from the verified outcome.
-        if derived is not None:
-            out.verdict = derived
+        final = _v3_recompute_score(out)
+        out.score = final
+        if final < 60:
+            out.verdict, out.reject_reason = "reject", (
+                out.reject_reason or
+                f"final score {final} below the 60 citation threshold")
+    if out.verdict == "reject":
+        # Output discipline: rejects carry no score and never surface.
+        out.score = 0
+        out.include_in_output = False
+        return out
+    out.include_in_output = True
+    derived = side_for_verified_outcome(out.outcome, perspective)
+    # 'partly' derives no side — keep the model's verdict (it read which
+    # part of the split outcome bears on this issue). Everything else is
+    # re-derived from the verified outcome.
+    if derived is not None:
+        out.verdict = derived
     return out
 
 

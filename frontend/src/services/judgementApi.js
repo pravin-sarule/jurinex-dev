@@ -57,8 +57,8 @@ export const judgementApi = {
    * pleaded in the filing and research precedents for each ground).
    * No search spend happens here.
    */
-  analyze({ text, fileRef, mode = 'issues' } = {}) {
-    return postJson('/api/v1/analyze', { caseInput: { text: text || null, fileRef: fileRef || null }, mode });
+  analyze({ text, fileRef, mode = 'issues', queryStyle = 'simple' } = {}) {
+    return postJson('/api/v1/analyze', { caseInput: { text: text || null, fileRef: fileRef || null }, mode, queryStyle });
   },
 
   /**
@@ -67,8 +67,8 @@ export const judgementApi = {
    * page-numbered chunks) from the agentic document service, so suggested
    * issues come back with 'file, page N' source references.
    */
-  analyzeCase(caseId, text = '', mode = 'issues') {
-    return postJson('/api/v1/analyze/case', { caseId, text: text || null, mode });
+  analyzeCase(caseId, text = '', mode = 'issues', queryStyle = 'simple') {
+    return postJson('/api/v1/analyze/case', { caseId, text: text || null, mode, queryStyle });
   },
 
   /**
@@ -77,8 +77,8 @@ export const judgementApi = {
    * documents and the lawyer's stated objective (required) drives PROPOSED
    * grounds; the identical search pipeline then runs on them.
    */
-  analyzeCaseFresh(caseId, objective) {
-    return postJson('/api/v1/analyze/case/fresh', { caseId, objective });
+  analyzeCaseFresh(caseId, objective, queryStyle = 'simple') {
+    return postJson('/api/v1/analyze/case/fresh', { caseId, objective, queryStyle });
   },
 
   /**
@@ -86,13 +86,14 @@ export const judgementApi = {
    * PDF/DOCX/TXT documents + an optional description. All documents are
    * analysed together as a single matter.
    */
-  async analyzeUpload(files, text = '', mode = 'issues', title = '') {
+  async analyzeUpload(files, text = '', mode = 'issues', title = '', queryStyle = 'simple') {
     const list = Array.isArray(files) ? files : [files];
     const form = new FormData();
     list.forEach((f) => form.append('files', f));
     if (text) form.append('text', text);
     form.append('mode', mode);
     if (title) form.append('title', title);
+    form.append('queryStyle', queryStyle);
     const response = await fetch(`${JUDGEMENT_SERVICE_URL}/api/v1/analyze/upload`, {
       method: 'POST',
       headers: { ...getAuthHeader() },
@@ -119,6 +120,16 @@ export const judgementApi = {
    */
   runSearch(sessionId, { issueIds = null, customIssues = [], queryOverrides = {} } = {}) {
     return postJson(`/api/v1/search/${sessionId}/run`, { issueIds, customIssues, queryOverrides });
+  },
+
+  /**
+   * Add a user-typed issue/ground to an analysed session —
+   * POST /api/v1/search/{sessionId}/issues. The backend enriches it and
+   * generates its IK queries exactly like system-suggested issues; returns
+   * { issue } ready to render as a normal card.
+   */
+  addIssue(sessionId, text) {
+    return postJson(`/api/v1/search/${sessionId}/issues`, { text });
   },
 
   /** One-shot — POST /api/v1/search (analyze + split + search in one call). */

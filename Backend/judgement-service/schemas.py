@@ -216,23 +216,58 @@ class KeywordSet(BaseModel):
 
 # ─── Relevance judge (grounded verification of fetched judgments) ───────────
 
+class JudgmentProfile(BaseModel):
+    """v3 STEP A — blind characterisation of the judgment, filled BEFORE the
+    issue is considered (anti-anchoring). All values come from the judgment's
+    own words only."""
+    proceeding_type: str = ""    # suit_first_instance | first_appeal | ... | other
+    decisional_lens: str = ""    # de_novo | deferential_review | threshold_only
+    question_decided: str = ""   # one sentence, as the court would phrase it
+    trigger_condition: str = ""  # the condition that activated the court's power
+    relief_head: str = ""        # exact head of relief in issue in THIS judgment
+    operative_basis: str = ""    # the reason that actually produced the order
+
+
+class ScoreBreakdown(BaseModel):
+    """v3 scoring arithmetic — every component and cap, machine-re-verified in
+    tools.enforce_verifier_rules (a final_score inconsistent with the
+    deterministic recompute is overridden)."""
+    trigger_points: int = 0      # sub-doctrine/trigger match (max 30)
+    lens_points: int = 0         # decisional lens match (max 15)
+    relief_head_points: int = 0  # relief-head match (max 10)
+    shelf_points: int = 0        # field of law + statute match (max 10)
+    ratio_points: int = 0        # ratio located AND load-bearing (max 15)
+    stage_points: int = 0        # procedural stage match (max 10)
+    forum_points: int = 0        # bindingness: SC 10 | same HC DB 9 | same HC SJ 7 | other HC 3 | subordinate 1
+    caps_applied: list[str] = Field(default_factory=list)
+    component_sum: int = 0
+    final_score: int = 0
+
+
 class JudgmentVerification(BaseModel):
-    """PROMPT-3 verifier output (v2): can a lawyer actually CITE this ONE
-    fetched judgment IN COURT for this ONE issue? Judged only from the
-    fetched text (closed world). Four KILL checks (outcome unclear, shelf
-    mismatch, trigger/sub-doctrine mismatch, parasitic authority) →
-    verdict 'reject'. Everything here is re-verified deterministically in
-    code: outcome_evidence must be a verbatim substring of the fetched
-    text, missing doctrine_link / trigger_match=False / parasitic=True
-    force reject, missing ratio caps the score at 30, and the SIDE is
-    re-derived from the verified outcome + the issue's perspective — the
-    LLM's own side claim never wins over the verified outcome. Court, date
-    and authority weight are computed in code from IK metadata, never
-    asked of the model."""
+    """PROMPT-3 verifier output (v3): can a lawyer actually STAND UP AND CITE
+    this ONE fetched judgment IN COURT for this ONE issue? Judged only from
+    the fetched text (closed world). Kill gates: outcome unclear, decisional
+    lens (deferential-review judgments are not authority on first-instance
+    substantive questions), shelf mismatch, relief-head mismatch,
+    trigger/sub-doctrine mismatch (with the abstraction-ladder rule),
+    parasitic authority (independent of the trigger gate), marginal utility.
+    Everything is re-verified deterministically in code: outcome_evidence
+    must be a verbatim substring; lens_match=False / relief_head_match=False /
+    trigger_match=False / parasitic=True / a genus abstraction_test_phrase all
+    force reject; the score is recomputed from components + caps (persuasive
+    forum 70, stage 65, lens 45, obiter 40, no ratio 30, currency doubt 60),
+    <60 rejects, and 90+ requires binding forum + full match; the SIDE is
+    re-derived from the verified outcome + the issue's perspective. Court,
+    date and authority weight come from IK metadata, never the model."""
     verdict: Literal["support", "contra", "interim", "reject"] = "reject"
-    score: int = 0  # trigger 35 + doctrine/statute 20 + ratio 15 + stage 15 + forum/date 15
+    score: int = 0  # final score after caps — recomputed deterministically in code
+    # v3 STEP A/B: blind judgment profile + issue anatomy.
+    judgment_profile: JudgmentProfile = Field(default_factory=JudgmentProfile)
+    issue_relief_head: str = ""             # the issue's relief head (Step B vocabulary)
+    inferred_sub_doctrine_basis: str = ""   # issue words the sub-doctrine was inferred from
     outcome: Literal["relief_granted", "relief_refused", "partly",
-                     "interim_only", "unclear"] = "unclear"
+                     "interim_only", "remanded", "unclear"] = "unclear"
     outcome_evidence: str = ""     # VERBATIM operative line, substring-verified
     doctrine_link: str = ""        # one line naming the doctrinal connection
     # v2 trigger check: the SPECIFIC condition that triggered the court's
@@ -241,12 +276,23 @@ class JudgmentVerification(BaseModel):
     # cited for a civil-colour issue fails here whatever its vocabulary.
     trigger_condition: str = ""
     trigger_match: bool = True
-    # v2 parasitic check: on-point language only QUOTED from an earlier
-    # authority (not applied to reach this judgment's own conclusion) →
-    # reject and name the quoted case to cite directly instead.
+    # v3 K2: deferential-review / threshold judgments are not authority on a
+    # first-instance substantive question (the arbitration/writ trap).
+    lens_match: bool = True
+    # v3 K4: the judgment's relief head must be the ISSUE's relief head
+    # (debt for work done ≠ loss-of-bargain damages ≠ LD ≠ restitution …).
+    relief_head_match: bool = True
+    # v3 K5 abstraction-ladder audit: the "both are about ______" phrase the
+    # model used to claim the trigger match — genus phrases are auto-rejected.
+    abstraction_test_phrase: str = ""
+    # v3 parasitic check (INDEPENDENT of the trigger gate): on-point language
+    # only QUOTED from an earlier authority → reject and name the quoted case.
     parasitic: bool = False
     cite_source_instead: str | None = None
     stage_match: bool = True
+    # v3 K7 counterfactual test: would the operative order change if the court
+    # had held the opposite on the cited proposition? False = obiter (cap 40).
+    load_bearing: bool = True
     ratio_para: str | None = None  # e.g. "para 14" — null when no ratio located
     ratio_summary: str | None = None
     distinguish_risk: str | None = None  # the point the opponent will raise
@@ -265,6 +311,9 @@ class JudgmentVerification(BaseModel):
     # drawn from the ratio; scope limit when only a sub-part is usable.
     usable_for: str | None = None
     usable_scope_limit: str | None = None
+    # v3 scoring arithmetic + output discipline.
+    score_breakdown: ScoreBreakdown = Field(default_factory=ScoreBreakdown)
+    include_in_output: bool = True
     reject_reason: str | None = None
 
 
@@ -389,9 +438,15 @@ class CaseInput(BaseModel):
 ResearchMode = Literal["issues", "grounds", "combined", "fresh"]
 
 
+# Query style: "simple" (default — quoted phrases + bare words, implicit AND)
+# or "advanced" (explicit Boolean AND/OR/NOT — the UI's Advanced search toggle).
+QueryStyle = Literal["simple", "advanced"]
+
+
 class SearchRequest(BaseModel):
     caseInput: CaseInput
     mode: ResearchMode = "issues"
+    queryStyle: QueryStyle = "simple"
 
 
 class RefineRequest(BaseModel):
@@ -432,6 +487,7 @@ class AnalyzeCaseRequest(BaseModel):
     text: str | None = None
     userId: str | None = None
     mode: ResearchMode = "issues"
+    queryStyle: QueryStyle = "simple"
 
 
 class AnalyzeCaseFreshRequest(BaseModel):
@@ -443,6 +499,7 @@ class AnalyzeCaseFreshRequest(BaseModel):
     caseId: str
     objective: str
     userId: str | None = None
+    queryStyle: QueryStyle = "simple"
 
 
 class RunSearchRequest(BaseModel):
@@ -456,6 +513,12 @@ class RunSearchRequest(BaseModel):
     issueIds: list[int] | None = None
     customIssues: list[str] = Field(default_factory=list)
     queryOverrides: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class AddIssueRequest(BaseModel):
+    """A user-typed issue/ground added to an analysed session — it gets the
+    same enrichment + query generation as system-suggested issues."""
+    text: str
 
 
 # ─── Per-citation report (VIEW → Report tab) ────────────────────────────────

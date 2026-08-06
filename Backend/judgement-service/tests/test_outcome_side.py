@@ -60,26 +60,66 @@ def test_verifier_rules_enforced_deterministically():
     assert out.verdict == "reject" and out.outcome == "unclear"
 
     # Verified refusal on a petitioner issue → re-derived to contra even
-    # though the model said 'support' (query role never wins).
+    # though the model said 'support' (query role never wins). v3 recomputes
+    # the score: components 90 (forum 0) with the persuasive-forum cap → 70.
     v = JudgmentVerification(verdict="support", score=80, outcome="relief_refused",
                              outcome_evidence="the petition is dismissed",
                              doctrine_link="quashing — abuse of process",
                              ratio_para="para 7", ratio_summary="test stated")
     out = enforce_verifier_rules(v, DOC, "petitioner")
-    assert out.verdict == "contra" and out.score == 80
+    assert out.verdict == "contra" and out.score == 70
+    assert "persuasive forum" in out.score_breakdown.caps_applied
 
-    # SHELF KILL: no named doctrine link → reject.
+    # Binding forum (same-HC DB = 9 points): no cap; components stand at 99.
+    v = JudgmentVerification(verdict="support", score=50, outcome="relief_refused",
+                             outcome_evidence="the petition is dismissed",
+                             doctrine_link="quashing — abuse of process",
+                             ratio_para="para 7", ratio_summary="test stated")
+    v.score_breakdown.forum_points = 9
+    out = enforce_verifier_rules(v, DOC, "petitioner")
+    assert out.score == 99 and out.score_breakdown.caps_applied == []
+
+    # SHELF KILL: no named doctrine link → reject (reject hygiene: score 0).
     v = JudgmentVerification(verdict="support", score=85, outcome="relief_refused",
                              outcome_evidence="the petition is dismissed",
                              doctrine_link="  ")
-    assert enforce_verifier_rules(v, DOC, "petitioner").verdict == "reject"
+    out = enforce_verifier_rules(v, DOC, "petitioner")
+    assert out.verdict == "reject" and out.score == 0 and not out.include_in_output
 
-    # No locatable ratio → score capped at 30.
+    # No locatable ratio → cap 30 → below the 60 threshold → reject (v3).
     v = JudgmentVerification(verdict="support", score=88, outcome="relief_refused",
                              outcome_evidence="the petition is dismissed",
                              doctrine_link="quashing — abuse of process",
                              ratio_para=None, ratio_summary=None)
-    assert enforce_verifier_rules(v, DOC, "respondent").score == 30
+    out = enforce_verifier_rules(v, DOC, "respondent")
+    assert out.verdict == "reject" and out.score == 0
+
+    # v3 LENS KILL: a deferential-review judgment on a first-instance issue.
+    v = JudgmentVerification(verdict="support", score=90, outcome="relief_refused",
+                             outcome_evidence="the petition is dismissed",
+                             doctrine_link="quashing — abuse of process",
+                             ratio_para="para 7", ratio_summary="test stated",
+                             lens_match=False)
+    out = enforce_verifier_rules(v, DOC, "petitioner")
+    assert out.verdict == "reject" and "lens" in (out.reject_reason or "")
+
+    # v3 RELIEF-HEAD KILL: loss-of-bargain damages cited for an ascertained debt.
+    v = JudgmentVerification(verdict="support", score=90, outcome="relief_refused",
+                             outcome_evidence="the petition is dismissed",
+                             doctrine_link="s.73 Contract Act — damages",
+                             ratio_para="para 7", ratio_summary="test stated",
+                             relief_head_match=False)
+    out = enforce_verifier_rules(v, DOC, "petitioner")
+    assert out.verdict == "reject" and "relief-head" in (out.reject_reason or "")
+
+    # v3 ABSTRACTION-LADDER: a genus phrase justifying the trigger match.
+    v = JudgmentVerification(verdict="support", score=90, outcome="relief_refused",
+                             outcome_evidence="the petition is dismissed",
+                             doctrine_link="quashing — abuse of process",
+                             ratio_para="para 7", ratio_summary="test stated",
+                             abstraction_test_phrase="breach of contract")
+    out = enforce_verifier_rules(v, DOC, "petitioner")
+    assert out.verdict == "reject" and "abstraction-ladder" in (out.reject_reason or "")
 
 
 def test_statutory_shelf_gate_kills_wrong_field_false_positive():

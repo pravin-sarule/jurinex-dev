@@ -25,11 +25,13 @@ from agents import (
     enrich_custom_issue,
     generate_case_summary,
     generate_citation_analysis,
+    generate_queries,
     run_issue_search,
     run_search_pipeline,
 )
 from config import get_settings
 from schemas import (
+    AddIssueRequest,
     AnalyzeCaseFreshRequest,
     AnalyzeCaseRequest,
     AnalyzeResponse,
@@ -246,7 +248,8 @@ def _gather_case_text(text: str | None, file_ref: str | None) -> str:
 async def analyze(request: SearchRequest, http_request: Request) -> AnalyzeResponse:
     raw_text = await asyncio.to_thread(_gather_case_text, request.caseInput.text,
                                        request.caseInput.fileRef)
-    session_id, context, issues, grounds_meta = await analyze_case(raw_text, mode=request.mode)
+    session_id, context, issues, grounds_meta = await analyze_case(
+        raw_text, mode=request.mode, query_style=request.queryStyle)
     _tag_session(session_id, http_request.headers.get("x-user-id"))
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
@@ -277,7 +280,8 @@ async def analyze_from_case(request: AnalyzeCaseRequest, http_request: Request) 
         full_text = f"{full_text}\n\n{note}"
 
     session_id, context, issues, grounds_meta = await analyze_case(
-        llm_text, source_text=full_text, pages=pages, mode=request.mode)
+        llm_text, source_text=full_text, pages=pages, mode=request.mode,
+        query_style=request.queryStyle)
     _tag_session(session_id, user_id, case_title or None, str(request.caseId))
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
@@ -318,7 +322,7 @@ async def analyze_fresh_case(request: AnalyzeCaseFreshRequest,
 
     session_id, context, issues, grounds_meta = await analyze_case(
         llm_text, source_text=full_text, pages=pages, mode="fresh",
-        objective=objective)
+        objective=objective, query_style=request.queryStyle)
     _tag_session(session_id, user_id, case_title or None, str(request.caseId))
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
@@ -335,7 +339,8 @@ async def analyze_upload(http_request: Request,
                          file: UploadFile | None = File(default=None),
                          text: str = Form(default=""),
                          mode: str = Form(default="issues"),
-                         title: str = Form(default="")) -> AnalyzeResponse:
+                         title: str = Form(default=""),
+                         queryStyle: str = Form(default="simple")) -> AnalyzeResponse:
     """One or more uploaded documents analysed together as a single matter.
     `files` is the multi-upload field; the legacy single `file` field still
     works. Every page keeps its own filename so issue source references
@@ -360,8 +365,9 @@ async def analyze_upload(http_request: Request,
     if not parts:
         raise HTTPException(status_code=400, detail="Uploaded file produced no readable text")
     mode = mode if mode in ("issues", "grounds", "combined") else "issues"
+    query_style = queryStyle if queryStyle in ("simple", "advanced") else "simple"
     session_id, context, issues, grounds_meta = await analyze_case(
-        "\n\n---\n\n".join(parts), pages=pages, mode=mode)
+        "\n\n---\n\n".join(parts), pages=pages, mode=mode, query_style=query_style)
     stem = (uploads[0].filename or "").rsplit(".", 1)[0] or None
     fallback = f"{stem} (+{len(uploads) - 1} more)" if stem and len(uploads) > 1 else stem
     _tag_session(session_id, http_request.headers.get("x-user-id"),
@@ -413,6 +419,38 @@ async def search_run(session_id: str, request: RunSearchRequest,
     _tag_session(session_id, http_request.headers.get("x-user-id"))
     background.add_task(_vault_write, response)
     return response
+
+
+@app.post("/api/v1/search/{session_id}/issues")
+async def add_session_issue(session_id: str, request: AddIssueRequest,
+                            http_request: Request) -> dict[str, Any]:
+    """A user-typed issue or ground joins the session with the SAME
+    analyze-time treatment as system-suggested ones: normalized framing +
+    doctrine + statutory hook (enrichment) and its own generated IK queries,
+    stored in the session — the card renders identically and /run reuses
+    the stored keywords, including per-query curation."""
+    session = sessions.load(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Unknown or expired sessionId — analyze first")
+    owner = session.get("userId")
+    caller = http_request.headers.get("x-user-id")
+    if owner and str(owner) != str(caller or ""):
+        raise HTTPException(status_code=404, detail="Unknown or expired sessionId")
+    text = (request.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Provide the issue text")
+    context = CaseContext.model_validate(session.get("caseContext") or {})
+    suggested = [Issue.model_validate(i) for i in session.get("suggestedIssues", [])]
+    next_id = max((i.id for i in suggested), default=0) + 1
+    issue = await enrich_custom_issue(Issue(id=next_id, issue=text), context)
+    siblings = [f"Issue {j.id}: {j.title or j.issue[:70]}" for j in suggested]
+    kw = await generate_queries(issue, context, sibling_issues=siblings,
+                                style=session.get("queryStyle", "simple"))
+    issue.queries = list(kw.anchor_queries)
+    session["suggestedIssues"] = [i.model_dump() for i in suggested] + [issue.model_dump()]
+    session.setdefault("issueKeywords", {})[str(next_id)] = kw.model_dump()
+    sessions.save(session_id, session)
+    return {"sessionId": session_id, "issue": issue.model_dump()}
 
 
 # ─── POST /api/v1/search ─────────────────────────────────────────────────────
