@@ -157,6 +157,18 @@ _LEAD_DECOR_RE = re.compile(r'^(?:\s|[^\x00-\x7F])+')
 _LEAD_TAGS_RE = re.compile(r'^\s*(?:\[[\w\s:/_\-.]{1,50}\]\s*)+')
 _KV_RE = re.compile(r'(?<![\w=])([A-Za-z_][\w.]*)=([^\s|]+)')
 
+# Friendlier component names for loggers whose dotted name reads badly.
+_LOGGER_ALIAS = {
+    'uvicorn': 'uvicorn',
+    'uvicorn.error': 'uvicorn',
+    'uvicorn.access': 'uvicorn',
+    'uvicorn.lifespan': 'uvicorn',
+    'uvicorn.lifespan.on': 'uvicorn',
+    'httpx': 'http',
+    'httpcore': 'http',
+    'main': 'startup',
+}
+
 _DONE_KW = ('complete', 'success', 'ready', 'done', 'loaded', 'finish', ' ok', 'mounted',
             'repaired', 'passed', 'allowed')
 _FAIL_KW = ('fail', 'error', 'exception', 'traceback', 'abort', 'invalid', 'denied',
@@ -297,7 +309,10 @@ def _extract(record: logging.LogRecord, msg: str, raw: str) -> dict[str, Any]:
         out['component'] = comp_m.group(1)
     else:
         parts = record.name.split('.')
-        out['component'] = parts[-1] if len(parts) > 1 else record.name
+        fallback = parts[-1] if len(parts) > 1 else record.name
+        # `uvicorn.error` carries ordinary startup INFO — showing "error" as the
+        # component made healthy boot lines look like failures.
+        out['component'] = _LOGGER_ALIAS.get(record.name, fallback)
 
     # ── Model
     kv = _KV_MODEL_RE.search(msg)
