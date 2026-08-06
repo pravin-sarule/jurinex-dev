@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ArrowPathIcon,
   ArrowUpTrayIcon,
@@ -348,12 +348,21 @@ export default function CitationResearchPanel() {
   // Research history — every past search stored in the citationTest DB.
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
-  useEffect(() => {
+  // Silent refresh keeps the sidebar in sync after analyze/run/back-to-input;
+  // a transient failure keeps the previous list instead of blanking it.
+  const refreshHistory = useCallback((initial = false) => {
+    if (initial) setHistoryLoading(true);
     judgementApi.listSessions()
       .then((rows) => setHistory(rows))
-      .catch(() => setHistory([]))
-      .finally(() => setHistoryLoading(false));
+      .catch(() => { if (initial) setHistory([]); })
+      .finally(() => { if (initial) setHistoryLoading(false); });
   }, []);
+  useEffect(() => { refreshHistory(true); }, [refreshHistory]);
+  // Coming back to the input step (after a search, or via "New research")
+  // must show research finished this visit — the mount-time list is stale.
+  useEffect(() => {
+    if (hydrated && step === 'input') refreshHistory();
+  }, [hydrated, step, refreshHistory]);
 
   const openHistory = async (sessionId) => {
     try {
@@ -563,12 +572,8 @@ export default function CitationResearchPanel() {
       toast.info('Describe what the client wants — the objective drives a fresh matter\'s grounds');
       return;
     }
-    if (inputMode === 'text' && selectedCaseId && !caseText.trim()) {
-      toast.info('Describe what the client wants — the description drives the selected case\'s research');
-      return;
-    }
-    if (inputMode === 'text' && !selectedCaseId && !caseText.trim() && !file) {
-      toast.info('Paste your case details or upload a document first');
+    if (inputMode === 'text' && !file) {
+      toast.info('Upload a case document first — it is analysed directly');
       return;
     }
     setAnalyzing(true);
@@ -577,13 +582,9 @@ export default function CitationResearchPanel() {
         ? (freshMode
           ? await judgementApi.analyzeCaseFresh(selectedCaseId, caseText.trim())
           : await judgementApi.analyzeCase(selectedCaseId, caseText.trim(), researchMode))
-        : (selectedCaseId
-          // Paste tab with a case selected: fresh research — all of the
-          // case's documents + the typed description as the objective.
-          ? await judgementApi.analyzeCaseFresh(selectedCaseId, caseText.trim())
-          : file
-            ? await judgementApi.analyzeUpload(file, caseText.trim(), researchMode)
-            : await judgementApi.analyze({ text: caseText.trim(), mode: researchMode }));
+        // Upload tab: the document is the case material; the optional
+        // description steers which grounds and issues come back.
+        : await judgementApi.analyzeUpload(file, caseText.trim(), researchMode);
       setAnalysis(data);
       setSelectedIds(new Set((data.suggestedIssues || []).map((i) => i.id)));
       setCustomIssues([]);
@@ -591,6 +592,7 @@ export default function CitationResearchPanel() {
       setQueryDrafts({});
       setSearchResponse(null);
       setStep('issues');
+      refreshHistory();
       if (data.needsClarification && data.clarificationQuestion) {
         toast.warn(data.clarificationQuestion, { autoClose: 8000 });
       }
@@ -671,6 +673,7 @@ export default function CitationResearchPanel() {
       });
       setSearchResponse(data);
       setStep('results');
+      refreshHistory();
     } catch (err) {
       toast.error(err.message || 'Search failed');
     } finally {
@@ -712,7 +715,7 @@ export default function CitationResearchPanel() {
         <div className="max-w-6xl mx-auto">
           <PageHeader
             title="Citation Research"
-            subtitle="Pick one of your cases or describe it — the system finds the legal issues, then retrieves verified Indian Kanoon precedents for each one."
+            subtitle="Pick one of your cases or upload a document — the system finds the legal issues and grounds, then retrieves verified Indian Kanoon precedents for each one."
           />
 
           <div className="mt-7 grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px] items-start">
@@ -722,7 +725,7 @@ export default function CitationResearchPanel() {
               <div className="flex gap-2">
                 {[
                   { key: 'case', label: 'My cases', icon: BriefcaseIcon },
-                  { key: 'text', label: 'Paste or upload', icon: DocumentTextIcon },
+                  { key: 'text', label: 'Upload document', icon: DocumentTextIcon },
                 ].map(({ key, label, icon: TabIcon }) => (
                   <button
                     key={key}
@@ -781,27 +784,37 @@ export default function CitationResearchPanel() {
                 </label>
               )}
 
-              {/* Paste tab: optionally research one of the user's cases with
-                  the typed description — the fresh route reads ALL of the
-                  case's documents and treats the description as the objective.
-                  Picker first, description box below it. */}
+              {/* Upload tab: the document itself is the case material — it is
+                  uploaded and analysed directly; the optional description below
+                  steers which grounds and issues are extracted. */}
               {inputMode === 'text' && (
                 <div className="mt-5">
-                  <div className="flex items-center gap-3">
-                    <span className="h-px flex-1 bg-[#E2E8F0]" />
-                    <span className="text-[11px] font-semibold uppercase tracking-wide text-[#94A3B8]">
-                      Select one of your cases (optional) — the description below drives its research
+                  <label className={`flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-9 cursor-pointer text-center transition-colors ${
+                    file ? 'border-[#21C1B6] bg-[#F0FDFA]' : 'border-[#CBD5E1] bg-white hover:border-[#21C1B6]/60 hover:bg-[#F0FDFA]/40'
+                  }`}>
+                    <span className={`h-11 w-11 rounded-xl flex items-center justify-center ${file ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
+                      <ArrowUpTrayIcon className={`h-5 w-5 ${file ? 'text-[#21C1B6]' : 'text-[#94A3B8]'}`} />
                     </span>
-                    <span className="h-px flex-1 bg-[#E2E8F0]" />
-                  </div>
-                  <div className="mt-3">
-                    <CasePicker />
-                  </div>
-                  {selectedCaseId && (
-                    <div className="mt-3 rounded-xl border border-[#99F6E4] bg-[#F0FDFA] px-4 py-2.5 text-[12px] text-[#0D9488] leading-relaxed">
-                      The system will read <span className="font-semibold">all documents of the selected case</span> and
-                      build <span className="font-semibold">proposed grounds</span> from your description below — describe
-                      what the client wants, then Analyse. Deselect the case to research pasted text instead.
+                    <span className="text-sm font-semibold text-[#0F172A]">
+                      {file ? file.name : 'Upload the petition, FIR, plaint or judgment'}
+                    </span>
+                    <span className="text-[12px] text-[#64748B]">
+                      {file
+                        ? 'Document ready — it will be analysed directly. Click to replace it.'
+                        : 'PDF, DOCX or TXT — the document is analysed directly and its grounds and legal issues are extracted.'}
+                    </span>
+                    <input
+                      type="file"
+                      accept=".pdf,.docx,.txt"
+                      className="hidden"
+                      onChange={(e) => setFile(e.target.files?.[0] || null)}
+                    />
+                  </label>
+                  {file && (
+                    <div className="mt-2 text-right">
+                      <button onClick={() => setFile(null)} className="text-xs text-[#94A3B8] hover:text-[#DC2626]">
+                        Remove file
+                      </button>
                     </div>
                   )}
                 </div>
@@ -810,37 +823,18 @@ export default function CitationResearchPanel() {
               <textarea
                 value={caseText}
                 onChange={(e) => setCaseText(e.target.value)}
-                rows={inputMode === 'case' ? (freshMode ? 5 : 3) : (selectedCaseId ? 5 : 9)}
+                rows={inputMode === 'case' ? (freshMode ? 5 : 3) : 4}
                 placeholder={inputMode === 'case'
                   ? (freshMode
                     ? 'Describe what the client wants (required) — e.g. "we act for the accused director; the FIR arises from a supply-contract dispute and we want it quashed" or "we act for the supplier; recover the unpaid invoices with interest"'
                     : 'Optional instruction, e.g. "we act for the workmen; focus on the wage revision demand"')
-                  : (selectedCaseId
-                    ? 'Describe what the client wants for the selected case (required) — e.g. "we act for the accused; seek regular bail" — the system reads all the case documents and builds proposed grounds from this'
-                    : 'Paste the case summary, client brief, or your instructions… (e.g. FIR under S.420 IPC against a director over a supply-contract dispute; we want the FIR quashed)')}
+                  : 'Optional description — e.g. "we act for the accused; seek regular bail" — the analysis of the uploaded document (its grounds and issues) is steered by this'}
                 className="mt-4 w-full bg-white border border-[#E2E8F0] text-[#0F172A] text-sm rounded-xl p-4 outline-none focus:border-[#21C1B6]/50 focus:ring-2 focus:ring-[#21C1B6]/10 leading-relaxed shadow-sm placeholder:text-[#94A3B8]"
               />
 
               {/* One research method: pleaded grounds + spotted issues are
                   extracted together in a single combined pass. */}
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                {inputMode === 'text' && !selectedCaseId && (
-                  <label className="flex items-center gap-2 cursor-pointer text-sm text-[#64748B] hover:text-[#0F172A]">
-                    <ArrowUpTrayIcon className="h-4 w-4" />
-                    <span>{file ? file.name : 'Attach petition / judgment (PDF, DOCX)'}</span>
-                    <input
-                      type="file"
-                      accept=".pdf,.docx,.txt"
-                      className="hidden"
-                      onChange={(e) => setFile(e.target.files?.[0] || null)}
-                    />
-                  </label>
-                )}
-                {inputMode === 'text' && !selectedCaseId && file && (
-                  <button onClick={() => setFile(null)} className="text-xs text-[#94A3B8] hover:text-[#21C1B6]">
-                    Remove file
-                  </button>
-                )}
                 <button
                   onClick={runAnalyze}
                   disabled={analyzing}
