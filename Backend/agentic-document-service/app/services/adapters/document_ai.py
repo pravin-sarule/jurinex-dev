@@ -252,6 +252,92 @@ def _kimi_supports_thinking_off(api_model: str) -> bool:
     return not tail.startswith(_KIMI_NO_THINKING_OFF_PREFIXES)
 
 
+# ── Prompt-cache reporting ────────────────────────────────────────────────────
+# Moonshot caches any prompt PREFIX longer than 256 tokens automatically — there is
+# no parameter to enable it and no cache id to manage. A cold call omits the
+# `cached_tokens` field entirely; a warm one reports it BOTH at usage.cached_tokens
+# and usage.prompt_tokens_details.cached_tokens (verified live, stream + non-stream).
+#
+# USD per 1M INPUT tokens as (cache miss, cache hit). Used only to show what caching
+# saved on input — output rates are deliberately not guessed here.
+_KIMI_INPUT_RATES: dict[str, tuple[float, float]] = {
+    "kimi-k3":     (3.00, 0.30),
+    "kimi-k2.7":   (0.95, 0.19),
+    "kimi-k2.6":   (0.95, 0.16),
+    "kimi-k2.5":   (0.60, 0.10),
+}
+
+
+def _cached_input_tokens(usage: Any) -> int:
+    """Cached (discounted) input tokens from an OpenAI-compatible usage object/dict."""
+    if usage is None:
+        return 0
+
+    def _get(obj: Any, key: str) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None)
+
+    details = _get(usage, "prompt_tokens_details")
+    for candidate in (_get(details, "cached_tokens") if details is not None else None,
+                      _get(usage, "cached_tokens"),
+                      _get(usage, "cache_read_input_tokens")):  # Anthropic spelling
+        try:
+            n = int(candidate or 0)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    return 0
+
+
+def _kimi_cache_saving_usd(api_model: str, cached_tokens: int) -> float | None:
+    """USD saved on input by the cache hit, or None when the model has no known rate."""
+    if cached_tokens <= 0:
+        return None
+    tail = _model_tail_lower(api_model)
+    best: tuple[float, float] | None = None
+    best_len = -1
+    for prefix, rates in _KIMI_INPUT_RATES.items():
+        if tail.startswith(prefix) and len(prefix) > best_len:
+            best, best_len = rates, len(prefix)
+    if best is None:
+        return None
+    miss_rate, hit_rate = best
+    return cached_tokens * (miss_rate - hit_rate) / 1_000_000.0
+
+
+def _log_kimi_cache(api_model: str, usage: Any, *, phase: str) -> int:
+    """Emit one console line showing whether Moonshot's prompt cache hit, and return cached tokens."""
+    try:
+        cached = _cached_input_tokens(usage)
+        prompt_tokens = 0
+        if usage is not None:
+            raw = usage.get("prompt_tokens") if isinstance(usage, dict) else getattr(usage, "prompt_tokens", 0)
+            prompt_tokens = int(raw or 0)
+        if prompt_tokens <= 0:
+            return cached
+        pct = (cached / prompt_tokens * 100.0) if prompt_tokens else 0.0
+        saved = _kimi_cache_saving_usd(api_model, cached)
+        saved_txt = f"  saved≈${saved:.4f}" if saved else ""
+        if cached > 0:
+            logger.info(
+                "[DocumentAI] ⚡ Kimi cache HIT   %s  cached=%s/%s input tokens (%.0f%%)  billed_full=%s%s",
+                api_model, f"{cached:,}", f"{prompt_tokens:,}", pct,
+                f"{prompt_tokens - cached:,}", saved_txt,
+            )
+        else:
+            logger.info(
+                "[DocumentAI] ○ Kimi cache MISS  %s  cached=0/%s input tokens (0%%)  "
+                "(cold prefix, or prefix under the 256-token minimum)",
+                api_model, f"{prompt_tokens:,}",
+            )
+        return cached
+    except Exception as exc:  # never let cache reporting break a response
+        logger.debug("[DocumentAI] kimi cache log skipped (%s): %s", phase, exc)
+        return 0
+
+
 # ── API clients ───────────────────────────────────────────────────────────────
 
 def _is_gemma_model(model_name: str | None) -> bool:
