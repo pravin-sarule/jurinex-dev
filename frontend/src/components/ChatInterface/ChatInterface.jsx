@@ -1011,6 +1011,33 @@ const _draftLineAlign = (t0) => {
   return null;
 };
 
+/**
+ * Mint a chat-session id on the CLIENT, before the streaming request goes out.
+ *
+ * A brand-new chat used to send `session_id: undefined`, letting the server invent the
+ * id and hand it back in the `metadata` SSE event — which only arrives at the END of the
+ * stream. So while an answer was still streaming, the conversation had no id the UI could
+ * hold on to: opening another chat abandoned it, and there was nothing to navigate back
+ * to, so it vanished from history.
+ *
+ * Generating the id up-front (what ChatGPT and Claude do) makes the conversation
+ * addressable from the first token. The backend already honours a supplied id —
+ * folder_service._get_or_create_session() uses `id=key or uuid4()`.
+ */
+const mintSessionId = () => {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch { /* fall through to the manual builder below */ }
+  // RFC-4122 v4 fallback for browsers / non-secure origins without randomUUID.
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+};
+
 const ChatInterface = () => {
   const {
     selectedFolder,
