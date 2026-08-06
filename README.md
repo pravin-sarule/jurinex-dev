@@ -324,10 +324,28 @@ versus **2,660 tokens / 71s** with it on and uncapped.
 > ⚠️ **`KIMI_THINKING_BUDGET_TOKENS` is a hint, not a hard cap.** On a real ~350-word legal
 > question, reasoning ran **860–2,065 tokens whether the budget was set to 500 or 2,000**, and
 > one benchmark run spent the *entire* `max_tokens` ceiling on reasoning — returning a truncated
-> answer. The only reliable cost bounds are `KIMI_THINKING_ENABLED=false` and `max_output_tokens`.
+> answer. `reasoning_effort` is the lever that actually bites.
 
-`kimi-k2.7-code` refuses `thinking: disabled` outright; the adapter detects that specific error
-and transparently retries with `budget_tokens` instead, so it stays cheap without special-casing.
+### How thinking is switched off — it differs per model
+
+Only **K2.6** can turn thinking off outright. K3 always reasons (you can only lower the effort),
+and the K2.7 Code models always reason and always preserve their reasoning. The adapter picks the
+right lever automatically from the model id, so `KIMI_THINKING_ENABLED=false` is cheap on all of
+them. Reasoning tokens measured on the same ~200-word question:
+
+| Model                      | Can disable thinking? | What the adapter sends            | Reasoning tokens |
+| -------------------------- | --------------------- | --------------------------------- | ---------------- |
+| `kimi-k2.6`                | ✅ yes                | `thinking:{"type":"disabled"}`, temp **0.6** | **1**   |
+| `kimi-k3`                  | ❌ no                 | `reasoning_effort:"low"`, temp **1.0**       | **15** (vs 1,427 at the `max` default) |
+| `kimi-k2.7-code`           | ❌ no (always thinks) | `reasoning_effort:"low"`, temp **1.0**       | **210** |
+| `kimi-k2.7-code-highspeed` | ❌ no (always thinks) | `reasoning_effort:"low"`, temp **1.0**       | **225** |
+
+Note the temperature follows the mode, not the model: **0.6 only with `thinking:disabled`**, and
+**1.0 whenever thinking is on** — including K3/K2.7 in their minimal-effort mode. Moonshot also
+fixes `top_p` (0.95), `n` (1) and both penalties (0.0); the adapter never sends them.
+
+If a model unexpectedly rejects `thinking:disabled`, the adapter catches that specific 400 and
+retries with `reasoning_effort:"low"` instead, so a new model id can never hard-fail the chat.
 
 ### Measured throughput
 
