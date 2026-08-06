@@ -71,12 +71,28 @@ export const judgementApi = {
     return postJson('/api/v1/analyze/case', { caseId, text: text || null, mode });
   },
 
-  /** Phase 1 (upload) — POST /api/v1/analyze/upload with a PDF/DOCX + optional note. */
-  async analyzeUpload(file, text = '', mode = 'issues') {
+  /**
+   * Phase 1 (fresh matter) — POST /api/v1/analyze/case/fresh. For a case with
+   * NO drafted pleading yet: the backend pulls ALL of the case's source
+   * documents and the lawyer's stated objective (required) drives PROPOSED
+   * grounds; the identical search pipeline then runs on them.
+   */
+  analyzeCaseFresh(caseId, objective) {
+    return postJson('/api/v1/analyze/case/fresh', { caseId, objective });
+  },
+
+  /**
+   * Phase 1 (upload) — POST /api/v1/analyze/upload with one or more
+   * PDF/DOCX/TXT documents + an optional description. All documents are
+   * analysed together as a single matter.
+   */
+  async analyzeUpload(files, text = '', mode = 'issues', title = '') {
+    const list = Array.isArray(files) ? files : [files];
     const form = new FormData();
-    form.append('file', file);
+    list.forEach((f) => form.append('files', f));
     if (text) form.append('text', text);
     form.append('mode', mode);
+    if (title) form.append('title', title);
     const response = await fetch(`${JUDGEMENT_SERVICE_URL}/api/v1/analyze/upload`, {
       method: 'POST',
       headers: { ...getAuthHeader() },

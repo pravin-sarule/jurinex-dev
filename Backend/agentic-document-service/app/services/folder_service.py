@@ -2158,11 +2158,28 @@ class FolderWorkflowService:
                 if value and not extracted_data.get(key):
                     extracted_data[key] = value
 
+    @classmethod
+    def _flatten_extract_value(cls, value: Any) -> Any:
+        """LLM shape-drift guard: some prompt/model combinations wrap each
+        extracted field as {value, status, evidence} (or similar) instead of
+        the plain value. Unwrap recursively so consumers — the create-case
+        auto-fill form renders these directly — always get plain strings/
+        lists. Party dicts ({fullName, role, …}) have no 'value' key and pass
+        through untouched."""
+        if isinstance(value, dict):
+            if "value" in value:
+                return cls._flatten_extract_value(value.get("value"))
+            return {k: cls._flatten_extract_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [cls._flatten_extract_value(v) for v in value]
+        return value
+
     def _normalize_entities(self, entities: dict[str, Any]) -> dict[str, Any]:
         """
         Pass through all camelCase fields from Gemini extraction as-is, and map
         any legacy snake_case fields from the old regex extractor for backward compat.
         """
+        entities = {k: self._flatten_extract_value(v) for k, v in (entities or {}).items()}
         # Direct camelCase fields that Gemini returns — just copy them through
         camel_case_fields = {
             "caseTitle", "caseNumber", "casePrefix", "caseYear", "caseType", "caseNature",

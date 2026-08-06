@@ -30,6 +30,7 @@ from agents import (
 )
 from config import get_settings
 from schemas import (
+    AnalyzeCaseFreshRequest,
     AnalyzeCaseRequest,
     AnalyzeResponse,
     Candidate,
@@ -287,21 +288,84 @@ async def analyze_from_case(request: AnalyzeCaseRequest, http_request: Request) 
     )
 
 
+@app.post("/api/v1/analyze/case/fresh", response_model=AnalyzeResponse)
+async def analyze_fresh_case(request: AnalyzeCaseFreshRequest,
+                             http_request: Request) -> AnalyzeResponse:
+    """Fresh-matter research (own route): the case has NO drafted pleading
+    yet, so there are no grounds to read. ALL of the case's source documents
+    are pulled from the agentic document service and the lawyer's stated
+    OBJECTIVE (what the client wants) drives PROPOSED grounds — then the
+    identical pipeline (query generation → IK fan-out → per-judgment
+    verification → reports) runs unchanged."""
+    objective = (request.objective or "").strip()
+    if not objective:
+        raise HTTPException(status_code=400,
+                            detail="objective is required — describe what the client wants to achieve")
+    auth_header = http_request.headers.get("authorization")
+    user_id = http_request.headers.get("x-user-id") or request.userId
+    try:
+        case_title, pages, llm_text, full_text = await fetch_case_pages(
+            request.caseId, auth_header, user_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Document service unreachable: {exc}")
+
+    # The objective leads the LLM text, and joins the source text so the
+    # anti-invention guard doesn't strike objective-derived statements.
+    llm_text = f"[CLIENT'S OBJECTIVE]\n{objective}\n\n{llm_text}"
+    full_text = f"{full_text}\n\n{objective}"
+
+    session_id, context, issues, grounds_meta = await analyze_case(
+        llm_text, source_text=full_text, pages=pages, mode="fresh",
+        objective=objective)
+    _tag_session(session_id, user_id, case_title or None, str(request.caseId))
+    return AnalyzeResponse(
+        sessionId=session_id, caseContext=context, suggestedIssues=issues,
+        needsClarification=context.needs_clarification,
+        clarificationQuestion=context.clarification_question,
+        caseId=request.caseId, caseTitle=case_title or None,
+        researchMode="fresh", groundsMeta=grounds_meta or None,
+    )
+
+
 @app.post("/api/v1/analyze/upload", response_model=AnalyzeResponse)
-async def analyze_upload(http_request: Request, file: UploadFile = File(...),
+async def analyze_upload(http_request: Request,
+                         files: list[UploadFile] = File(default=[]),
+                         file: UploadFile | None = File(default=None),
                          text: str = Form(default=""),
-                         mode: str = Form(default="issues")) -> AnalyzeResponse:
-    data = await file.read()
-    pages = await asyncio.to_thread(parse_document_pages, data, file.filename or "")
-    doc_text = "\n\n".join(p.text for p in pages if p.text.strip())
-    parts = [p for p in (doc_text, text.strip()) if p]
+                         mode: str = Form(default="issues"),
+                         title: str = Form(default="")) -> AnalyzeResponse:
+    """One or more uploaded documents analysed together as a single matter.
+    `files` is the multi-upload field; the legacy single `file` field still
+    works. Every page keeps its own filename so issue source references
+    remain per-document ('file, page N'). `title` names the research in
+    history; blank falls back to the first filename."""
+    uploads = [u for u in [*(files or []), file] if u is not None]
+    if not uploads:
+        raise HTTPException(status_code=400, detail="Upload at least one document")
+    pages = []
+    doc_parts: list[str] = []
+    for upload in uploads:
+        data = await upload.read()
+        file_pages = await asyncio.to_thread(parse_document_pages, data, upload.filename or "")
+        pages.extend(file_pages)
+        doc_text = "\n\n".join(p.text for p in file_pages if p.text.strip())
+        if doc_text:
+            # Header marks document boundaries for the extractor when the
+            # matter spans several uploads; a single file stays untouched.
+            doc_parts.append(f"[DOCUMENT: {upload.filename or 'document'}]\n{doc_text}"
+                             if len(uploads) > 1 else doc_text)
+    parts = [p for p in ("\n\n---\n\n".join(doc_parts), text.strip()) if p]
     if not parts:
         raise HTTPException(status_code=400, detail="Uploaded file produced no readable text")
     mode = mode if mode in ("issues", "grounds", "combined") else "issues"
     session_id, context, issues, grounds_meta = await analyze_case(
         "\n\n---\n\n".join(parts), pages=pages, mode=mode)
+    stem = (uploads[0].filename or "").rsplit(".", 1)[0] or None
+    fallback = f"{stem} (+{len(uploads) - 1} more)" if stem and len(uploads) > 1 else stem
     _tag_session(session_id, http_request.headers.get("x-user-id"),
-                 (file.filename or "").rsplit(".", 1)[0] or None)
+                 title.strip()[:200] or fallback)
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
         needsClarification=context.needs_clarification,

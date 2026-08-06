@@ -168,8 +168,9 @@ class ExtractedGround(BaseModel):
     perspective: str = "petitioner"
     # Combined mode: whether this item was actually PLEADED in the filing
     # (ground_label verbatim) or SPOTTED by the system on top of the
-    # pleadings. Pure grounds mode leaves the default.
-    origin: Literal["pleaded", "spotted"] = "pleaded"
+    # pleadings. Fresh mode marks system-formulated grounds for an unfiled
+    # matter as PROPOSED. Pure grounds mode leaves the default.
+    origin: Literal["pleaded", "spotted", "proposed"] = "pleaded"
 
 
 class GroundsExtractResult(BaseModel):
@@ -381,7 +382,11 @@ class CaseInput(BaseModel):
 #              merged into a single deduplicated list (frontend default)
 #   issues  — issue spotter only (legacy)
 #   grounds — grounds extractor only (legacy)
-ResearchMode = Literal["issues", "grounds", "combined"]
+#   fresh   — fresh matter with NO drafted pleading: the case's source
+#             documents + the lawyer's stated objective drive PROPOSED
+#             grounds (what the filing should argue), then the identical
+#             pipeline runs
+ResearchMode = Literal["issues", "grounds", "combined", "fresh"]
 
 
 class SearchRequest(BaseModel):
@@ -427,6 +432,17 @@ class AnalyzeCaseRequest(BaseModel):
     text: str | None = None
     userId: str | None = None
     mode: ResearchMode = "issues"
+
+
+class AnalyzeCaseFreshRequest(BaseModel):
+    """Fresh-matter research (own route): the case has NO drafted pleading
+    yet. ALL of the case's source documents are pulled from the document
+    service, and `objective` — what the client wants, in the lawyer's own
+    words — drives the proposed grounds. objective is REQUIRED: without it
+    there is nothing to anchor a fresh matter's research to."""
+    caseId: str
+    objective: str
+    userId: str | None = None
 
 
 class RunSearchRequest(BaseModel):

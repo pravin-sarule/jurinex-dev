@@ -29,6 +29,7 @@ from google.genai import types as genai_types
 
 from claude_llm import (
     CUSTOM_ISSUE_ENRICH_SYSTEM,
+    FRESH_CASE_SYSTEM,
     GROUNDS_EXTRACTOR_SYSTEM,
     ISSUE_SPOTTER_SYSTEM,
     QUERY_GEN_SYSTEM,
@@ -858,6 +859,95 @@ async def extract_grounds(raw_text: str, context: CaseContext,
     return issues, meta
 
 
+# ─── Fresh mode: proposed grounds for an unfiled matter ─────────────────────
+
+def build_fresh_extract_agent() -> LlmAgent:
+    """Gemini fallback for the fresh-matter extractor — same system prompt
+    and schema as the Claude path, so downstream conversion is identical."""
+    return LlmAgent(
+        name="fresh_extract",
+        model=get_settings().gemini_model,
+        description="Formulates proposed grounds for a fresh, unfiled matter.",
+        instruction=FRESH_CASE_SYSTEM,
+        generate_content_config=_gen_config(0.1),
+        output_schema=GroundsExtractResult,
+        output_key="fresh_extract",
+        disallow_transfer_to_parent=True,
+        disallow_transfer_to_peers=True,
+    )
+
+
+async def extract_fresh(raw_text: str, context: CaseContext, objective: str,
+                        ) -> tuple[list[Issue], dict[str, Any]]:
+    """Fresh mode's stage 1: the matter has NO drafted pleading, so instead
+    of reading pleaded grounds, PROPOSED grounds are formulated from the
+    case's source documents anchored to the lawyer's stated objective.
+    Output rides the same GroundsExtractResult → Issue contract, so the
+    entire downstream pipeline (query generation, IK fan-out, verification,
+    guardian, reports) runs unchanged — with the ground-anchored query and
+    verifier extras applying to every proposed ground."""
+    user = (
+        f"CLIENT'S OBJECTIVE (the only instruction you follow):\n{objective[:2000]}\n\n"
+        f"SOURCE DOCUMENTS OF THE CASE:\n{raw_text[:MAX_LLM_INPUT_CHARS - 6000]}\n\n"
+        f"STRUCTURED CONTEXT (already extracted and source-verified):\n"
+        f"Facts: {context.facts[:1500]}\n"
+        f"Procedural history: {context.procedural_history[:800]}\n"
+        f"Relief sought: {context.relief_sought[:300]}"
+    )
+    result: GroundsExtractResult | None = None
+    if claude_available():
+        result = await claude_parse(FRESH_CASE_SYSTEM, user,
+                                    GroundsExtractResult, max_tokens=8000)
+        if result is None:
+            logger.warning("[claude] fresh extractor unavailable — Gemini fallback")
+    if result is None:
+        try:
+            out = await run_agent_once(build_fresh_extract_agent(), user,
+                                       ["fresh_extract"])
+            result = GroundsExtractResult.model_validate(out.get("fresh_extract") or {})
+        except Exception:
+            logger.exception("[fresh] Gemini fallback failed")
+            result = GroundsExtractResult()
+
+    # Deterministic backstops: every fresh ground is PROPOSED and labelled —
+    # a model that forgot the label still yields "Proposed Ground N" cards.
+    for idx, ground in enumerate(result.grounds):
+        ground.origin = "proposed"
+        if not ground.ground_label.strip():
+            ground.ground_label = f"Proposed Ground {idx + 1}"
+
+    context.procedural_stage = result.procedural_stage.strip() or context.procedural_stage
+    context.forum = result.forum.strip() or context.forum
+    if not context.relief_sought.strip():
+        context.relief_sought = objective[:300]
+    if result.insufficient_material or not result.grounds:
+        context.needs_clarification = True
+        context.clarification_question = (
+            "No researchable ground could be formulated for this fresh matter. "
+            "Describe more precisely what the client wants (the relief, the "
+            "opposing party's act being challenged, and the provision if known), "
+            "or check that the case's documents have finished processing.")
+        return [], {}
+
+    # Fresh matters have no drafter-imposed ground count — allow the same
+    # ceiling as issue spotting (the user picks which to search).
+    issues = _grounds_to_issues(result, cap=MAX_ISSUES)
+    dropped = max(0, len(result.grounds) - len(issues))
+    meta: dict[str, Any] = {
+        "totalGrounds": len(issues),
+        "documentType": result.document_type_label.strip() or "Fresh matter — no draft on record",
+        "party": result.party.strip() or None,
+        "objective": objective[:500],
+        "notes": [n for n in result.notes if n.strip()],
+    }
+    if dropped:
+        # No silent caps: the UI tells the user how many grounds were cut.
+        meta["truncatedGrounds"] = dropped
+        logger.info("[fresh] %d proposed ground(s) beyond the cap of %d were dropped",
+                    dropped, MAX_ISSUES)
+    return issues, meta
+
+
 # ─── Combined mode: full grounds extraction + full issue spotting, merged ───
 
 # Grounds (≤8) and issues (≤12) each run their COMPLETE dedicated pipeline;
@@ -1412,6 +1502,7 @@ def assemble_response(
 async def analyze_case(raw_text: str, source_text: str | None = None,
                        pages: list[SourcePage] | None = None,
                        mode: str = "issues",
+                       objective: str | None = None,
                        ) -> tuple[str, CaseContext, list[Issue], dict[str, Any]]:
     """Phase 1: Agentic Document Context Service (classify → extract via ADK
     SequentialAgent, then deterministic completeness + anti-invention guard)
@@ -1444,6 +1535,10 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
             issues, grounds_meta = await extract_combined(raw_text, context)
         elif mode == "grounds":
             issues, grounds_meta = await extract_grounds(raw_text, context)
+        elif mode == "fresh":
+            # Unfiled matter: proposed grounds anchored to the lawyer's
+            # stated objective instead of pleaded grounds.
+            issues, grounds_meta = await extract_fresh(raw_text, context, objective or "")
         else:
             issues = await spot_issues(raw_text, context)
         if pages:

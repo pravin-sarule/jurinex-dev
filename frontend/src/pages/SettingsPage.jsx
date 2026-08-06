@@ -363,13 +363,14 @@ const LoginDevicesSection = () => {
  );
 };
 
-// Settings → Appearance: three-theme picker. The real restyling lives in
+// Settings → Appearance: theme picker. The real restyling lives in
 // index.css keyed on html[data-theme]; swatches carry .jnx-theme-swatch so the
-// dark-mode root filter never distorts the previews.
+// dark/evergreen root filters never distort the previews.
 const THEME_SWATCHES = {
  light: { bg: '#ffffff', border: '#e5e7eb', bar1: '#111827', bar2: '#9ca3af', chip: '#21C1B6' },
  dark: { bg: '#262624', border: '#3a3936', bar1: '#e8e6e0', bar2: '#8a8880', chip: '#21C1B6' },
  sepia: { bg: '#f6efdd', border: '#e3d5b3', bar1: '#4a3f2a', bar2: '#a08c66', chip: '#0f766e' },
+ evergreen: { bg: '#eef6f2', border: '#b6d4ce', bar1: '#0F172A', bar2: '#5f7a72', chip: '#0F766E' },
 };
 
 const ThemeSection = () => {
@@ -386,10 +387,10 @@ const ThemeSection = () => {
  <p className="text-sm text-gray-500 mb-4">
  Pick how JuriNex looks. The theme applies to the entire site instantly and is remembered on this browser.
  </p>
- <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+ <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
  {THEME_OPTIONS.map((option) => {
  const isActive = theme === option.id;
- const sw = THEME_SWATCHES[option.id];
+ const sw = THEME_SWATCHES[option.id] || THEME_SWATCHES.light;
  return (
  <button
  key={option.id}

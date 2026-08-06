@@ -348,6 +348,7 @@
 
 
 import React, { useState, useEffect } from 'react';
+import { toast } from 'react-toastify';
 import { Upload, Scale, Users, FolderPlus, CheckCircle, AlertCircle, RotateCcw, LogOut } from 'lucide-react';
 import UploadStep from './steps/UploadStep.jsx';
 import OverviewStep from './steps/OverviewStep.jsx';
@@ -356,15 +357,35 @@ import DatesStep from './steps/DatesStep.jsx';
 import ReviewStep from './steps/ReviewStep.jsx';
 import { useAutoSave } from '../../hooks/useAutoSave';
 
+// Survive a refresh mid-flow: the processed documents (tempFolderName) and the
+// auto-filled fields live only in memory, so a crash or refresh before the case
+// was created silently lost everything the user had just processed.
+const CREATE_CASE_PERSIST_KEY = 'jurinex.createCase.v1';
+const CREATE_CASE_PERSIST_TTL_MS = 24 * 60 * 60 * 1000;
+
+const loadPersistedFlow = () => {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(CREATE_CASE_PERSIST_KEY) || 'null');
+    if (saved && Date.now() - (saved.ts || 0) < CREATE_CASE_PERSIST_TTL_MS) return saved;
+  } catch { /* corrupt state — start fresh */ }
+  return null;
+};
+
+const clearPersistedFlow = () => {
+  try { sessionStorage.removeItem(CREATE_CASE_PERSIST_KEY); } catch { /* non-fatal */ }
+};
+
 const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
   const [creationMode] = useState('auto-fill'); // Always auto-fill mode
-  const [currentStep, setCurrentStep] = useState(1); // Start at upload step
+  // Restored once per mount — refresh mid-flow resumes instead of starting over.
+  const [persistedInit] = useState(loadPersistedFlow);
+  const [currentStep, setCurrentStep] = useState(() => persistedInit?.currentStep || 1);
   const [isLoading, setIsLoading] = useState(true);
   const [draftLoaded, setDraftLoaded] = useState(false);
   const [editingFromReview, setEditingFromReview] = useState(false); // Track if editing from Review page
   const [editingStep, setEditingStep] = useState(null); // Track which step is being edited
-  const [isUploadComplete, setIsUploadComplete] = useState(false); // Track if upload and processing is complete
-  const [caseData, setCaseData] = useState({
+  const [isUploadComplete, setIsUploadComplete] = useState(() => Boolean(persistedInit?.isUploadComplete)); // Track if upload and processing is complete
+  const [caseData, setCaseData] = useState(() => persistedInit?.caseData ? { ...persistedInit.caseData } : {
     caseTitle: '',
     caseType: '',
     subType: '',
@@ -403,11 +424,36 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
 
   // Auto-fill mode: no drafts (files are uploaded and extracted immediately)
   const { actualUserId, tokenError } = useAutoSave(
-    caseData, 
-    currentStep, 
+    caseData,
+    currentStep,
     userId,
     false // Disable auto-save for auto-fill mode
   );
+
+  // Persist the flow so a refresh (or a render crash) never loses processed
+  // documents + extracted fields. Local File objects can't be serialized —
+  // they are stripped; server-side file records (post-processing) survive.
+  useEffect(() => {
+    try {
+      const serializableFiles = (caseData.uploadedFiles || []).filter(
+        (f) => !(typeof File !== 'undefined' && f instanceof File)
+      );
+      sessionStorage.setItem(CREATE_CASE_PERSIST_KEY, JSON.stringify({
+        caseData: { ...caseData, uploadedFiles: serializableFiles },
+        currentStep,
+        isUploadComplete,
+        ts: Date.now(),
+      }));
+    } catch { /* storage full/unavailable — non-fatal */ }
+  }, [caseData, currentStep, isUploadComplete]);
+
+  // Tell the user their processed work was restored after a refresh.
+  useEffect(() => {
+    if (persistedInit?.caseData?.tempFolderName) {
+      toast.info('Restored your in-progress case — the processed documents are still here.', { autoClose: 6000 });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     console.log('🎯 CaseCreationFlow State:', {
@@ -486,6 +532,7 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
     if (currentStep < maxStep) {
       setCurrentStep(currentStep + 1);
     } else if (onComplete) {
+      clearPersistedFlow();
       onComplete(caseData);
     }
   };
@@ -505,12 +552,14 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
 
   const handleCancel = async () => {
     // No draft saving - just cancel
+    clearPersistedFlow();
     if (onCancel) {
       onCancel();
     }
   };
 
   const handleResetToFirstStep = () => {
+    clearPersistedFlow();
     setCaseData({
       caseTitle: '',
       caseType: '',
