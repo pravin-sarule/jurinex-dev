@@ -2658,6 +2658,7 @@ def _generate_text_kimi(
     input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
     output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
     total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or (input_tokens + output_tokens)
+    cached_tokens = _log_kimi_cache(api_model, usage, phase="generate")
     log_token_usage_table(
         context="kimi_generate",
         usage={
@@ -2666,6 +2667,7 @@ def _generate_text_kimi(
             "inputTokens": input_tokens,
             "outputTokens": output_tokens,
             "totalTokens": total_tokens,
+            "cachedTokens": cached_tokens,
         },
         provider="kimi",
         model_name=api_model,
@@ -2740,6 +2742,7 @@ def kimi_stream_generator(
             raise
 
     final_usage: dict[str, int] | None = None
+    final_usage_raw: Any = None
     buffer_parts: list[str] = []
     full_response = ""
 
@@ -2751,10 +2754,12 @@ def kimi_stream_generator(
             total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
             if not total_tokens and (prompt_tokens or completion_tokens):
                 total_tokens = prompt_tokens + completion_tokens
+            final_usage_raw = usage
             final_usage = {
                 "inputTokens": prompt_tokens,
                 "outputTokens": completion_tokens,
                 "totalTokens": total_tokens,
+                "cachedTokens": _cached_input_tokens(usage),
             }
 
         if not chunk.choices:
@@ -2798,6 +2803,7 @@ def kimi_stream_generator(
         yield normalize_markdown_render_output("".join(buffer_parts))
 
     if final_usage:
+        _log_kimi_cache(api_model, final_usage_raw, phase="stream")
         log_token_usage_table(
             context="kimi_stream",
             usage={"provider": "kimi", "model": api_model, **final_usage},
