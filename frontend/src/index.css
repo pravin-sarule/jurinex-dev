@@ -191,6 +191,16 @@ html[data-theme='evergreen'] .jnx-theme-swatch {
 }
 
 /* ------------------------------------------------------------------ */
+/* Floating AI-assistant pill vs page action bars: any page that       */
+/* renders a sticky action bar tags it data-jnx-actionbar; the pill    */
+/* lifts above it so the two never overlap.                            */
+/* ------------------------------------------------------------------ */
+body:has([data-jnx-actionbar]) .jnx-assistant-fab {
+  bottom: 92px !important;
+  transition: bottom 0.25s ease;
+}
+
+/* ------------------------------------------------------------------ */
 /* Text-size preference (Settings → Appearance → Font size).           */
 /* TEXT ONLY — layout, buttons and menus never scale. Chat/analysis    */
 /* reading surfaces consume --jnx-text-scale via calc() on their own   */
