@@ -504,6 +504,14 @@ def format_token_usage_table(
             ("Total Tokens", _fmt_int(normalized["totalTokens"])),
         ]
     )
+    _in = int(normalized["inputTokens"] or 0)
+    _cached = int(normalized.get("cachedTokens") or 0)
+    if _in > 0:
+        rows.append(
+            ("Cached Input (cache hit)",
+             f"{_fmt_int(_cached)}  ({_cached / _in * 100:.0f}% of input)" if _cached
+             else "0  (cache MISS)")
+        )
     if answer_length is not None:
         rows.append(("Answer Length", _fmt_int(answer_length)))
     return _format_table(rows, title=title)
