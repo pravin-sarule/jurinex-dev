@@ -122,6 +122,14 @@ def _normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | str]:
     total_tokens = int(usage.get("totalTokens") or usage.get("total_tokens") or 0)
     if total_tokens <= 0 and (input_tokens or output_tokens):
         total_tokens = input_tokens + output_tokens
+    # Prompt-cache hits (Moonshot/OpenAI: cached_tokens, Anthropic: cache_read_input_tokens).
+    # These are a SUBSET of inputTokens, billed at a large discount — never add them on top.
+    cached_tokens = int(
+        usage.get("cachedTokens")
+        or usage.get("cached_tokens")
+        or usage.get("cache_read_input_tokens")
+        or 0
+    )
     return {
         "provider": str(usage.get("provider") or "-"),
         "model": str(usage.get("model") or usage.get("modelName") or usage.get("model_name") or "-"),
@@ -129,6 +137,7 @@ def _normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | str]:
         "inputTokens": input_tokens,
         "outputTokens": output_tokens,
         "totalTokens": total_tokens,
+        "cachedTokens": cached_tokens,
     }
 
 
@@ -249,6 +258,7 @@ def format_aggregated_token_usage_table(
         rows.append(("Models", ", ".join(models)))
     if providers and providers != ["-"]:
         rows.append(("Providers", ", ".join(providers)))
+    total_cached = sum(int(e.get("cachedTokens") or 0) for e in entries)
     rows.extend(
         [
             ("Input Tokens (total)", _fmt_int(total_input)),
@@ -257,6 +267,16 @@ def format_aggregated_token_usage_table(
             ("LLM Calls", _fmt_int(len(entries))),
         ]
     )
+    # Prompt cache — cached input is a SUBSET of Input Tokens, billed ~80-90% cheaper.
+    if total_input > 0:
+        hit_pct = (total_cached / total_input * 100.0) if total_input else 0.0
+        rows.append(
+            ("Cached Input (cache hit)",
+             f"{_fmt_int(total_cached)}  ({hit_pct:.0f}% of input)" if total_cached
+             else "0  (cache MISS)")
+        )
+        if total_cached:
+            rows.append(("Billed at full price", _fmt_int(total_input - total_cached)))
     if answer_length is not None:
         rows.append(("Answer Length", _fmt_int(answer_length)))
     if retrieved_chunks is not None:
