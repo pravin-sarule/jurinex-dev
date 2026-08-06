@@ -450,8 +450,11 @@ class Settings(BaseSettings):
         default=500,
         validation_alias=AliasChoices("KIMI_THINKING_BUDGET_TOKENS"),
     )
-    # Optional coarse control: "low" | "high" | "max" (kimi-k3 advertises these).
-    # Blank = don't send the field at all.
+    # Coarse reasoning control: "low" | "high" | "max". This is the lever that ACTUALLY
+    # reduces reasoning cost on models that cannot switch thinking off (measured on
+    # kimi-k3: 1,427 reasoning tokens at the "max" default vs 14 at "low").
+    # Blank = auto: the adapter sends "low" for K3 / K2.7-Code when
+    # kimi_thinking_enabled is False, and sends nothing at all when it is True.
     kimi_reasoning_effort: str = Field(
         default="",
         validation_alias=AliasChoices("KIMI_REASONING_EFFORT"),
