@@ -347,6 +347,31 @@ fixes `top_p` (0.95), `n` (1) and both penalties (0.0); the adapter never sends 
 If a model unexpectedly rejects `thinking:disabled`, the adapter catches that specific 400 and
 retries with `reasoning_effort:"low"` instead, so a new model id can never hard-fail the chat.
 
+### Prompt caching
+
+Moonshot caches prompts automatically — no parameter, no cache id, no TTL to manage — and bills
+cached input at roughly 80–90% off. The console logs now report it on every Kimi call:
+
+```
+⚡ Kimi cache HIT   kimi-k2.6  cached=1,830/1,830 input tokens (100%)  billed_full=0  saved≈$0.0014
+○ Kimi cache MISS  kimi-k2.6  cached=0/4,070 input tokens (0%)  (cold prefix, or prefix under the 256-token minimum)
+```
+
+The `Cached Input (cache hit)` row also appears in the per-call and final aggregated token tables.
+
+> ⚠️ **Measured caveat — a shared prefix is NOT enough.** Moonshot's docs advise keeping a stable
+> prefix and varying only the tail. Live testing against this account did **not** reproduce that:
+>
+> | Request pattern | Cached |
+> | --- | --- |
+> | Byte-identical request, repeated | **100%** |
+> | Same 1,800-token prefix, different final question | **0%** |
+> | Same ~4,100-token prefix, different final question | **0%** |
+>
+> So in normal chat use — same case documents, a different question each time — **the cache will
+> usually miss**, because only the tail differs. Hits mainly occur on retries or repeated
+> identical requests. Watch the log line rather than assuming a discount.
+
 ### Measured throughput
 
 Live against `api.moonshot.ai`, ~350-word generation, repeated runs. Treat as indicative — the
