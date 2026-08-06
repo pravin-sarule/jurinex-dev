@@ -330,20 +330,42 @@ async def analyze_fresh_case(request: AnalyzeCaseFreshRequest,
 
 
 @app.post("/api/v1/analyze/upload", response_model=AnalyzeResponse)
-async def analyze_upload(http_request: Request, file: UploadFile = File(...),
+async def analyze_upload(http_request: Request,
+                         files: list[UploadFile] = File(default=[]),
+                         file: UploadFile | None = File(default=None),
                          text: str = Form(default=""),
-                         mode: str = Form(default="issues")) -> AnalyzeResponse:
-    data = await file.read()
-    pages = await asyncio.to_thread(parse_document_pages, data, file.filename or "")
-    doc_text = "\n\n".join(p.text for p in pages if p.text.strip())
-    parts = [p for p in (doc_text, text.strip()) if p]
+                         mode: str = Form(default="issues"),
+                         title: str = Form(default="")) -> AnalyzeResponse:
+    """One or more uploaded documents analysed together as a single matter.
+    `files` is the multi-upload field; the legacy single `file` field still
+    works. Every page keeps its own filename so issue source references
+    remain per-document ('file, page N'). `title` names the research in
+    history; blank falls back to the first filename."""
+    uploads = [u for u in [*(files or []), file] if u is not None]
+    if not uploads:
+        raise HTTPException(status_code=400, detail="Upload at least one document")
+    pages = []
+    doc_parts: list[str] = []
+    for upload in uploads:
+        data = await upload.read()
+        file_pages = await asyncio.to_thread(parse_document_pages, data, upload.filename or "")
+        pages.extend(file_pages)
+        doc_text = "\n\n".join(p.text for p in file_pages if p.text.strip())
+        if doc_text:
+            # Header marks document boundaries for the extractor when the
+            # matter spans several uploads; a single file stays untouched.
+            doc_parts.append(f"[DOCUMENT: {upload.filename or 'document'}]\n{doc_text}"
+                             if len(uploads) > 1 else doc_text)
+    parts = [p for p in ("\n\n---\n\n".join(doc_parts), text.strip()) if p]
     if not parts:
         raise HTTPException(status_code=400, detail="Uploaded file produced no readable text")
     mode = mode if mode in ("issues", "grounds", "combined") else "issues"
     session_id, context, issues, grounds_meta = await analyze_case(
         "\n\n---\n\n".join(parts), pages=pages, mode=mode)
+    stem = (uploads[0].filename or "").rsplit(".", 1)[0] or None
+    fallback = f"{stem} (+{len(uploads) - 1} more)" if stem and len(uploads) > 1 else stem
     _tag_session(session_id, http_request.headers.get("x-user-id"),
-                 (file.filename or "").rsplit(".", 1)[0] or None)
+                 title.strip()[:200] or fallback)
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
         needsClarification=context.needs_clarification,

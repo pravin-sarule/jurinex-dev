@@ -81,12 +81,18 @@ export const judgementApi = {
     return postJson('/api/v1/analyze/case/fresh', { caseId, objective });
   },
 
-  /** Phase 1 (upload) — POST /api/v1/analyze/upload with a PDF/DOCX + optional note. */
-  async analyzeUpload(file, text = '', mode = 'issues') {
+  /**
+   * Phase 1 (upload) — POST /api/v1/analyze/upload with one or more
+   * PDF/DOCX/TXT documents + an optional description. All documents are
+   * analysed together as a single matter.
+   */
+  async analyzeUpload(files, text = '', mode = 'issues', title = '') {
+    const list = Array.isArray(files) ? files : [files];
     const form = new FormData();
-    form.append('file', file);
+    list.forEach((f) => form.append('files', f));
     if (text) form.append('text', text);
     form.append('mode', mode);
+    if (title) form.append('title', title);
     const response = await fetch(`${JUDGEMENT_SERVICE_URL}/api/v1/analyze/upload`, {
       method: 'POST',
       headers: { ...getAuthHeader() },

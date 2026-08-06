@@ -274,7 +274,18 @@ export default function CitationResearchPanel() {
   // (typed in the textarea, required) drives PROPOSED grounds via the
   // dedicated /analyze/case/fresh route.
   const [freshMode, setFreshMode] = useState(false);
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
+  const [uploadTitle, setUploadTitle] = useState('');
+  const addFiles = (picked) => {
+    const incoming = Array.from(picked || []);
+    if (!incoming.length) return;
+    setFiles((prev) => {
+      // Dedupe on name+size so re-picking the same document is a no-op.
+      const seen = new Set(prev.map((f) => `${f.name}|${f.size}`));
+      return [...prev, ...incoming.filter((f) => !seen.has(`${f.name}|${f.size}`))];
+    });
+  };
+  const removeFile = (idx) => setFiles((prev) => prev.filter((_, i) => i !== idx));
   const [analyzing, setAnalyzing] = useState(false);
   const [searching, setSearching] = useState(false);
   const [analysis, setAnalysis] = useState(null);
@@ -405,6 +416,13 @@ export default function CitationResearchPanel() {
   const caseHistory = useMemo(
     () => history.filter((h) => h.caseId && String(h.caseId) === String(selectedCaseId)),
     [history, selectedCaseId],
+  );
+
+  // Each tab shows only its own research: case-based sessions carry a
+  // caseId; uploaded-document sessions don't.
+  const tabHistory = useMemo(
+    () => history.filter((h) => (inputMode === 'case' ? !!h.caseId : !h.caseId)),
+    [history, inputMode],
   );
 
   const [deletingId, setDeletingId] = useState(null);
@@ -572,8 +590,8 @@ export default function CitationResearchPanel() {
       toast.info('Describe what the client wants — the objective drives a fresh matter\'s grounds');
       return;
     }
-    if (inputMode === 'text' && !file) {
-      toast.info('Upload a case document first — it is analysed directly');
+    if (inputMode === 'text' && files.length === 0) {
+      toast.info('Upload at least one case document first — they are analysed directly');
       return;
     }
     setAnalyzing(true);
@@ -584,7 +602,7 @@ export default function CitationResearchPanel() {
           : await judgementApi.analyzeCase(selectedCaseId, caseText.trim(), researchMode))
         // Upload tab: the document is the case material; the optional
         // description steers which grounds and issues come back.
-        : await judgementApi.analyzeUpload(file, caseText.trim(), researchMode);
+        : await judgementApi.analyzeUpload(files, caseText.trim(), researchMode, uploadTitle.trim());
       setAnalysis(data);
       setSelectedIds(new Set((data.suggestedIssues || []).map((i) => i.id)));
       setCustomIssues([]);
@@ -688,7 +706,8 @@ export default function CitationResearchPanel() {
     setSelectedIds(new Set());
     setCustomIssues([]);
     setCaseText('');
-    setFile(null);
+    setFiles([]);
+    setUploadTitle('');
     setSelectedCaseId(null);
     try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* non-fatal */ }
   };
@@ -790,33 +809,59 @@ export default function CitationResearchPanel() {
               {inputMode === 'text' && (
                 <div className="mt-5">
                   <label className={`flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-9 cursor-pointer text-center transition-colors ${
-                    file ? 'border-[#21C1B6] bg-[#F0FDFA]' : 'border-[#CBD5E1] bg-white hover:border-[#21C1B6]/60 hover:bg-[#F0FDFA]/40'
+                    files.length ? 'border-[#21C1B6] bg-[#F0FDFA]' : 'border-[#CBD5E1] bg-white hover:border-[#21C1B6]/60 hover:bg-[#F0FDFA]/40'
                   }`}>
-                    <span className={`h-11 w-11 rounded-xl flex items-center justify-center ${file ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
-                      <ArrowUpTrayIcon className={`h-5 w-5 ${file ? 'text-[#21C1B6]' : 'text-[#94A3B8]'}`} />
+                    <span className={`h-11 w-11 rounded-xl flex items-center justify-center ${files.length ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
+                      <ArrowUpTrayIcon className={`h-5 w-5 ${files.length ? 'text-[#21C1B6]' : 'text-[#94A3B8]'}`} />
                     </span>
                     <span className="text-sm font-semibold text-[#0F172A]">
-                      {file ? file.name : 'Upload the petition, FIR, plaint or judgment'}
+                      {files.length
+                        ? `${files.length} document${files.length === 1 ? '' : 's'} ready`
+                        : 'Upload the petition, FIR, plaint or judgment'}
                     </span>
                     <span className="text-[12px] text-[#64748B]">
-                      {file
-                        ? 'Document ready — it will be analysed directly. Click to replace it.'
-                        : 'PDF, DOCX or TXT — the document is analysed directly and its grounds and legal issues are extracted.'}
+                      {files.length
+                        ? 'All documents are analysed together as one matter. Click to add more.'
+                        : 'PDF, DOCX or TXT — select one or several; they are analysed directly and their grounds and legal issues are extracted.'}
                     </span>
                     <input
                       type="file"
                       accept=".pdf,.docx,.txt"
+                      multiple
                       className="hidden"
-                      onChange={(e) => setFile(e.target.files?.[0] || null)}
+                      onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }}
                     />
                   </label>
-                  {file && (
-                    <div className="mt-2 text-right">
-                      <button onClick={() => setFile(null)} className="text-xs text-[#94A3B8] hover:text-[#DC2626]">
-                        Remove file
-                      </button>
+                  {files.length > 0 && (
+                    <div className="mt-3 space-y-1.5">
+                      {files.map((f, idx) => (
+                        <div key={`${f.name}|${f.size}`} className="flex items-center gap-2.5 rounded-lg border border-[#E2E8F0] bg-white px-3 py-2">
+                          <DocumentTextIcon className="h-4 w-4 text-[#21C1B6] shrink-0" />
+                          <span className="min-w-0 flex-1 truncate text-[13px] text-[#0F172A]">{f.name}</span>
+                          <span className="text-[11px] text-[#94A3B8] shrink-0">{(f.size / 1024).toFixed(0)} KB</span>
+                          <button
+                            type="button"
+                            onClick={() => removeFile(idx)}
+                            title="Remove this document"
+                            className="shrink-0 h-6 w-6 rounded-md flex items-center justify-center text-[#94A3B8] hover:text-[#DC2626] hover:bg-[#FEF2F2]"
+                          >
+                            <XMarkIcon className="h-4 w-4" />
+                          </button>
+                        </div>
+                      ))}
                     </div>
                   )}
+                  {/* Name shown in this tab's Recent research; blank = first file's name. */}
+                  <input
+                    type="text"
+                    value={uploadTitle}
+                    onChange={(e) => setUploadTitle(e.target.value)}
+                    maxLength={200}
+                    placeholder={files.length
+                      ? `Research name (optional) — e.g. "${files[0].name.replace(/\.[^.]+$/, '')}"`
+                      : 'Research name (optional) — how it appears under Recent research'}
+                    className="mt-3 w-full bg-white border border-[#E2E8F0] text-[#0F172A] text-sm rounded-xl px-4 py-2.5 outline-none focus:border-[#21C1B6]/50 focus:ring-2 focus:ring-[#21C1B6]/10 shadow-sm placeholder:text-[#94A3B8]"
+                  />
                 </div>
               )}
 
@@ -834,11 +879,11 @@ export default function CitationResearchPanel() {
 
               {/* One research method: pleaded grounds + spotted issues are
                   extracted together in a single combined pass. */}
-              <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="mt-4">
                 <button
                   onClick={runAnalyze}
                   disabled={analyzing}
-                  className="ml-auto flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-semibold bg-[#21C1B6] hover:bg-[#1AA49B] text-white shadow-sm disabled:opacity-60 transition-colors"
+                  className="w-full flex items-center justify-center gap-2 px-6 py-2.5 rounded-lg text-sm font-semibold bg-[#21C1B6] hover:bg-[#1AA49B] text-white shadow-sm disabled:opacity-60 transition-colors"
                 >
                   {analyzing ? <ArrowPathIcon className="h-4 w-4 animate-spin" /> : <SparklesIcon className="h-4 w-4" />}
                   {analyzing ? 'Analysing…' : 'Analyse case'}
@@ -846,20 +891,27 @@ export default function CitationResearchPanel() {
               </div>
             </div>
 
-            {/* Right column: recent research — every past search, stored in the DB */}
+            {/* Right column: recent research — scoped to the active tab
+                (case-based research on "My cases", uploads on "Upload document") */}
             <aside className="lg:sticky lg:top-6 min-w-0">
               <h2 className="text-sm font-bold text-[#0F172A]">Recent research</h2>
-              <p className="text-xs text-[#64748B] mt-1">Reopen a past search with all its citations and decisions.</p>
+              <p className="text-xs text-[#64748B] mt-1">
+                {inputMode === 'case'
+                  ? 'Past research on your cases — reopen one with all its citations and decisions.'
+                  : 'Past research on uploaded documents — reopen one with all its citations and decisions.'}
+              </p>
               {historyLoading && (
                 <div className="mt-3 text-xs text-[#94A3B8]">Loading history…</div>
               )}
-              {!historyLoading && history.length === 0 && (
+              {!historyLoading && tabHistory.length === 0 && (
                 <div className="mt-3 rounded-xl border border-dashed border-[#CBD5E1] bg-white px-4 py-6 text-center text-xs text-[#94A3B8]">
-                  No past research yet — your searches will appear here.
+                  {inputMode === 'case'
+                    ? 'No research on your cases yet — it will appear here.'
+                    : 'No research on uploaded documents yet — it will appear here.'}
                 </div>
               )}
               <div className="mt-3 space-y-2 lg:max-h-[calc(100vh-13rem)] lg:overflow-y-auto lg:pr-1">
-                {history.map((entry) => <HistoryRow key={entry.sessionId} entry={entry} />)}
+                {tabHistory.map((entry) => <HistoryRow key={entry.sessionId} entry={entry} />)}
               </div>
             </aside>
           </div>
