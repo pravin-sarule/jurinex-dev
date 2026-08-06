@@ -1270,6 +1270,10 @@ const ChatInterface = () => {
   const streamThinkingRef = useRef('');
   const streamUpdateTimeoutRef = useRef(null);
   const streamReaderRef = useRef(null);
+  // Which chat session the in-flight stream belongs to. Lets us tell "user re-opened the
+  // chat that is currently answering" (keep showing live tokens) apart from "user moved
+  // to a different chat" (detach, so the answer stops bleeding into the wrong session).
+  const activeStreamSessionIdRef = useRef(null);
   // Monotonic token guarding fetchChatHistory against stale async resolutions. Each fetch
   // captures the current value before awaiting; if the token has since moved on (a newer
   // fetch started, or handleNewChat/handleSelectChatSession bumped it), the resolved fetch
@@ -2115,6 +2119,7 @@ const ChatInterface = () => {
       streamReaderRef.current = null;
     }
     activeStreamIsDeepRef.current = false;
+    activeStreamSessionIdRef.current = null;
     streamBufferRef.current = '';
     setIsAnimatingResponse(false);
     setAnimatedResponseContent('');
@@ -2212,6 +2217,7 @@ const ChatInterface = () => {
       // Same reasoning as the main chat path: claim the session id up-front so an
       // analysis abandoned mid-stream is still reachable in history afterwards.
       const sessionForRequest = currentSessionId || mintSessionId();
+      activeStreamSessionIdRef.current = sessionForRequest;
       if (!currentSessionId) {
         setSelectedChatSessionId(sessionForRequest);
         setNewChatMode(false);
@@ -2710,6 +2716,7 @@ const ChatInterface = () => {
         // immediately, so navigating away mid-answer still leaves a session to come
         // back to (the server persists under this same id even if the client leaves).
         const sessionForRequest = selectedChatSessionId || mintSessionId();
+        activeStreamSessionIdRef.current = sessionForRequest;
         if (!selectedChatSessionId) {
           setSelectedChatSessionId(sessionForRequest);
           setNewChatMode(false);
