@@ -1,7 +1,11 @@
 """
-Gemini and Claude model ids as defined in Document_DB.public.llm_models.
+Gemini / Gemma / Claude / DeepSeek / Kimi model ids as defined in Document_DB.public.llm_models.
 
 Used so summarization_chat_config.llm_model matches the same canonical names as the dashboard.
+
+NOTE: a model family missing from the LIKE filters below is silently rewritten to the
+fallback (Gemini) by resolve_chat_llm_model — so any newly supported provider must be
+added here as well as to _detect_provider, or the admin's selection never takes effect.
 """
 from __future__ import annotations
 
@@ -31,6 +35,8 @@ _QUERIES = (
         OR LOWER(TRIM(name::text)) LIKE 'gemma%'
         OR LOWER(TRIM(name::text)) LIKE 'claude%'
         OR LOWER(TRIM(name::text)) LIKE 'deepseek%'
+        OR LOWER(TRIM(name::text)) LIKE 'kimi%'
+        OR LOWER(TRIM(name::text)) LIKE 'moonshot%'
       )
     ORDER BY id NULLS LAST
     """,
@@ -43,6 +49,8 @@ _QUERIES = (
         OR LOWER(TRIM(name::text)) LIKE 'gemma%'
         OR LOWER(TRIM(name::text)) LIKE 'claude%'
         OR LOWER(TRIM(name::text)) LIKE 'deepseek%'
+        OR LOWER(TRIM(name::text)) LIKE 'kimi%'
+        OR LOWER(TRIM(name::text)) LIKE 'moonshot%'
       )
     ORDER BY id NULLS LAST
     """,
@@ -159,6 +167,8 @@ def resolve_chat_llm_model(raw: Any, fallback: str) -> str:
         or tail.startswith("gemma")
         or tail.startswith("claude")
         or tail.startswith("deepseek")
+        or tail.startswith("kimi")
+        or tail.startswith("moonshot")
     ):
         return candidate
     return fb if fb else candidate

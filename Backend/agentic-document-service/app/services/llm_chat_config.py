@@ -308,7 +308,7 @@ def merge_folder_chat_request_llm_overrides(base: dict[str, Any], request: Any) 
     if request is None:
         return out
     requested_model = str(getattr(request, "llm_name", None) or "").strip()
-    if requested_model and requested_model.lower() not in {"gemini", "claude", "deepseek", "default"}:
+    if requested_model and requested_model.lower() not in {"gemini", "claude", "deepseek", "kimi", "default"}:
         out["llm_model"] = requested_model
         out["summarization_model"] = requested_model
     mot = getattr(request, "max_output_tokens", None)
