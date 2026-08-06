@@ -166,6 +166,10 @@ class ExtractedGround(BaseModel):
     source_reference: str = ""  # e.g. "Page 4, Para 12" from the document itself
     confidence: Literal["high", "medium", "low"] = "medium"
     perspective: str = "petitioner"
+    # Combined mode: whether this item was actually PLEADED in the filing
+    # (ground_label verbatim) or SPOTTED by the system on top of the
+    # pleadings. Pure grounds mode leaves the default.
+    origin: Literal["pleaded", "spotted"] = "pleaded"
 
 
 class GroundsExtractResult(BaseModel):
@@ -344,6 +348,10 @@ class IssueResults(BaseModel):
     id: int
     issue: str
     title: str | None = None  # standardized ground name for compact display
+    # Verbatim pleaded-ground label ("Ground A") when this research unit is
+    # a pleaded ground — the results UI groups grounds and issues into
+    # separate sidebar sections on this.
+    groundLabel: str | None = None
     keywords: KeywordSet | None = None
     results: list[ResultItem] = Field(default_factory=list)
 
@@ -368,9 +376,12 @@ class CaseInput(BaseModel):
 
 
 # How suggested research items are derived from the case material:
-#   issues  — issue spotter (default, unchanged behaviour)
-#   grounds — grounds extractor (the grounds pleaded in the filing itself)
-ResearchMode = Literal["issues", "grounds"]
+#   combined — ONE pass extracting the grounds pleaded in the filing AND
+#              spotting every additional issue the material supports,
+#              merged into a single deduplicated list (frontend default)
+#   issues  — issue spotter only (legacy)
+#   grounds — grounds extractor only (legacy)
+ResearchMode = Literal["issues", "grounds", "combined"]
 
 
 class SearchRequest(BaseModel):
@@ -421,9 +432,14 @@ class AnalyzeCaseRequest(BaseModel):
 class RunSearchRequest(BaseModel):
     """Phase 2: run retrieval for chosen issues. issueIds pick from the
     session's suggested issues (omit → all); customIssues are the user's
-    own questions, searched separately with their own ids."""
+    own questions, searched separately with their own ids.
+    queryOverrides: issue id (as string) → the FINAL anchor-query list for
+    that issue — the system queries the user kept checked plus any queries
+    they typed themselves, used exactly like generated anchors. Issues
+    absent from the map run with their full stored query set."""
     issueIds: list[int] | None = None
     customIssues: list[str] = Field(default_factory=list)
+    queryOverrides: dict[str, list[str]] = Field(default_factory=dict)
 
 
 # ─── Per-citation report (VIEW → Report tab) ────────────────────────────────
@@ -437,6 +453,22 @@ class CitationAnalysis(BaseModel):
     key_facts: list[str] = Field(default_factory=list)
     legal_analysis: list[str] = Field(default_factory=list)
     ratio_decidendi: str = ""
+
+
+class CaseSummaryLine(BaseModel):
+    """One numbered line of the 8-line structured case note."""
+    label: str = ""
+    text: str = ""
+
+
+class JudgmentCaseSummary(BaseModel):
+    """Advocate-grade case summary of ONE judgment (user-locked format):
+    a single-paragraph 95–105-word summary + an exactly-8-line structured
+    note. Grounded on the fetched judgment text ONLY; details the text does
+    not state must read "not stated in the judgment" — never guessed."""
+    summary100: str = ""
+    note: list[CaseSummaryLine] = Field(default_factory=list)
+    verify_line: str = ""
 
 
 class CitationReport(BaseModel):
@@ -469,6 +501,9 @@ class CitationReport(BaseModel):
     # sources:[{title,uri}]}. Heuristic — always verify officially.
     goodLawCheck: dict[str, Any] = Field(default_factory=dict)
     analysis: CitationAnalysis = Field(default_factory=CitationAnalysis)
+    # Advocate-grade judgment summary (100-word paragraph + 8-line note),
+    # generated from the fetched judgment text and cached in the session.
+    caseSummary: JudgmentCaseSummary = Field(default_factory=JudgmentCaseSummary)
     documentText: str = ""             # Document tab
     generatedOn: str = ""
 

@@ -1,0 +1,90 @@
+/* Citation report reading typography — law-report editorial styling.
+   Crimson Text is the same reading serif used on the chat surface, so the
+   report matches the rest of JuriNex's reading experience. The site-wide
+   font picker (fontPrefs.js !important override) intentionally still wins
+   when the user selects a custom font. */
+@import url('https://fonts.googleapis.com/css2?family=Crimson+Text:ital,wght@0,400;0,600;0,700;1,400;1,600;1,700&display=swap');
+
+/* Every serif surface inside the report upgrades from the generic Tailwind
+   serif stack to Crimson Text. Crimson runs small, so serif surfaces get a
+   size floor via the specific classes below rather than a blanket bump. */
+.jnx-report .font-serif {
+  font-family: 'Crimson Text', Georgia, 'Times New Roman', serif;
+  letter-spacing: 0.004em;
+  font-variant-numeric: oldstyle-nums;
+}
+
+.jnx-report {
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+.jnx-report ::selection {
+  background: rgba(33, 193, 182, 0.18);
+}
+
+/* Case title — reporter masthead */
+.jnx-report-title {
+  font-size: 26px;
+  line-height: 1.3;
+  font-weight: 700;
+  text-wrap: balance;
+}
+
+/* 100-word headnote paragraph: comfortable measure, generous leading,
+   justified with hyphenation, classic drop cap on the first letter. */
+.jnx-headnote {
+  font-size: 17px;
+  line-height: 1.85;
+  max-width: 78ch;
+  margin-inline: auto;
+  text-align: justify;
+  hyphens: auto;
+  color: #1e293b;
+}
+
+.jnx-headnote::first-letter {
+  float: left;
+  font-size: 3.05em;
+  line-height: 0.82;
+  padding-right: 0.1em;
+  padding-top: 0.06em;
+  font-weight: 600;
+  color: #0d9488;
+}
+
+/* 8-line structured note — value column reads as book text */
+.jnx-note-text {
+  font-family: 'Crimson Text', Georgia, 'Times New Roman', serif;
+  font-size: 15.5px;
+  line-height: 1.7;
+  color: #1e293b;
+  font-variant-numeric: oldstyle-nums;
+}
+
+/* Pinpoint excerpt — set like a quoted passage */
+.jnx-excerpt {
+  font-size: 16px;
+  line-height: 1.8;
+}
+
+/* Ratio decidendi — the report's most important sentence */
+.jnx-ratio {
+  font-size: 16.5px;
+  line-height: 1.75;
+}
+
+/* Full judgment text on the Document tab */
+.jnx-doc-text {
+  font-family: 'Crimson Text', Georgia, 'Times New Roman', serif;
+  font-size: 16px;
+  line-height: 1.85;
+  font-variant-numeric: oldstyle-nums;
+}
+
+/* Cases-cited / cited-by list entries: Crimson runs small, so the compact
+   text-xs serif rows get a readable floor without breaking the layout. */
+.jnx-report .text-xs.font-serif {
+  font-size: 13.5px;
+  line-height: 1.55;
+}

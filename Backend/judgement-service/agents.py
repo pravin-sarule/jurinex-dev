@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from google.adk.agents import LlmAgent, SequentialAgent
@@ -46,6 +47,7 @@ from schemas import (
     IssueList,
     IssueResults,
     IssueSpotResult,
+    JudgmentCaseSummary,
     JudgmentVerification,
     KeywordSet,
     ResultItem,
@@ -193,8 +195,16 @@ def build_issue_split_agent() -> LlmAgent:
             "landowner') — no party or person names, no place names, no property "
             "identifiers (Gat/Survey/CTS/plot numbers), no case or docket numbers, "
             "no dates. Never add a provision the summary does not support. Order "
-            "issues by importance to the client's relief. Number ids from 1. Return "
-            "strict JSON matching the schema."
+            "issues by importance to the client's relief. Number ids from 1.\n\n"
+            "For EACH issue also fill: title (a standardized ground name a "
+            "practitioner would recognise, in ANY field of law), doctrine (short "
+            "doctrinal label), sub_doctrine (the SPECIFIC trigger/test within "
+            "the doctrine as ONE short snake_case label — e.g. civil_colour, "
+            "settlement, triable_issue, balance_of_convenience, "
+            "repealed_statute_fir — coin whatever fits the field), "
+            "statutory_hook (the governing provision), and perspective "
+            "('petitioner'/'respondent'/'neutral'). Return strict JSON matching "
+            "the schema."
         ),
         generate_content_config=_gen_config(0.25),
         output_schema=IssueList,
@@ -315,14 +325,21 @@ JUDGMENT_VERIFIER_SYSTEM = (
             "(limitation, sanction, express bar, jurisdiction), "
             "vicarious_liability (director/partner impleaded without specific "
             "role), delay_laches (inordinate unexplained delay in lodging), "
-            "second_fir (multiplicity on the same cause). If trigger_condition ≠ "
+            "second_fir (multiplicity on the same cause). The quashing list is "
+            "only the most common EXAMPLE — run this check in EVERY field of "
+            "law: leave to defend (triable issue vs sham defence), interim "
+            "injunction (prima facie case vs balance of convenience vs "
+            "irreparable injury), arbitration challenges (patent illegality vs "
+            "public policy), service, tax and land matters alike; identify THIS "
+            "judgment's own trigger whatever the domain. If trigger_condition ≠ "
             "the issue's sub-doctrine, set trigger_match=false and REJECT with "
             "reject_reason naming BOTH triggers — even where the statute, stage, "
-            "field of law and the words 'abuse of process' all match. The classic "
-            "trap this kills: a judgment on quashing where the sole ground was a "
-            "COMPROMISE between accused and complainant is a 'settlement' "
-            "judgment — it is NOT authority on civil_colour, however many times "
-            "it says 'abuse of process' or reproduces civil-flavour language.\n"
+            "field of law and shared phrases like 'abuse of process' all match. "
+            "The classic trap this kills: a judgment on quashing where the sole "
+            "ground was a COMPROMISE between accused and complainant is a "
+            "'settlement' judgment — it is NOT authority on civil_colour, "
+            "however many times it says 'abuse of process' or reproduces "
+            "civil-flavour language.\n"
             "4. PARASITIC AUTHORITY (KILL). Determine whether this judgment "
             "supports the issue through its OWN holding, or only through a "
             "passage it QUOTES from an earlier judgment. If the on-point language "
@@ -440,6 +457,8 @@ async def verify_judgments(issue: Issue, context: CaseContext,
     issue_block = (
         f"ISSUE: {issue.issue}\n"
         f"DOCTRINE: {issue.doctrine or 'not specified'}\n"
+        f"SUB-DOCTRINE (the trigger the judgment must share): "
+        f"{issue.sub_doctrine or 'not specified — infer it from the issue text'}\n"
         f"STATUTORY HOOK: {issue.statutory_hook or 'not specified'}\n"
         f"PROCEDURAL STAGE: {context.procedural_stage or 'not specified'}\n"
         f"CLIENT'S FORUM: {context.forum or 'not specified'}\n"
@@ -516,10 +535,13 @@ def build_citation_analysis_agent() -> LlmAgent:
             "judgment against ONE legal issue from their case.\n\n"
             "Produce:\n"
             "- why_this_helps: 1–2 sentences on why this judgment addresses the issue.\n"
-            "- key_legal_issues: the legal questions the JUDGMENT itself dealt with.\n"
-            "- key_facts: the judgment's key facts (short bullets).\n"
-            "- legal_analysis: what the court held/reasoned, incl. how it applied "
-            "earlier authorities, as short bullets.\n"
+            "- key_legal_issues: the legal questions the JUDGMENT itself dealt with "
+            "(at most 4).\n"
+            "- key_facts: the judgment's key facts (at most 5 short bullets).\n"
+            "- legal_analysis: AT MOST 5 short bullets — only the holdings and "
+            "reasoning that matter for the lawyer's issue, each one sentence. Do NOT "
+            "narrate the judgment step by step or repeat the facts; merge related "
+            "points into one bullet.\n"
             "- ratio_decidendi: the binding principle of the judgment, 1–3 sentences.\n\n"
             "GROUNDING RULES (absolute):\n"
             "1. Use ONLY the judgment text provided by the user. Never add case names, "
@@ -547,6 +569,94 @@ async def generate_citation_analysis(issue_text: str, case_summary: str,
     )
     out = await run_agent_once(build_citation_analysis_agent(), message, ["citation_analysis"])
     return CitationAnalysis.model_validate(out.get("citation_analysis") or {})
+
+
+# ─── Advocate-grade judgment summary (100-word paragraph + 8-line note) ──────
+# User-locked prompt: the wording of the task, order, line labels and rules is
+# the user's specification verbatim — only the output channel is adapted from
+# prose to the JudgmentCaseSummary JSON schema. Do not "improve" the rules.
+
+CASE_SUMMARY_SYSTEM = (
+    "You are a legal research assistant preparing case summaries for practising "
+    "advocates in India.\n\n"
+    "INPUT: the full text of ONE court judgment, supplied in the user message.\n\n"
+    "TASK: produce TWO outputs from that judgment, returned as strict JSON "
+    "matching the schema.\n\n"
+    "summary100 — 100-WORD SUMMARY\n"
+    "One single paragraph, 95–105 words, no headings, no bullet points.\n"
+    "Follow this order strictly:\n"
+    "(a) case name, citation, court, bench, date of judgment;\n"
+    "(b) facts in one sentence — only the facts that gave rise to the legal question;\n"
+    "(c) what the court HELD and the reason for it (the ratio, not just the outcome);\n"
+    "(d) the operative order / what survives of the case.\n\n"
+    "note — 8-LINE STRUCTURED NOTE\n"
+    "Exactly 8 entries, in this order, each an object {label, text}:\n"
+    "1. label \"Case\" — name, citation, court, bench strength, date, case number "
+    "and nature of proceeding.\n"
+    "2. label \"Provisions\" — exact sections, articles or rules the case turns on.\n"
+    "3. label \"Facts\" — brief.\n"
+    "4. label \"Issues\" — framed as questions.\n"
+    "5. label \"Held\" — the ratio decidendi and reasoning.\n"
+    "6. label \"Key paragraphs & authorities\" — paragraph numbers where the ratio "
+    "appears; precedents relied on or distinguished.\n"
+    "7. label \"Order & status\" — operative directions; whether appealed, stayed, "
+    "followed, distinguished or overruled.\n"
+    "8. label \"Relevance\" — how it helps or hurts the matter at hand, and whether "
+    "it is binding or merely persuasive.\n\n"
+    "verify_line — exactly: VERIFY: current status of this judgment as on "
+    "<TODAY'S DATE from the user message> before relying on it.\n\n"
+    "RULES\n"
+    "- Use ONLY what is in the judgment supplied. Do not add facts, paragraph "
+    "numbers, citations or case names from memory.\n"
+    "- If a detail is not in the text, write \"not stated in the judgment\". Never "
+    "guess a citation or a paragraph number.\n"
+    "- Report the ratio in your own words; quote only where the exact wording "
+    "matters, and keep any quotation under 15 words with the paragraph number.\n"
+    "- Distinguish clearly between ratio (binding) and obiter (persuasive) if the "
+    "difference is apparent.\n"
+    "- Where there are separate concurring or dissenting opinions, say so and "
+    "summarise the majority view as the holding.\n"
+    "- Plain professional English. No adjectives, no praise of the court, no advocacy.\n"
+    "- If the user message includes a \"Context:\" line describing the client's "
+    "matter, tailor line 8 (Relevance) to that matter. If there is no Context "
+    "line, write line 8 as the general legal proposition the case establishes.\n"
+    "Return strict JSON matching the schema."
+)
+
+
+def build_case_summary_agent() -> LlmAgent:
+    return LlmAgent(
+        name="case_summary",
+        model=get_settings().gemini_model,
+        description="Advocate-grade 100-word summary + 8-line structured note for one judgment.",
+        instruction=CASE_SUMMARY_SYSTEM,
+        generate_content_config=_gen_config(0.1),
+        output_schema=JudgmentCaseSummary,
+        output_key="case_summary",
+        disallow_transfer_to_parent=True,
+        disallow_transfer_to_peers=True,
+    )
+
+
+async def generate_case_summary(title: str, doc_text: str, matter_context: str,
+                                today: str) -> JudgmentCaseSummary:
+    """Summarise ONE fetched judgment in the user-locked report format.
+
+    The judgment's citation, date and operative order usually live at the very
+    start and very end of the text, so long judgments keep head AND tail intact
+    (same budget shape as the verifier) rather than truncating the ending off.
+    """
+    text = doc_text or ""
+    if len(text) > 30000:
+        text = (text[:22000] + "\n[... middle of judgment omitted ...]\n" + text[-8000:])
+    message = (
+        f"TODAY'S DATE: {today}\n\n"
+        + (f"Context: {matter_context[:1200]}\n\n" if matter_context.strip() else "")
+        + f"JUDGMENT TITLE: {title}\n\n"
+        + f"JUDGMENT TEXT:\n{text}"
+    )
+    out = await run_agent_once(build_case_summary_agent(), message, ["case_summary"])
+    return JudgmentCaseSummary.model_validate(out.get("case_summary") or {})
 
 
 # ─── Runner helper ────────────────────────────────────────────────────────────
@@ -595,6 +705,7 @@ async def spot_issues(raw_text: str, context: CaseContext) -> list[Issue]:
                       title=s.title.strip() or None,
                       explanation=s.explanation.strip() or None,
                       doctrine=s.doctrine.strip() or None,
+                      sub_doctrine=s.sub_doctrine.strip() or None,
                       statutory_hook=(s.statutory_hook or "").strip() or None,
                       perspective=s.perspective.strip() or None)
                 for idx, s in enumerate(result.issues[:MAX_ISSUES]) if s.issue.strip()
@@ -636,6 +747,7 @@ async def enrich_custom_issue(issue: Issue, context: CaseContext) -> Issue:
         title=result.title.strip() or None,
         explanation=result.explanation.strip() or None,
         doctrine=result.doctrine.strip() or None,
+        sub_doctrine=result.sub_doctrine.strip() or None,
         statutory_hook=(result.statutory_hook or "").strip() or None,
         perspective=result.perspective.strip() or None,
     )
@@ -659,13 +771,16 @@ def build_grounds_extract_agent() -> LlmAgent:
     )
 
 
-def _grounds_to_issues(result: GroundsExtractResult) -> list[Issue]:
+def _grounds_to_issues(result: GroundsExtractResult,
+                       cap: int = MAX_GROUNDS) -> list[Issue]:
     """Map each extracted ground onto the Issue contract so the ENTIRE
     downstream pipeline (query generation, IK fan-out, per-judgment
     verification with real scores, guardian, reports) runs unchanged.
-    ids are assigned in code; `source` stays deterministic-only."""
+    ids are assigned in code; `source` stays deterministic-only.
+    Spotted items (combined mode) have empty ground_label → None, so the
+    ground-anchored query/verifier extras apply only to PLEADED items."""
     issues: list[Issue] = []
-    for idx, g in enumerate(result.grounds[:MAX_GROUNDS]):
+    for idx, g in enumerate(result.grounds[:cap]):
         question = g.research_question.strip() or g.summary.strip()[:300]
         if not question:
             continue
@@ -675,6 +790,7 @@ def _grounds_to_issues(result: GroundsExtractResult) -> list[Issue]:
             title=g.title.strip() or None,
             explanation=g.summary.strip() or None,
             doctrine=g.doctrine.strip() or None,
+            sub_doctrine=g.sub_doctrine.strip() or None,
             statutory_hook=(g.statutory_hook or "").strip() or None,
             perspective=(g.perspective or "petitioner").strip() or None,
             ground_label=g.ground_label.strip() or None,
@@ -740,6 +856,113 @@ async def extract_grounds(raw_text: str, context: CaseContext,
         logger.info("[grounds] %d ground(s) beyond the cap of %d were dropped",
                     dropped, MAX_GROUNDS)
     return issues, meta
+
+
+# ─── Combined mode: full grounds extraction + full issue spotting, merged ───
+
+# Grounds (≤8) and issues (≤12) each run their COMPLETE dedicated pipeline;
+# the merged list only drops true duplicates, so the cap must hold both.
+MAX_COMBINED_ITEMS = 16
+
+
+def _dedup_key(text: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+
+
+# Structural question boilerplate only — deliberately domain-neutral (no
+# criminal/civil/tax vocabulary), so the overlap metric measures the
+# question's actual content in ANY field of law.
+_QUESTION_STOP = frozenset(
+    "whether the a an is are be being been to of in for on at when where "
+    "and or under over it its that this these those with from by not no any "
+    "such can could should would may might will shall".split())
+
+
+def _question_tokens(text: str | None) -> frozenset[str]:
+    return frozenset(w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+                     if len(w) > 2 and w not in _QUESTION_STOP)
+
+
+def _same_question(a: frozenset[str], b: frozenset[str]) -> bool:
+    """Two Whether-questions are the same when 70% of the smaller one's
+    content words appear in the other — catches duplicates even when the
+    degraded (Gemini-fallback) path produced no sub_doctrine labels."""
+    if not a or not b:
+        return False
+    return len(a & b) / min(len(a), len(b)) >= 0.7
+
+
+async def extract_combined(raw_text: str, context: CaseContext,
+                           ) -> tuple[list[Issue], dict[str, Any]]:
+    """Combined mode's stage 1: the grounds extractor AND the exhaustive
+    issue spotter run CONCURRENTLY — each with its full dedicated prompt,
+    so neither job compresses the other (a single two-job prompt was
+    verified to under-spot). Merge: every pleaded ground is kept; a
+    spotted issue is dropped ONLY when a ground already raises the same
+    legal question — same sub-doctrine trigger, or same doctrine +
+    statutory-hook shelf. Grounds first (document order), then the
+    surviving spotted issues; ids renumbered sequentially. A document
+    with no pleaded grounds (or no spottable extras) is fine — combined
+    never blocks on one side being empty."""
+    (grounds, grounds_meta), spotted = await asyncio.gather(
+        extract_grounds(raw_text, context),
+        spot_issues(raw_text, context),
+    )
+
+    ground_triggers = {_dedup_key(g.sub_doctrine) for g in grounds if g.sub_doctrine}
+    ground_shelves = {(_dedup_key(g.doctrine), _dedup_key(g.statutory_hook))
+                     for g in grounds if g.doctrine and g.statutory_hook}
+    ground_questions = [_question_tokens(g.issue) for g in grounds]
+    merged: list[Issue] = list(grounds)
+    for issue in spotted:
+        # Text similarity first — it works even in degraded mode, where the
+        # fallback spotter labels nothing.
+        tokens = _question_tokens(issue.issue)
+        if any(_same_question(tokens, gq) for gq in ground_questions):
+            continue
+        trigger = _dedup_key(issue.sub_doctrine)
+        if trigger:
+            # A sub-doctrine names the SPECIFIC question — a distinct
+            # trigger is a distinct issue even on the same statute (e.g.
+            # delay_laches vs civil_colour, both s.482 quashing).
+            if trigger in ground_triggers:
+                continue
+        elif issue.doctrine and issue.statutory_hook and (
+                _dedup_key(issue.doctrine), _dedup_key(issue.statutory_hook)) in ground_shelves:
+            # No trigger to compare — fall back to the doctrine+hook shelf.
+            continue
+        merged.append(issue)
+
+    if not merged:
+        # Both extractors came back empty — clarification (set by them) stands.
+        context.needs_clarification = True
+        context.clarification_question = context.clarification_question or (
+            "No researchable ground or issue could be identified. Please "
+            "describe what happened, under which provision, and what relief "
+            "you seek.")
+        return [], {}
+
+    # One extractor being empty is normal in combined mode — never block.
+    context.needs_clarification = False
+    context.clarification_question = None
+
+    dropped = max(0, len(merged) - MAX_COMBINED_ITEMS)
+    merged = merged[:MAX_COMBINED_ITEMS]
+    for idx, item in enumerate(merged):
+        item.id = idx + 1
+    meta: dict[str, Any] = {
+        "totalGrounds": sum(1 for i in merged if i.ground_label),
+        "spottedIssues": sum(1 for i in merged if not i.ground_label),
+        "documentType": grounds_meta.get("documentType"),
+        "party": grounds_meta.get("party"),
+        "notes": grounds_meta.get("notes") or [],
+    }
+    total_dropped = dropped + int(grounds_meta.get("truncatedGrounds") or 0)
+    if total_dropped:
+        # No silent caps: the UI tells the user how many items were cut.
+        meta["truncatedGrounds"] = total_dropped
+        logger.info("[combined] %d item(s) beyond the cap were dropped", total_dropped)
+    return merged, meta
 
 
 def _ground_note(issue: Issue) -> str:
@@ -853,10 +1076,12 @@ async def generate_queries(issue: Issue, context: CaseContext,
 # ─── Per-issue pipeline (Stage 2 → fetch → rerank → layers → score) ──────────
 
 async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
-                       exclude: set[str] | None = None) -> dict[str, Any]:
+                       exclude: set[str] | None = None,
+                       anchors_only: bool = False) -> dict[str, Any]:
     """One complete fetch → rerank → verify → score round for one issue.
     Returns {candidates, scored}; the caller decides whether to retry with
-    reformulated queries when nothing usable survives."""
+    reformulated queries when nothing usable survives. anchors_only: the
+    user hand-picked this issue's queries — fetch with exactly those."""
     settings = get_settings()
 
     # IK fetch — union across anchor/contra/axis queries, dedupe, cap.
@@ -867,7 +1092,8 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
         context.forum, f"{context.procedural_history} {context.raw_case_summary}")
     pool = await ik_client.fanout_and_fetch(
         keywords, exclude=exclude,
-        forum_doctype=(forum_profile or {}).get("doctype"))
+        forum_doctype=(forum_profile or {}).get("doctype"),
+        anchors_only=anchors_only)
     if not pool:
         return {"candidates": {}, "scored": []}
 
@@ -970,12 +1196,16 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
 
 
 async def _process_issue(issue: Issue, context: CaseContext,
-                         pre_keywords: KeywordSet | None = None) -> dict[str, Any]:
+                         pre_keywords: KeywordSet | None = None,
+                         curated: bool = False) -> dict[str, Any]:
     """Per-issue pipeline with automatic query reformulation: if the first
     round yields NO usable judgment for this issue, a genuinely different
     query set is generated (for this issue only) and one more round runs —
     already-fetched documents are excluded, so only fresh candidates are
-    read. Still empty after the retry → honest empty list."""
+    read. Still empty after the retry → honest empty list.
+    curated: the user checked/typed this issue's queries — round 1 fetches
+    with EXACTLY those; the reformulation retry (their queries found no
+    usable judgment) falls back to a full generated set."""
     # Stage 2 — query generation (already done at analyze time for suggested
     # issues; generated live for custom/user-typed ones).
     keywords = pre_keywords if pre_keywords and pre_keywords.all_terms() \
@@ -984,7 +1214,7 @@ async def _process_issue(issue: Issue, context: CaseContext,
         logger.warning("[pipeline] issue %s produced no keywords — skipping fetch", issue.id)
         return {"issue": issue, "keywords": keywords, "candidates": {}, "scored": []}
 
-    round1 = await _issue_round(issue, context, keywords)
+    round1 = await _issue_round(issue, context, keywords, anchors_only=curated)
     if round1["scored"]:
         return {"issue": issue, "keywords": keywords, **round1}
 
@@ -1008,15 +1238,20 @@ async def _process_issue(issue: Issue, context: CaseContext,
 
 async def issue_fanout(issues: list[Issue], context: CaseContext,
                        keywords_map: dict[str, KeywordSet] | None = None,
+                       curated_ids: set[str] | None = None,
                        ) -> list[dict[str, Any]]:
     """Dynamic-cardinality fan-out: one per-issue pipeline per issue, run
     concurrently. IK rate limiting is enforced inside the shared client
-    semaphore, not here. One issue failing never kills the request."""
+    semaphore, not here. One issue failing never kills the request.
+    curated_ids: issues whose queries the user hand-picked — those fetch
+    with exactly their selected queries."""
     keywords_map = keywords_map or {}
+    curated_ids = curated_ids or set()
 
     async def _safe(issue: Issue) -> dict[str, Any]:
         try:
-            return await _process_issue(issue, context, keywords_map.get(str(issue.id)))
+            return await _process_issue(issue, context, keywords_map.get(str(issue.id)),
+                                        curated=str(issue.id) in curated_ids)
         except Exception:
             logger.exception("[pipeline] issue %s failed", issue.id)
             return {"issue": issue, "keywords": None, "candidates": {}, "scored": []}
@@ -1137,11 +1372,13 @@ def assemble_response(
         keywords = entry.get("keywords")
         issues_out.append(IssueResults(id=issue.id, issue=issue.issue,
                                        title=issue.title,
+                                       groundLabel=issue.ground_label,
                                        keywords=keywords, results=items))
         session_issues.append({
             "id": issue.id,
             "issue": issue.issue,
             "title": issue.title,
+            "groundLabel": issue.ground_label,
             "keywords": keywords.model_dump() if keywords else None,
             "results": [item.model_dump() for item in items],
             "candidateMeta": {
@@ -1200,9 +1437,12 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
     grounds_meta: dict[str, Any] = {}
     # Ambiguous input → ask, never guess (Phase D hook, live now).
     if not context.needs_clarification:
-        # Stage 1: grounds extractor (grounds mode) or issue spotter —
-        # both on Claude with a Gemini fallback inside.
-        if mode == "grounds":
+        # Stage 1: combined extractor (pleaded grounds + spotted issues in
+        # one pass — frontend default), grounds extractor, or issue
+        # spotter — all on Claude with a Gemini fallback inside.
+        if mode == "combined":
+            issues, grounds_meta = await extract_combined(raw_text, context)
+        elif mode == "grounds":
             issues, grounds_meta = await extract_grounds(raw_text, context)
         else:
             issues = await spot_issues(raw_text, context)
@@ -1241,11 +1481,39 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
     return session_id, context, issues, grounds_meta
 
 
+MAX_QUERIES_PER_ISSUE = 8
+
+
+def apply_query_overrides(keywords_map: dict[str, KeywordSet],
+                          overrides: dict[str, list[str]] | None) -> dict[str, KeywordSet]:
+    """User query curation: the checked system queries plus any user-typed
+    ones REPLACE the issue's anchor queries — user-typed queries get the
+    exact same treatment as generated anchors (2× hit weight, deeper take,
+    forum-restricted re-run, keyword-signal bonus). Contra queries and the
+    four lexical axes still run unchanged. An empty list is honoured — the
+    user deselected everything, so only axes/contra fetch for that issue."""
+    for issue_id, chosen in (overrides or {}).items():
+        kw = keywords_map.get(str(issue_id))
+        if kw is None:
+            continue  # custom issues generate live; nothing stored to override
+        cleaned: list[str] = []
+        for query in chosen:
+            text = (query or "").strip()
+            if text and text not in cleaned:
+                cleaned.append(text)
+        kw.anchor_queries = cleaned[:MAX_QUERIES_PER_ISSUE]
+    return keywords_map
+
+
 async def run_issue_search(session_id: str, context: CaseContext,
-                           issues: list[Issue]) -> SearchResponse:
+                           issues: list[Issue],
+                           query_overrides: dict[str, list[str]] | None = None,
+                           ) -> SearchResponse:
     """Phase 2: per-issue fan-out (Stage 2 → fetch → rerank → layers →
     score), then CitationGuardian + assembler — deterministic, always on,
-    no bypass. Keywords generated at analyze time are reused here."""
+    no bypass. Keywords generated at analyze time are reused here, after
+    the user's per-issue query selection (checkboxes + own queries) is
+    applied on top."""
     keywords_map: dict[str, KeywordSet] = {}
     session = sessions.load(session_id) or {}
     for issue_id, dump in (session.get("issueKeywords") or {}).items():
@@ -1253,7 +1521,10 @@ async def run_issue_search(session_id: str, context: CaseContext,
             keywords_map[str(issue_id)] = KeywordSet.model_validate(dump)
         except Exception:
             logger.warning("[pipeline] stored keywords for issue %s invalid — regenerating", issue_id)
-    fanout_results = await issue_fanout(issues, context, keywords_map)
+    keywords_map = apply_query_overrides(keywords_map, query_overrides)
+    curated_ids = {str(issue_id) for issue_id in (query_overrides or {})}
+    fanout_results = await issue_fanout(issues, context, keywords_map,
+                                        curated_ids=curated_ids)
     return assemble_response(session_id, context, fanout_results)
 
 

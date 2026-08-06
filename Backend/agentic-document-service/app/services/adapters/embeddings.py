@@ -218,7 +218,7 @@ def embed_batch(
     progress_callback=None,
     progress_start: float = 65.0,
     progress_end: float = 78.0,
-    max_concurrent: int = 4,
+    max_concurrent: int = 8,
 ) -> list[list[float]]:
     """
     Embed a list of texts efficiently with parallel sub-batch processing.

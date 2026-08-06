@@ -499,7 +499,16 @@ class Settings(BaseSettings):
     chunk_overlap: int = 160
     chunk_min_tokens: int = 500
     chunk_max_tokens: int = 1000
-    max_parallel_document_workers: int = 4
+    # Documents processed CONCURRENTLY within one upload batch. This is the
+    # user-visible parallelism of "Create New Case" multi-file uploads — a
+    # batch larger than this runs in waves and reads as sequential. Sized above
+    # the max files-per-upload limit so a whole batch always runs in ONE wave;
+    # Document AI stampede is prevented separately by
+    # document_ai_max_concurrent_requests, not by this ceiling.
+    max_parallel_document_workers: int = Field(
+        default=16,
+        validation_alias=AliasChoices("MAX_PARALLEL_DOCUMENT_WORKERS"),
+    )
     # Document AI page limit per request (online processing max is 15 pages)
     document_ai_page_limit: int = Field(
         default=15,
@@ -507,12 +516,25 @@ class Settings(BaseSettings):
     )
     # Threads used to send parallel page-batch OCR requests to Document AI
     ocr_parallel_workers: int = Field(
-        default=4,
+        default=8,
         validation_alias=AliasChoices("OCR_PARALLEL_WORKERS"),
     )
-    # Persistent background worker threads in the document processing queue
+    # GLOBAL cap on in-flight Document AI requests across ALL documents/batches.
+    # With every document processing concurrently, doc_workers × ocr_workers
+    # could stampede the processor into 429s — which silently degrade OCR to the
+    # pypdf fallback. This semaphore keeps concurrency safe while letting the
+    # rest of each document's pipeline (chunking/embedding/persistence) run
+    # fully parallel.
+    document_ai_max_concurrent_requests: int = Field(
+        default=10,
+        validation_alias=AliasChoices("DOCUMENT_AI_MAX_CONCURRENT_REQUESTS"),
+    )
+    # Persistent background worker threads in the document processing queue.
+    # The signed-URL upload flow enqueues ONE single-document job per file, so
+    # this must cover a whole batch for all files to process concurrently —
+    # at 4, a 10-file signed-URL upload ran only 4 documents at a time.
     processing_queue_workers: int = Field(
-        default=4,
+        default=12,
         validation_alias=AliasChoices("PROCESSING_QUEUE_WORKERS"),
     )
     # Max seconds to wait for a single document to finish OCR + embedding.

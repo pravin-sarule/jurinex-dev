@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from agents import (
     analyze_case,
     enrich_custom_issue,
+    generate_case_summary,
     generate_citation_analysis,
     run_issue_search,
     run_search_pipeline,
@@ -189,7 +190,8 @@ async def get_session(session_id: str, http_request: Request) -> dict[str, Any]:
         "forumCourt": session.get("forumCourt") or None,
         "suggestedIssues": session.get("suggestedIssues", []),
         "issues": [
-            {key: issue.get(key) for key in ("id", "issue", "title", "keywords", "results")}
+            {key: issue.get(key) for key in ("id", "issue", "title", "groundLabel",
+                                             "keywords", "results")}
             for issue in session.get("issues", [])
         ],
         "statuses": statuses,
@@ -295,7 +297,7 @@ async def analyze_upload(http_request: Request, file: UploadFile = File(...),
     parts = [p for p in (doc_text, text.strip()) if p]
     if not parts:
         raise HTTPException(status_code=400, detail="Uploaded file produced no readable text")
-    mode = mode if mode in ("issues", "grounds") else "issues"
+    mode = mode if mode in ("issues", "grounds", "combined") else "issues"
     session_id, context, issues, grounds_meta = await analyze_case(
         "\n\n---\n\n".join(parts), pages=pages, mode=mode)
     _tag_session(session_id, http_request.headers.get("x-user-id"),
@@ -342,7 +344,8 @@ async def search_run(session_id: str, request: RunSearchRequest,
     context.needs_clarification = False
     context.clarification_question = None
 
-    response = await run_issue_search(session_id, context, chosen)
+    response = await run_issue_search(session_id, context, chosen,
+                                      query_overrides=request.queryOverrides or None)
     _tag_session(session_id, http_request.headers.get("x-user-id"))
     background.add_task(_vault_write, response)
     return response
@@ -443,7 +446,7 @@ async def citation_report(session_id: str, issue_id: int, doc_id: str):
     world holds: reports exist only for docIds already in this session's
     guardian-verified results. LLM analysis is grounded on the fetched
     judgment text and cached in the session."""
-    from schemas import CitationAnalysis, CitationReport
+    from schemas import CitationAnalysis, CitationReport, JudgmentCaseSummary
 
     session = sessions.load(session_id)
     if session is None:
@@ -488,6 +491,26 @@ async def citation_report(session_id: str, issue_id: int, doc_id: str):
             reports[doc_id] = {**(reports.get(doc_id) or {}), "goodLawCheck": good_law_check}
             sessions.save(session_id, session)
 
+    # Advocate-grade judgment summary (100-word paragraph + 8-line note) —
+    # grounded on the fetched judgment text, tailored to this issue via the
+    # prompt's Context line, cached per session; empty (failed) output is not
+    # cached so it is retried on the next view.
+    summary_cached = (reports.get(doc_id) or {}).get("caseSummary") or {}
+    if summary_cached:
+        case_summary = JudgmentCaseSummary.model_validate(summary_cached)
+    else:
+        matter_context = ". ".join(part for part in (
+            issue.get("issue", "").strip(),
+            context.get("raw_case_summary", "")[:800].strip(),
+        ) if part)
+        case_summary = await generate_case_summary(
+            item.get("title", ""), doc_text or "", matter_context,
+            date.today().isoformat())
+        if case_summary.summary100 or case_summary.note:
+            reports[doc_id] = {**(reports.get(doc_id) or {}),
+                               "caseSummary": case_summary.model_dump()}
+            sessions.save(session_id, session)
+
     return CitationReport(
         docId=doc_id,
         issueId=issue_id,
@@ -515,6 +538,7 @@ async def citation_report(session_id: str, issue_id: int, doc_id: str):
         citedBySample=info.get("citedBySample", []),
         goodLawCheck=good_law_check,
         analysis=analysis,
+        caseSummary=case_summary,
         documentText=(doc_text or "")[:400000],
         generatedOn=date.today().isoformat(),
     )

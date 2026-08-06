@@ -14,36 +14,56 @@ import json
 import logging
 import os
 import tempfile
+import threading
 from datetime import timedelta
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 logger = logging.getLogger("agentic_document_service.gcs")
 
+# Per-request deadline for blob transfers. Without it a stalled connection can
+# hold a thread (or, before the routes moved uploads off the event loop, the
+# whole service) indefinitely.
+_TRANSFER_TIMEOUT_S = 120
+
+# storage.Client is thread-safe for uploads/downloads; caching it avoids paying
+# credential construction + a token round-trip on every single transfer call.
+_client_lock = threading.Lock()
+_cached_client = None
+
 
 def _get_gcs_client():
-    """Return an authenticated GCS client using GCS_KEY_BASE64 or ADC."""
-    from google.cloud import storage  # type: ignore
+    """Return a cached authenticated GCS client using GCS_KEY_BASE64 or ADC."""
+    global _cached_client
+    with _client_lock:
+        if _cached_client is not None:
+            return _cached_client
 
-    from app.core.config import get_settings
-    settings = get_settings()
+        from google.cloud import storage  # type: ignore
 
-    key_b64 = settings.gcs_key_base64
-    if key_b64:
-        try:
-            key_json = base64.b64decode(key_b64).decode("utf-8")
-            creds_dict = json.loads(key_json)
-            from google.oauth2 import service_account  # type: ignore
-            credentials = service_account.Credentials.from_service_account_info(
-                creds_dict,
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-            )
-            return storage.Client(credentials=credentials, project=creds_dict.get("project_id"))
-        except Exception as exc:
-            logger.warning("[GCS] Failed to load GCS_KEY_BASE64 credentials: %s", exc)
+        from app.core.config import get_settings
+        settings = get_settings()
 
-    # Fall back to Application Default Credentials
-    return storage.Client()
+        client = None
+        key_b64 = settings.gcs_key_base64
+        if key_b64:
+            try:
+                key_json = base64.b64decode(key_b64).decode("utf-8")
+                creds_dict = json.loads(key_json)
+                from google.oauth2 import service_account  # type: ignore
+                credentials = service_account.Credentials.from_service_account_info(
+                    creds_dict,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                )
+                client = storage.Client(credentials=credentials, project=creds_dict.get("project_id"))
+            except Exception as exc:
+                logger.warning("[GCS] Failed to load GCS_KEY_BASE64 credentials: %s", exc)
+
+        if client is None:
+            # Fall back to Application Default Credentials
+            client = storage.Client()
+        _cached_client = client
+        return client
 
 
 def upload_bytes(
@@ -75,7 +95,7 @@ def upload_bytes(
     client = _get_gcs_client()
     bucket_obj = client.bucket(bucket_name)
     blob = bucket_obj.blob(destination_path)
-    blob.upload_from_string(data, content_type=content_type)
+    blob.upload_from_string(data, content_type=content_type, timeout=_TRANSFER_TIMEOUT_S)
     uri = f"gs://{bucket_name}/{destination_path}"
     logger.info("[GCS] Uploaded %d bytes to %s bucket → %s", len(data), bucket_type, uri)
     return uri
@@ -93,7 +113,7 @@ def download_bytes(gs_uri: str) -> bytes:
     client = _get_gcs_client()
     bucket_obj = client.bucket(bucket_name)
     blob = bucket_obj.blob(object_path)
-    data = blob.download_as_bytes()
+    data = blob.download_as_bytes(timeout=_TRANSFER_TIMEOUT_S)
     logger.info("[GCS] Downloaded %d bytes from %s", len(data), gs_uri)
     return data
 

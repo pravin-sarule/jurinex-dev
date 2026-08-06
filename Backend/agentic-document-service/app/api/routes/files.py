@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -14,6 +15,7 @@ from pathlib import PurePosixPath
 from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter, Body, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -1583,18 +1585,26 @@ def _get_file_processing_status_payload(file_id: str, user_id: str) -> dict[str,
     return out
 
 
-async def _upload_to_gcs_and_build_document(user_id: str, folder_name: str, upload: UploadFile) -> DocumentReference:
-    file_bytes = await upload.read()
-    mimetype = upload.content_type or "application/octet-stream"
-    filename = upload.filename or f"upload-{uuid.uuid4().hex[:8]}"
+def _upload_to_gcs_and_build_document(
+    user_id: str,
+    folder_name: str,
+    *,
+    filename: str | None,
+    mimetype: str | None,
+    file_bytes: bytes,
+) -> DocumentReference:
+    # Sync + bytes-based on purpose: the GCS upload is a blocking network call, so the
+    # upload routes run this in the threadpool (one task per file, concurrently) instead
+    # of serially on the event loop — a multi-file upload must never freeze the service.
+    mimetype = mimetype or "application/octet-stream"
+    filename = filename or f"upload-{uuid.uuid4().hex[:8]}"
     gcs_path = _build_gcs_object_path(user_id, folder_name, filename)
     gs_uri = gcs.upload_bytes(file_bytes, gcs_path, mimetype, bucket_type="input")
-    inline_text = _read_inline_text(file_bytes, upload)
     return DocumentReference(
         document_name=filename,
         mime_type=mimetype,
         document_uri=gs_uri,
-        inline_text=inline_text,
+        inline_text=None,
         metadata={
             "size": len(file_bytes),
             "original_name": filename,
@@ -1976,7 +1986,9 @@ async def upload_for_processing(
     authorization: str | None = Header(default=None),
 ) -> dict:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
-    llm_config = get_llm_chat_config(user_id=user_id, plan_limit_mode="summarization")
+    llm_config = await run_in_threadpool(
+        get_llm_chat_config, user_id=user_id, plan_limit_mode="summarization"
+    )
     # Keep temp folder style aligned with document-service uploadForProcessing flow.
     folder_name = f"temp-{uuid.uuid4().hex[:12]}"
     logger.info(
@@ -1990,15 +2002,13 @@ async def upload_for_processing(
     files_data = []
     for upload in files:
         file_bytes = await upload.read()
-        upload.file.seek(0)
         total_new_bytes += len(file_bytes)
         files_data.append((upload, file_bytes))
 
-    storage_check = assert_storage_allowed(user_id, total_new_bytes)
+    storage_check = await run_in_threadpool(assert_storage_allowed, user_id, total_new_bytes)
     if not storage_check.get("ok"):
         raise HTTPException(status_code=507, detail=storage_check)
 
-    documents: list[DocumentReference] = []
     for upload, file_bytes in files_data:
         check = assert_upload_allowed(
             user_id,
@@ -2011,8 +2021,22 @@ async def upload_for_processing(
         )
         if not check.get("ok"):
             raise HTTPException(status_code=429, detail=check)
-        documents.append(await _upload_to_gcs_and_build_document(user_id, folder_name, upload))
-    return enqueue_case_documents(
+    # All GCS uploads run concurrently in the threadpool — never serially on the
+    # event loop, which would freeze every other request (incl. status polling)
+    # for the duration of a multi-file upload.
+    documents: list[DocumentReference] = await asyncio.gather(*[
+        run_in_threadpool(
+            _upload_to_gcs_and_build_document,
+            user_id,
+            folder_name,
+            filename=upload.filename,
+            mimetype=upload.content_type,
+            file_bytes=file_bytes,
+        )
+        for upload, file_bytes in files_data
+    ])
+    return await run_in_threadpool(
+        enqueue_case_documents,
         user_id=user_id,
         folder_name=folder_name,
         documents=[document.model_dump(mode="json") for document in documents],
@@ -2027,7 +2051,9 @@ async def upload_documents_to_folder(
     authorization: str | None = Header(default=None),
 ) -> dict:
     user_id = _resolve_user_id(x_user_id, authorization) or "anonymous"
-    llm_config = get_llm_chat_config(user_id=user_id, plan_limit_mode="summarization")
+    llm_config = await run_in_threadpool(
+        get_llm_chat_config, user_id=user_id, plan_limit_mode="summarization"
+    )
     logger.info(
         "[Route:upload_documents_to_folder] status=received user_id=%s folder=%s files=%s",
         user_id,
@@ -2039,15 +2065,13 @@ async def upload_documents_to_folder(
     files_data = []
     for upload in files:
         file_bytes = await upload.read()
-        upload.file.seek(0)
         total_new_bytes += len(file_bytes)
         files_data.append((upload, file_bytes))
 
-    storage_check = assert_storage_allowed(user_id, total_new_bytes)
+    storage_check = await run_in_threadpool(assert_storage_allowed, user_id, total_new_bytes)
     if not storage_check.get("ok"):
         raise HTTPException(status_code=507, detail=storage_check)
 
-    documents: list[DocumentReference] = []
     for upload, file_bytes in files_data:
         check = assert_upload_allowed(
             user_id,
@@ -2060,8 +2084,20 @@ async def upload_documents_to_folder(
         )
         if not check.get("ok"):
             raise HTTPException(status_code=429, detail=check)
-        documents.append(await _upload_to_gcs_and_build_document(user_id, folder_name, upload))
-    return enqueue_case_documents(
+    # Concurrent threadpool GCS uploads — see upload_for_processing for rationale.
+    documents: list[DocumentReference] = await asyncio.gather(*[
+        run_in_threadpool(
+            _upload_to_gcs_and_build_document,
+            user_id,
+            folder_name,
+            filename=upload.filename,
+            mimetype=upload.content_type,
+            file_bytes=file_bytes,
+        )
+        for upload, file_bytes in files_data
+    ])
+    return await run_in_threadpool(
+        enqueue_case_documents,
         user_id=user_id,
         folder_name=folder_name,
         documents=[document.model_dump(mode="json") for document in documents],
