@@ -3335,9 +3335,16 @@ const ChatInterface = () => {
   };
 
   const handleSelectChatSession = useCallback((sessionId) => {
+    // Moving to a DIFFERENT chat while one is still answering: detach from that stream so
+    // its tokens stop rendering here. It finishes server-side and is saved to its own
+    // session. Re-opening the chat that is currently answering keeps its live tokens.
+    if (activeStreamSessionIdRef.current && activeStreamSessionIdRef.current !== sessionId) {
+      detachActiveStream();
+    }
     setSelectedChatSessionId(sessionId);
     setHasAiResponse(true);
     setNewChatMode(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setSelectedChatSessionId, setHasAiResponse]);
 
   const handleDeleteSession = useCallback(async (sessionId) => {
