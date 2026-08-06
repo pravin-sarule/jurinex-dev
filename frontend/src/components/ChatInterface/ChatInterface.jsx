@@ -2224,7 +2224,9 @@ const ChatInterface = () => {
       streamReaderRef.current = reader;
       const decoder = new TextDecoder();
       let buffer = '';
-      let newSessionId = currentSessionId;
+      // Default to the id we just claimed, not the (possibly null) incoming one, so the
+      // session stays correct even if the stream ends before `metadata` arrives.
+      let newSessionId = sessionForRequest;
       let finalMetadata = null;
       let messageId = Date.now().toString();
       let streamHadError = false;
