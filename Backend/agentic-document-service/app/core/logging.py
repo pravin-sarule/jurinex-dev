@@ -116,6 +116,19 @@ _SERVICE_BY_PORT = {
     '8081': 'visual', '8092': 'document', '8095': 'ai-chatbot', '8096': 'chat',
 }
 
+# Upstream AI/vendor hosts, so a provider call reads as its provider name.
+_EXTERNAL_HOSTS = {
+    'api.moonshot.ai': 'moonshot',
+    'api.moonshot.cn': 'moonshot',
+    'api.anthropic.com': 'anthropic',
+    'api.deepseek.com': 'deepseek',
+    'api.openai.com': 'openai',
+    'generativelanguage.googleapis.com': 'google-ai',
+    'documentai.googleapis.com': 'document-ai',
+    'storage.googleapis.com': 'gcs',
+    'google.serper.dev': 'serper',
+}
+
 # ── Regex extractors ─────────────────────────────────────────────────────────
 _COMPONENT_RE = re.compile(r'\[([A-Za-z][^\]]{1,35})\]')
 # Recognises every provider this service can route to. `kimi`/`moonshot` were missing
@@ -153,8 +166,7 @@ _PROC_KW = ('start', 'creat', 'submit', 'upload', 'process', 'running', 'fetch',
 
 # Lines that carry no diagnostic value and drown everything else.
 _NOISE_PATTERNS = (
-    'AFC is enabled with max remote calls',       # google-genai, once per generate_content
-    'HTTP Request: POST https://generativelanguage.googleapis.com',  # covered by our own model logs
+    'AFC is enabled with max remote calls',   # google-genai, emitted once per generate_content
 )
 
 
@@ -208,7 +220,7 @@ def _bar() -> str:
 
 
 def _shorten_url(url: str) -> tuple[str, str]:
-    """('→ auth', '/api/auth/internal/...') — resolve localhost ports to service names."""
+    """('→ auth', '/api/auth/internal/...') — resolve hosts to readable service names."""
     m = _URL_RE.match(url)
     if not m:
         return '→ http', url
@@ -216,7 +228,14 @@ def _shorten_url(url: str) -> tuple[str, str]:
     if host.startswith(('localhost:', '127.0.0.1:')):
         port = host.split(':', 1)[1]
         return f'→ {_SERVICE_BY_PORT.get(port, port)}', path
-    return f'→ {host.split(":")[0].split(".")[0]}', path
+
+    bare = host.split(':')[0].lower()
+    known = _EXTERNAL_HOSTS.get(bare)
+    if known:
+        return f'→ {known}', path
+    # Drop a leading "api."/"www." so api.example.com reads as "example", not "api".
+    labels = [p for p in bare.split('.') if p not in ('api', 'www')]
+    return f'→ {labels[0] if labels else bare}', path
 
 
 def _status_color(code: int) -> str:
