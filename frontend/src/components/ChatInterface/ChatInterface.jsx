@@ -2173,6 +2173,13 @@ const ChatInterface = () => {
       // Do not send the full preset text in `question` ? DB and UI store the prompt name only.
 
       const token = getAuthToken();
+      // Same reasoning as the main chat path: claim the session id up-front so an
+      // analysis abandoned mid-stream is still reachable in history afterwards.
+      const sessionForRequest = currentSessionId || mintSessionId();
+      if (!currentSessionId) {
+        setSelectedChatSessionId(sessionForRequest);
+        setNewChatMode(false);
+      }
       const response = await fetch(`${DOCS_BASE_URL}/${encodeURIComponent(folder)}/intelligent-chat/stream`, {
         method: 'POST',
         headers: {
@@ -2184,7 +2191,7 @@ const ChatInterface = () => {
           question: '',
           prompt_label: promptLabel,
           secret_id: secretId,
-          session_id: currentSessionId,
+          session_id: sessionForRequest,
           llm_name: 'gemini',
           learning_mode: learningModeActive,
           research_mode: researchModeActive,
@@ -2661,6 +2668,14 @@ const ChatInterface = () => {
         }
 
         const token = getAuthToken();
+        // Claim an id for this conversation BEFORE streaming starts, and select it
+        // immediately, so navigating away mid-answer still leaves a session to come
+        // back to (the server persists under this same id even if the client leaves).
+        const sessionForRequest = selectedChatSessionId || mintSessionId();
+        if (!selectedChatSessionId) {
+          setSelectedChatSessionId(sessionForRequest);
+          setNewChatMode(false);
+        }
         const response = await fetch(`${DOCS_BASE_URL}/${encodeURIComponent(folderName)}/intelligent-chat/stream`, {
           method: 'POST',
           headers: {
@@ -2671,7 +2686,7 @@ const ChatInterface = () => {
           body: JSON.stringify({
             question: questionText,
             ...(displayLabel ? { prompt_label: displayLabel } : {}),
-            session_id: selectedChatSessionId || undefined,
+            session_id: sessionForRequest,
             llm_name: 'gemini',
             learning_mode: learningModeActive,
             research_mode: researchModeActive,
