@@ -4669,6 +4669,9 @@ async def intelligent_chat_stream(
                         deepseek_stream_error: list[str] = []
 
                         def _run_deepseek_stream():
+                            # Bind the request's token-usage session inside the executor thread —
+                            # see _run_kimi_stream below for why.
+                            bind_token_usage_session(usage_session_key)
                             try:
                                 for chunk_text in deepseek_stream_generator(
                                     prompt,
@@ -4680,6 +4683,7 @@ async def intelligent_chat_stream(
                             except Exception as exc:
                                 deepseek_stream_error.append(str(exc))
                             finally:
+                                unbind_token_usage_session()
                                 loop.call_soon_threadsafe(ds_chunk_queue.put_nowait, _SENTINEL_DS)
 
                         ds_stream_future = loop.run_in_executor(None, _run_deepseek_stream)
@@ -4709,6 +4713,12 @@ async def intelligent_chat_stream(
                         kimi_stream_error: list[str] = []
 
                         def _run_kimi_stream():
+                            # The token-usage accumulator is THREAD-LOCAL, and this generator runs
+                            # on an executor thread — without binding the request's session here the
+                            # usage never joins the final aggregated table (no User ID / Session ID /
+                            # LLM Calls / Retrieved Chunks rows), it just logs a bare per-call table.
+                            # Same reasoning as _draft_run_blocking above.
+                            bind_token_usage_session(usage_session_key)
                             try:
                                 for chunk_text in kimi_stream_generator(
                                     prompt,
@@ -4720,6 +4730,7 @@ async def intelligent_chat_stream(
                             except Exception as exc:
                                 kimi_stream_error.append(str(exc))
                             finally:
+                                unbind_token_usage_session()
                                 loop.call_soon_threadsafe(km_chunk_queue.put_nowait, _SENTINEL_KM)
 
                         km_stream_future = loop.run_in_executor(None, _run_kimi_stream)
