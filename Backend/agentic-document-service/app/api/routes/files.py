@@ -681,6 +681,7 @@ _PROVIDER_CONTEXT_CHAR_BUDGET = {
     "gemini": 800_000,   # ~200k tokens of a 1M-token window
     "claude": 600_000,   # ~150k tokens of a 200k-token window
     "deepseek": 380_000,  # ~95k tokens of a 128k-token window
+    "kimi": 700_000,      # ~175k tokens of kimi-k2.6's 256k window (k3 holds 1M)
 }
 
 
@@ -2937,7 +2938,7 @@ def intelligent_chat(
             authorization=authorization,
         )
         requested_model = (request.llm_name or "").strip()
-        if requested_model.lower() in {"", "gemini", "claude", "deepseek", "default"}:
+        if requested_model.lower() in {"", "gemini", "claude", "deepseek", "kimi", "default"}:
             requested_model = ""
         model_name = str(
             resolve_secret_prompt_llm_name(request.secret_id)
@@ -2997,6 +2998,7 @@ async def intelligent_chat_stream(
             claude_stream_generator,
             claude_draft_stream_generator,
             deepseek_stream_generator,
+            kimi_stream_generator,
             normalize_markdown_render_output,
         )
         from app.services.prompt_orchestration import (
@@ -3118,6 +3120,8 @@ async def intelligent_chat_stream(
             requested_model_name = get_settings().deepseek_model
         elif _provider_label == "claude":
             requested_model_name = get_settings().claude_model
+        elif _provider_label == "kimi":
+            requested_model_name = get_settings().kimi_model
         selected_model_name = resolve_secret_prompt_llm_name(chat_request.secret_id) or requested_model_name or None
         # ── Admin-panel model control ────────────────────────────────────────────────
         # When the user did NOT explicitly pick a model in chat (no secret-prompt model, no dropdown),
@@ -4661,6 +4665,46 @@ async def intelligent_chat_stream(
                             deepseek_stream_error.append(str(exc))
                         if deepseek_stream_error:
                             raise RuntimeError(f"deepseek_stream_failed: {deepseek_stream_error[0]}")
+                    elif stream_provider == "kimi":
+                        # ── Kimi streaming path (thread + queue, same as DeepSeek) ────
+                        kimi_gen_kwargs, kimi_llm_params = stream_cfg
+                        _SENTINEL_KM = object()
+                        km_chunk_queue: asyncio.Queue = asyncio.Queue()
+                        kimi_stream_error: list[str] = []
+
+                        def _run_kimi_stream():
+                            try:
+                                for chunk_text in kimi_stream_generator(
+                                    prompt,
+                                    model_name=resolved_model_name,
+                                    gen_kwargs=kimi_gen_kwargs,
+                                    llm_params=kimi_llm_params,
+                                ):
+                                    loop.call_soon_threadsafe(km_chunk_queue.put_nowait, chunk_text)
+                            except Exception as exc:
+                                kimi_stream_error.append(str(exc))
+                            finally:
+                                loop.call_soon_threadsafe(km_chunk_queue.put_nowait, _SENTINEL_KM)
+
+                        km_stream_future = loop.run_in_executor(None, _run_kimi_stream)
+                        while True:
+                            chunk_text = await km_chunk_queue.get()
+                            if chunk_text is _SENTINEL_KM:
+                                break
+                            if not chunk_text:
+                                continue
+                            streamed = True
+                            answer_parts.append(chunk_text)
+                            async for sse_line in _yield_text_as_streaming_chunks(
+                                _sse, chunk_text, delay_ms=stream_delay_ms
+                            ):
+                                yield sse_line
+                        try:
+                            await km_stream_future
+                        except Exception as exc:
+                            kimi_stream_error.append(str(exc))
+                        if kimi_stream_error:
+                            raise RuntimeError(f"kimi_stream_failed: {kimi_stream_error[0]}")
                     else:
                         # ── Gemini streaming path ─────────────────────────────────────
                         gemini_config = stream_cfg

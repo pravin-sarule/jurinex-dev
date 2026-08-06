@@ -1366,7 +1366,7 @@ class FolderWorkflowService:
         llm_config = get_summarization_chat_config(user_id=user_id, force_refresh=False)
         llm_config = merge_folder_chat_request_llm_overrides(llm_config, request)
         requested_model = str(request.llm_name or "").strip()
-        if requested_model.lower() in {"", "gemini", "claude", "deepseek", "default"}:
+        if requested_model.lower() in {"", "gemini", "claude", "deepseek", "kimi", "default"}:
             requested_model = ""
         selected_model = resolve_secret_prompt_llm_name(secret_id) or requested_model or None
         user_profile = fetch_full_profile(user_id, authorization)

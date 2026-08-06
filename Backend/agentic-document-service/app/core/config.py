@@ -416,6 +416,51 @@ class Settings(BaseSettings):
         default="claude-sonnet-4-6",
         validation_alias=AliasChoices("CLAUDE_MODEL"),
     )
+    # ── Kimi / Moonshot AI (OpenAI-compatible) ────────────────────────────────
+    kimi_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("KIMI_API_KEY", "MOONSHOT_API_KEY"),
+    )
+    kimi_model: str = Field(
+        default="kimi-k2.6",
+        validation_alias=AliasChoices("KIMI_MODEL"),
+    )
+    # api.moonshot.ai = international endpoint; api.moonshot.cn = mainland China.
+    # The key issued for one endpoint is NOT valid on the other.
+    kimi_base_url: str = Field(
+        default="https://api.moonshot.ai/v1",
+        validation_alias=AliasChoices("KIMI_BASE_URL"),
+    )
+    # Kimi is a reasoning model: its hidden chain-of-thought is BILLED as output
+    # tokens even though it is never shown to the user (a one-line greeting measured
+    # 2,660 output tokens, ~99% of it reasoning, and took 71s). These three knobs
+    # control that cost and are read from .env on every call — they OVERRIDE the
+    # agent_prompts `thinking_mode` flag, which is what switched thinking on before.
+    kimi_thinking_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("KIMI_THINKING_ENABLED"),
+    )
+    # Cap on reasoning tokens when thinking IS enabled. Moonshot honours this
+    # (budget 500 → 264-334 reasoning tokens measured, vs ~490 uncapped).
+    kimi_thinking_budget_tokens: int = Field(
+        default=500,
+        validation_alias=AliasChoices("KIMI_THINKING_BUDGET_TOKENS"),
+    )
+    # Optional coarse control: "low" | "high" | "max" (kimi-k3 advertises these).
+    # Blank = don't send the field at all.
+    kimi_reasoning_effort: str = Field(
+        default="",
+        validation_alias=AliasChoices("KIMI_REASONING_EFFORT"),
+    )
+    # Stream table/chronology answers token-by-token like every other answer.
+    # DeepSeek BUFFERS them (nothing reaches the user until generation ends — that
+    # showed up as ~66s of dead air then the whole table at once). Set this false to
+    # get the old buffered behaviour, which hides half-built pipe tables mid-flight
+    # but costs the live typing effect.
+    kimi_stream_tabular: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("KIMI_STREAM_TABULAR"),
+    )
     # ── Free-tier DeepSeek routing ────────────────────────────────────────────
     # When enabled, users on the named free plan have their text LLM model forced
     # to `deepseek_model` (with a Gemini fallback on failure). Off by default.

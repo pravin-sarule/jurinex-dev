@@ -28,6 +28,19 @@ CLAUDE_MAX_OUTPUT_TOKENS = 64000
 # Minimum output budget for DeepSeek so multi-section / 4000-word legal analyses
 # never truncate even when an agent_prompts row sets a small max_output_tokens.
 _DEEPSEEK_MIN_OUTPUT_TOKENS = 16384
+# Kimi (Moonshot) output budget. kimi-k3 carries a 1M-token context and the others
+# 256K, but the answer itself never needs more than this; the floor mirrors DeepSeek
+# so long legal analyses are not truncated by a small agent_prompts value.
+KIMI_MAX_OUTPUT_TOKENS = 98304
+_KIMI_MIN_OUTPUT_TOKENS = 16384
+# Moonshot REJECTS any other temperature outright (400 "invalid temperature: only X
+# is allowed for this model"), and which value is legal depends on thinking mode:
+#   thinking on (the default — kimi-k3 is thinking-ONLY) → temperature must be 1.0
+#   thinking explicitly disabled                         → temperature must be 0.6
+# Both verified live against api.moonshot.ai for k3 / k2.6 / k2.7-code(-highspeed).
+# This is why the admin panel's temperature CANNOT be forwarded to a Kimi model.
+_KIMI_THINKING_TEMPERATURE = 1.0
+_KIMI_NON_THINKING_TEMPERATURE = 0.6
 # Tabular requests use a low temperature so the model emits consistent, valid GFM
 # pipe-table syntax (deterministic formatting beats creative prose for tables).
 _TABULAR_TEMPERATURE = 0.2
@@ -155,7 +168,7 @@ def _model_tail_lower(model_name: str) -> str:
 def _detect_provider(model_name: str) -> str:
     """
     Detect the LLM provider from the model name string (from agent_prompts → llm_models.name).
-    Returns 'gemini', 'claude', or 'deepseek'.
+    Returns 'gemini', 'claude', 'deepseek', or 'kimi'.
     Uses the last path segment so DB values like 'anthropic/claude-sonnet-4-20250514' route to Claude.
     Default is 'gemini' for unknown names.
     """
@@ -164,6 +177,10 @@ def _detect_provider(model_name: str) -> str:
         return "claude"
     if tail.startswith("deepseek"):
         return "deepseek"
+    # Moonshot publishes these as 'kimi-k3' / 'kimi-k2.6' / 'kimi-k2.7-code[-highspeed]';
+    # 'moonshot-' is the legacy prefix for the same OpenAI-compatible endpoint.
+    if tail.startswith("kimi") or tail.startswith("moonshot"):
+        return "kimi"
     return "gemini"
 
 
@@ -185,6 +202,32 @@ def _deepseek_model_id(model_name: str) -> str:
     if "/" in s:
         return s.split("/")[-1].strip()
     return s
+
+
+def _kimi_model_id(model_name: str) -> str:
+    """Return the bare model id expected by the Moonshot API (strip any vendor/ prefix)."""
+    s = (model_name or "").strip()
+    if not s:
+        return s
+    if "/" in s:
+        s = s.split("/")[-1].strip()
+    # A bare provider label ("kimi") is not a model id — resolve it to the configured default.
+    if s.lower() == "kimi":
+        from app.core.config import get_settings
+
+        return str(get_settings().kimi_model or "kimi-k2.6").strip()
+    return s
+
+
+def _kimi_temperature(*, thinking_on: bool) -> float:
+    """
+    The ONLY temperature Moonshot accepts for the current Kimi models, per mode.
+
+    Anything else is a hard 400 ("invalid temperature: only X is allowed for this
+    model"), so a caller's temperature — including the admin panel's — is ignored
+    here by design rather than passed through and failing the request.
+    """
+    return _KIMI_THINKING_TEMPERATURE if thinking_on else _KIMI_NON_THINKING_TEMPERATURE
 
 
 # ── API clients ───────────────────────────────────────────────────────────────
@@ -235,6 +278,8 @@ def _api_key_label_for_model(model_name: str | None, provider: str) -> str:
         return "ANTHROPIC_API_KEY"
     if provider == "deepseek":
         return "DEEPSEEK_API_KEY"
+    if provider == "kimi":
+        return "KIMI_API_KEY"
     if _is_gemma_model(model_name):
         from app.core.config import get_settings
 
@@ -283,6 +328,32 @@ def _deepseek_client():
         return None
     except Exception as exc:
         logger.warning("[DocumentAI] DeepSeek client init failed: %s", exc)
+        return None
+
+
+def _kimi_client():
+    """Return an OpenAI-compatible client configured for Moonshot (Kimi), or None."""
+    try:
+        import openai  # type: ignore
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        api_key = str(getattr(settings, "kimi_api_key", "") or "").strip()
+        if not api_key:
+            logger.warning("[DocumentAI] KIMI_API_KEY is not set — Kimi calls will fail")
+            return None
+        base_url = str(getattr(settings, "kimi_base_url", "") or "").strip() or "https://api.moonshot.ai/v1"
+        return openai.OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=600.0,
+            max_retries=2,
+        )
+    except ImportError:
+        logger.warning("[DocumentAI] openai package not installed — run: pip install openai")
+        return None
+    except Exception as exc:
+        logger.warning("[DocumentAI] Kimi client init failed: %s", exc)
         return None
 
 
@@ -1749,10 +1820,10 @@ def stream_config_for_folder_chat(
     Unified streaming config for folder intelligent-chat SSE.
 
     Returns (provider, model_name, config) where:
-      provider   — "gemini" or "claude"
+      provider   — "gemini", "claude", "deepseek" or "kimi"
       model_name — resolved model string from agent_prompts (or summarization_chat_config fallback)
       config     — for gemini: GenerateContentConfig object
-                   for claude: (gen_kwargs dict, llm_params dict) tuple
+                   for claude / deepseek / kimi: (gen_kwargs dict, llm_params dict) tuple
 
     Always uses agent_prompts for model + all llm_parameters when agent_name is given.
     Falls back to summarization_chat_config only when agent_name is None or DB lookup fails.
@@ -1769,6 +1840,8 @@ def stream_config_for_folder_chat(
         return "claude", model_name, (gen_kwargs, llm_params)
     if provider == "deepseek":
         return "deepseek", model_name, (gen_kwargs, llm_params)
+    if provider == "kimi":
+        return "kimi", model_name, (gen_kwargs, llm_params)
     return "gemini", model_name, _build_gemini_config(
         gen_kwargs, llm_params, model_name=model_name, gemma_chat_budget=True
     )
@@ -2292,6 +2365,289 @@ def deepseek_stream_generator(
         )
 
 
+# ── Kimi / Moonshot (OpenAI-compatible) generation ───────────────────────────
+#
+# Kimi is a reasoning model family exposed over the same OpenAI-compatible shape as
+# DeepSeek, so the DeepSeek prompt-shaping helpers (`_deepseek_messages`,
+# `_deepseek_expects_json`, `_deepseek_output_contract`) are reused verbatim rather
+# than duplicated — they encode "reasoning model + Markdown/JSON contract", not
+# anything DeepSeek-specific. Two things genuinely differ and are handled here:
+#   1. temperature is FIXED by the provider (see `_kimi_temperature`), so neither the
+#      caller's value nor the tabular low-temperature trick can be applied.
+#   2. reasoning arrives as a separate `reasoning_content` field and must never be
+#      shown to the user (the stream loop below drops it, as the DeepSeek one does).
+
+def _kimi_thinking_settings() -> tuple[bool, int, str]:
+    """
+    Read the Kimi thinking policy from .env on EVERY call (no import-time snapshot),
+    so changing KIMI_THINKING_* takes effect on the next request.
+
+    Returns (thinking_enabled, budget_tokens, reasoning_effort).
+    """
+    from app.core.config import get_settings
+
+    s = get_settings()
+    enabled = bool(getattr(s, "kimi_thinking_enabled", False))
+    try:
+        budget = int(getattr(s, "kimi_thinking_budget_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        budget = 0
+    budget = max(0, budget)
+    effort = str(getattr(s, "kimi_reasoning_effort", "") or "").strip().lower()
+    if effort not in {"low", "high", "max"}:
+        effort = ""
+    return enabled, budget, effort
+
+
+def _kimi_apply_thinking(create_kwargs: dict, *, thinking_on: bool, budget: int, effort: str) -> dict:
+    """Set the thinking block + the one temperature Moonshot allows for that mode."""
+    create_kwargs["temperature"] = _kimi_temperature(thinking_on=thinking_on)
+    if thinking_on:
+        thinking: dict[str, Any] = {"type": "enabled"}
+        if budget > 0:
+            thinking["budget_tokens"] = budget
+        create_kwargs["extra_body"] = {"thinking": thinking}
+        if effort:
+            create_kwargs["reasoning_effort"] = effort
+    else:
+        # Moonshot only allows temperature 0.6 alongside an explicit thinking:disabled,
+        # so these two MUST be sent together — see `_kimi_temperature`.
+        create_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        create_kwargs.pop("reasoning_effort", None)
+    return create_kwargs
+
+
+def _kimi_rejects_thinking_off(exc: BaseException) -> bool:
+    """
+    True when the model refuses thinking:disabled — e.g. kimi-k2.7-code returns
+    "invalid thinking: only type=enabled is allowed for this mode". Those models can
+    still be made cheap via budget_tokens, so the caller retries instead of failing.
+    """
+    msg = str(exc).lower()
+    return "thinking" in msg and ("only type=enabled" in msg or "invalid thinking" in msg)
+
+
+def _kimi_create_kwargs(
+    prompt: str,
+    *,
+    model_name: str,
+    gen_kwargs: dict,
+    llm_params: dict,
+) -> tuple[dict, str, bool, float]:
+    """
+    Build the shared chat.completions kwargs for both the blocking and streaming paths.
+
+    NOTE: thinking is driven by .env (KIMI_THINKING_*), NOT by the agent_prompts
+    `thinking_mode` flag — on Kimi that flag only inflated billed output tokens.
+    """
+    max_tokens = min(
+        KIMI_MAX_OUTPUT_TOKENS,
+        max(_KIMI_MIN_OUTPUT_TOKENS, int(gen_kwargs.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS)),
+    )
+    api_model = _kimi_model_id(model_name)
+    thinking_on, budget, effort = _kimi_thinking_settings()
+
+    create_kwargs: dict = {
+        "model": api_model,
+        "messages": _deepseek_messages(prompt, llm_params),
+        "max_tokens": max_tokens,
+    }
+    if _deepseek_expects_json(prompt, llm_params):
+        create_kwargs["response_format"] = {"type": "json_object"}
+    _kimi_apply_thinking(create_kwargs, thinking_on=thinking_on, budget=budget, effort=effort)
+    return create_kwargs, api_model, thinking_on, float(create_kwargs["temperature"])
+
+
+def _generate_text_kimi(
+    prompt: str,
+    *,
+    model_name: str,
+    gen_kwargs: dict,
+    llm_params: dict,
+) -> str:
+    """
+    Call the Moonshot (Kimi) chat completions API.
+
+    Supported llm_parameters flags:
+      system_instructions str  — system prompt
+      max_output_tokens   int  — mapped to max_tokens
+      thinking_mode       bool — keeps Kimi's reasoning pass on (default: off)
+    """
+    client = _kimi_client()
+    if client is None:
+        logger.warning("[DocumentAI] Kimi call skipped — client unavailable")
+        return ""
+
+    create_kwargs, api_model, thinking_on, temperature = _kimi_create_kwargs(
+        prompt, model_name=model_name, gen_kwargs=gen_kwargs, llm_params=llm_params
+    )
+
+    _, _budget, _effort = _kimi_thinking_settings()
+    logger.info(
+        "[DocumentAI] ▶ Kimi generate  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d  thinking=%s  budget_tokens=%s",
+        api_model, model_name, temperature, create_kwargs["max_tokens"], thinking_on, _budget or "—",
+    )
+
+    try:
+        response = client.chat.completions.create(**create_kwargs)
+    except Exception as exc:
+        if not thinking_on and _kimi_rejects_thinking_off(exc):
+            # This model cannot run without thinking — keep it cheap via budget_tokens.
+            logger.info(
+                "[DocumentAI] %s refuses thinking:disabled — retrying with budget_tokens=%s",
+                api_model, _budget or "—",
+            )
+            _kimi_apply_thinking(create_kwargs, thinking_on=True, budget=_budget, effort=_effort)
+            response = client.chat.completions.create(**create_kwargs)
+        else:
+            logger.exception("[DocumentAI] Kimi generate failed model=%s error=%s", api_model, exc)
+            raise
+
+    usage = getattr(response, "usage", None)
+    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or (input_tokens + output_tokens)
+    log_token_usage_table(
+        context="kimi_generate",
+        usage={
+            "provider": "kimi",
+            "model": api_model,
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "totalTokens": total_tokens,
+        },
+        provider="kimi",
+        model_name=api_model,
+    )
+    content = (response.choices[0].message.content or "") if response.choices else ""
+    return normalize_markdown_render_output(content)
+
+
+def kimi_stream_generator(
+    prompt: str,
+    *,
+    model_name: str,
+    gen_kwargs: dict,
+    llm_params: dict,
+):
+    """
+    Yield text chunks from the Moonshot (Kimi) streaming API (OpenAI-compatible SSE).
+
+    Supported flags: system_instructions, max_output_tokens, thinking_mode.
+    """
+    client = _kimi_client()
+    if client is None:
+        logger.warning("[DocumentAI] Kimi stream skipped — client unavailable")
+        return
+
+    create_kwargs, api_model, thinking_on, temperature = _kimi_create_kwargs(
+        prompt, model_name=model_name, gen_kwargs=gen_kwargs, llm_params=llm_params
+    )
+    create_kwargs["stream"] = True
+    create_kwargs["stream_options"] = {"include_usage": True}
+
+    # Tabular / chronology / matrix answers CAN be buffered (not token-streamed) so a
+    # partially-streamed pipe table never flashes as invalid Markdown mid-flight — but
+    # buffering means the user sees nothing at all until generation ends (measured: 66s
+    # of dead air, then the whole table at once). Streaming is therefore the default and
+    # KIMI_STREAM_TABULAR=false restores the buffered behaviour.
+    # NOTE: unlike DeepSeek we canNOT drop the temperature for tabular output —
+    # Moonshot rejects every value except the mandated one.
+    from app.core.config import get_settings as _kimi_settings
+
+    tabular = _is_tabular_request(prompt, llm_params) and not bool(
+        getattr(_kimi_settings(), "kimi_stream_tabular", True)
+    )
+
+    _, _budget, _effort = _kimi_thinking_settings()
+    logger.info(
+        "[DocumentAI] ▶ Kimi stream  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d  thinking=%s  budget_tokens=%s  buffered=%s",
+        api_model, model_name, temperature, create_kwargs["max_tokens"], thinking_on,
+        (_budget or "—") if thinking_on else "—", tabular,
+    )
+
+    try:
+        stream = client.chat.completions.create(**create_kwargs)
+    except Exception as exc:
+        if not thinking_on and _kimi_rejects_thinking_off(exc):
+            # This model cannot run without thinking — keep it cheap via budget_tokens.
+            logger.info(
+                "[DocumentAI] %s refuses thinking:disabled — retrying with budget_tokens=%s",
+                api_model, _budget or "—",
+            )
+            _kimi_apply_thinking(create_kwargs, thinking_on=True, budget=_budget, effort=_effort)
+            stream = client.chat.completions.create(**create_kwargs)
+        else:
+            logger.exception("[DocumentAI] Kimi stream failed model=%s error=%s", api_model, exc)
+            raise
+
+    final_usage: dict[str, int] | None = None
+    buffer_parts: list[str] = []
+    full_response = ""
+
+    for chunk in stream:
+        usage = getattr(chunk, "usage", None)
+        if usage is not None:
+            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+            if not total_tokens and (prompt_tokens or completion_tokens):
+                total_tokens = prompt_tokens + completion_tokens
+            final_usage = {
+                "inputTokens": prompt_tokens,
+                "outputTokens": completion_tokens,
+                "totalTokens": total_tokens,
+            }
+
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if not delta:
+            continue
+
+        # Kimi streams its chain-of-thought in `reasoning_content` — never surface it.
+        if getattr(delta, "reasoning_content", None):
+            continue
+
+        content = delta.content or ""
+        if not content:
+            continue
+
+        full_response += content
+
+        # Some Kimi builds inline the reasoning as a <think>…</think> block in `content`
+        # instead of `reasoning_content`; suppress that form too.
+        if "<think>" in full_response and "</think>" not in full_response:
+            continue
+        if "<think>" in full_response and "</think>" in full_response:
+            after_think = "</think>".join(full_response.split("</think>")[1:])
+            full_response = after_think
+            if after_think.strip():
+                if tabular:
+                    buffer_parts.append(after_think)
+                else:
+                    yield after_think
+            continue
+
+        if "<think>" not in full_response:
+            if tabular:
+                buffer_parts.append(content)
+            else:
+                yield content
+            full_response = ""
+
+    if tabular and buffer_parts:
+        yield normalize_markdown_render_output("".join(buffer_parts))
+
+    if final_usage:
+        log_token_usage_table(
+            context="kimi_stream",
+            usage={"provider": "kimi", "model": api_model, **final_usage},
+            provider="kimi",
+            model_name=api_model,
+        )
+
+
 # ── Unified text generation (routes Gemini ↔ Claude) ─────────────────────────
 
 def _is_transient_gemini_error(exc: BaseException) -> bool:
@@ -2576,6 +2932,24 @@ def _generate_text(
         except Exception as exc:  # noqa: BLE001
             logger.warning("[DocumentAI] DeepSeek generate failed (%s) — falling back to Gemini", exc)
         # Never leave a (free-tier) user fully blocked on a DeepSeek outage.
+        model_name = "gemini-2.5-flash"
+        provider = "gemini"
+
+    if provider == "kimi":
+        try:
+            result = _generate_text_kimi(
+                prompt,
+                model_name=model_name,
+                gen_kwargs=gen_kwargs,
+                llm_params=llm_params,
+            )
+            if result:
+                return result
+            logger.warning("[DocumentAI] Kimi returned empty — falling back to Gemini")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DocumentAI] Kimi generate failed (%s) — falling back to Gemini", exc)
+        # Moonshot returns a transient `engine_overloaded_error` under load; never leave
+        # an admin-selected Kimi model as a dead end for the user.
         model_name = "gemini-2.5-flash"
         provider = "gemini"
 
