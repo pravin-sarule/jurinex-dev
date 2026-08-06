@@ -314,15 +314,41 @@ These `.env` knobs control that cost and are re-read on **every request** — th
 | `KIMI_MODEL`                  | `kimi-k2.6`                  | Used only when the UI sends the bare label `kimi`        |
 | `KIMI_BASE_URL`               | `https://api.moonshot.ai/v1` | Use `api.moonshot.cn` only with a mainland-China key      |
 | `KIMI_THINKING_ENABLED`       | `false`                      | Master switch for the reasoning pass                      |
-| `KIMI_THINKING_BUDGET_TOKENS` | `500`                        | Caps reasoning tokens whenever thinking is on             |
+| `KIMI_THINKING_BUDGET_TOKENS` | `500`                        | Reasoning budget hint when thinking is on (**not** a hard cap — see below) |
 | `KIMI_REASONING_EFFORT`       | *(blank)*                    | `low` / `high` / `max` for `kimi-k3`; blank = not sent    |
 | `KIMI_STREAM_TABULAR`         | `true`                       | Stream tables live; `false` withholds them until complete |
 
 Measured impact of thinking on a one-line answer: **32 output tokens / 2.5s** with thinking off,
 versus **2,660 tokens / 71s** with it on and uncapped.
 
+> ⚠️ **`KIMI_THINKING_BUDGET_TOKENS` is a hint, not a hard cap.** On a real ~350-word legal
+> question, reasoning ran **860–2,065 tokens whether the budget was set to 500 or 2,000**, and
+> one benchmark run spent the *entire* `max_tokens` ceiling on reasoning — returning a truncated
+> answer. The only reliable cost bounds are `KIMI_THINKING_ENABLED=false` and `max_output_tokens`.
+
 `kimi-k2.7-code` refuses `thinking: disabled` outright; the adapter detects that specific error
 and transparently retries with `budget_tokens` instead, so it stays cheap without special-casing.
+
+### Measured throughput
+
+Live against `api.moonshot.ai`, ~350-word generation, repeated runs. Treat as indicative — the
+endpoint returns `429` / `engine_overloaded_error` under load, so real-world figures vary.
+
+| Model                      | Thinking | Time to first token | Tokens/sec | Tokens/min |
+| -------------------------- | -------- | ------------------- | ---------- | ---------- |
+| `kimi-k2.7-code-highspeed` | on       | ~1.0s               | **216–240** | ~13,000–14,400 |
+| `kimi-k2.6`                | off      | ~0.8s               | 38.5       | ~2,300     |
+| `kimi-k2.6`                | on       | ~1.0s               | 34–43      | ~2,000–2,600 |
+| `kimi-k2.7-code`           | on       | ~0.8s               | 34.6       | ~2,100     |
+| `kimi-k3`                  | off      | ~3.2s               | 31.5       | ~1,900     |
+| `kimi-k3`                  | on       | ~2.8s               | 45.0       | ~2,700     |
+
+`kimi-k2.7-code-highspeed` is roughly **6× faster** than every other model on this key and is the
+clear choice when latency matters. `kimi-k3` has the slowest time-to-first-token (~3s).
+
+Moonshot returns **no rate-limit headers**, so per-account TPM/RPM quotas cannot be read from the
+API — check the Moonshot console for your tier. Rate limiting is real regardless: `429` responses
+were observed during normal use (the client auto-retries).
 
 ### Free-tier override
 

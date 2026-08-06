@@ -440,8 +440,12 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("KIMI_THINKING_ENABLED"),
     )
-    # Cap on reasoning tokens when thinking IS enabled. Moonshot honours this
-    # (budget 500 → 264-334 reasoning tokens measured, vs ~490 uncapped).
+    # Reasoning-token budget when thinking IS enabled. Moonshot treats this as a HINT,
+    # NOT a hard cap: measured on a real ~350-word legal question, reasoning ran
+    # 860-2,065 tokens whether the budget was 500 or 2,000, and one run consumed the
+    # entire max_tokens ceiling on reasoning alone (finish_reason=length, empty answer).
+    # Lower it to nudge the model, but do NOT rely on it to bound cost — the only hard
+    # controls are kimi_thinking_enabled=False and max_output_tokens.
     kimi_thinking_budget_tokens: int = Field(
         default=500,
         validation_alias=AliasChoices("KIMI_THINKING_BUDGET_TOKENS"),
