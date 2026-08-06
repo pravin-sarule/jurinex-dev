@@ -3002,6 +3002,12 @@ def intelligent_chat(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# Strong references to detached streaming producers. asyncio holds only WEAK references
+# to tasks, so a task nobody keeps can be garbage-collected mid-flight — which would
+# silently kill exactly the background generation this set exists to protect.
+_BACKGROUND_STREAM_TASKS: set[asyncio.Task] = set()
+
+
 @router.post("/{folder_name}/intelligent-chat/stream")
 async def intelligent_chat_stream(
     folder_name: str,
@@ -5595,8 +5601,56 @@ async def intelligent_chat_stream(
             logger.exception("[Route:intelligent_chat_stream] folder=%s DB-Gemini fallback failed: %s", folder_name, exc)
             yield _sse({"type": "error", "message": str(exc)})
 
+    # ── Detached producer: keep generating after the client disconnects ───────────
+    # A StreamingResponse generator is CLOSED the instant the client goes away, raising
+    # GeneratorExit at whatever `yield` it is sitting on. Everything AFTER the streaming
+    # loop — creating the chat session and writing the Q&A to folder_chats (see
+    # `_persist_stream_chat` above) — would then never run, so a BRAND-NEW chat that the
+    # user navigated away from mid-stream vanished from history completely.
+    #
+    # Running `_event_generator()` as a DETACHED task that drains into a queue decouples
+    # producing from delivering: the client leaving closes only the forwarder below,
+    # while the producer runs to completion and persists the chat exactly as if the user
+    # had stayed. Reconnecting/reopening the case then shows the finished answer.
+    stream_queue: asyncio.Queue = asyncio.Queue()
+    _STREAM_EOF = object()
+
+    async def _produce_events() -> None:
+        try:
+            async for line in _event_generator():
+                stream_queue.put_nowait(line)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "[Route:intelligent_chat_stream] background producer failed folder=%s: %s",
+                folder_name,
+                exc,
+            )
+        finally:
+            stream_queue.put_nowait(_STREAM_EOF)
+
+    producer = asyncio.create_task(_produce_events())
+    _BACKGROUND_STREAM_TASKS.add(producer)
+    producer.add_done_callback(_BACKGROUND_STREAM_TASKS.discard)
+
+    async def _forward_events() -> AsyncGenerator[str, None]:
+        try:
+            while True:
+                item = await stream_queue.get()
+                if item is _STREAM_EOF:
+                    break
+                yield item
+        except (GeneratorExit, asyncio.CancelledError):
+            # Client navigated away. Deliberately do NOT cancel `producer` — letting it
+            # finish is the entire point, so the session and answer still reach the DB.
+            logger.info(
+                "[Route:intelligent_chat_stream] client disconnected folder=%s — generation "
+                "continues in the background and will be saved to chat history",
+                folder_name,
+            )
+            raise
+
     return StreamingResponse(
-        _event_generator(),
+        _forward_events(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
