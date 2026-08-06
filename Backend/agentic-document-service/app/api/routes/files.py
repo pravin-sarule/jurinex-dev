@@ -4617,6 +4617,9 @@ async def intelligent_chat_stream(
                         claude_stream_error: list[str] = []
 
                         def _run_claude_stream():
+                            # Bind the request's token-usage session inside the executor thread —
+                            # see _run_kimi_stream below for why.
+                            bind_token_usage_session(usage_session_key)
                             try:
                                 # Draft mode on a Claude engine: attach the template PDF as a document
                                 # block via the dedicated generator (Claude reads PDFs natively).
@@ -4640,6 +4643,7 @@ async def intelligent_chat_stream(
                             except Exception as exc:
                                 claude_stream_error.append(str(exc))
                             finally:
+                                unbind_token_usage_session()
                                 loop.call_soon_threadsafe(chunk_queue.put_nowait, _SENTINEL)
 
                         stream_future = loop.run_in_executor(None, _run_claude_stream)
