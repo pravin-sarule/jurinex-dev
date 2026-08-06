@@ -269,6 +269,11 @@ export default function CitationResearchPanel() {
   const casesPerPage = 6;
   const [selectedCaseId, setSelectedCaseId] = useState(null);
   const [caseText, setCaseText] = useState('');
+  // Fresh matter: the case has NO drafted pleading yet — the system reads
+  // ALL of the case's source documents and the lawyer's stated objective
+  // (typed in the textarea, required) drives PROPOSED grounds via the
+  // dedicated /analyze/case/fresh route.
+  const [freshMode, setFreshMode] = useState(false);
   const [file, setFile] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [searching, setSearching] = useState(false);
@@ -289,6 +294,7 @@ export default function CitationResearchPanel() {
   // Once analysed, the server's researchMode is the truth for this session.
   const isGrounds = (analysis?.researchMode || researchMode) === 'grounds';
   const isCombined = (analysis?.researchMode || researchMode) === 'combined';
+  const isFresh = (analysis?.researchMode || researchMode) === 'fresh';
   const groundsMeta = analysis?.groundsMeta || null;
 
   // Persist the whole research flow (analysis, selections, fetched
@@ -476,22 +482,108 @@ export default function CitationResearchPanel() {
     return summary.length > 260 ? `${summary.slice(0, 260)}…` : summary;
   }, [analysis]);
 
+  // Case grid + pagination, shared by the "My cases" tab and the optional
+  // case picker on the "Paste or upload" tab (fresh research: case documents
+  // + the typed description as the objective).
+  const CasePicker = () => (
+    <div>
+      {casesLoading && (
+        <div className="flex items-center gap-2 text-sm text-[#64748B] py-6 justify-center">
+          <ArrowPathIcon className="h-4 w-4 animate-spin" /> Loading your cases…
+        </div>
+      )}
+      {!casesLoading && cases.length === 0 && (
+        <div className="rounded-xl border border-dashed border-[#CBD5E1] bg-white px-4 py-8 text-center text-sm text-[#64748B]">
+          No cases found in your Projects. Upload case documents under Projects first,
+          or switch to “Paste or upload”.
+        </div>
+      )}
+      <div className="grid md:grid-cols-2 gap-3">
+        {cases.slice((casesPage - 1) * casesPerPage, casesPage * casesPerPage).map((cs) => {
+          const active = selectedCaseId === cs.id;
+          return (
+            <button
+              key={cs.id}
+              onClick={() => setSelectedCaseId(active ? null : cs.id)}
+              className={`text-left rounded-xl border p-4 transition-all ${
+                active
+                  ? 'border-[#21C1B6] bg-[#F0FDFA] shadow-sm'
+                  : 'border-[#E2E8F0] bg-white hover:border-[#CBD5E1] hover:shadow-sm'
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <span className={`h-9 w-9 rounded-lg flex items-center justify-center shrink-0 ${active ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
+                  <BriefcaseIcon className={`h-5 w-5 ${active ? 'text-[#21C1B6]' : 'text-[#94A3B8]'}`} />
+                </span>
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-[#0F172A] leading-snug truncate">
+                    {cs.case_title || cs.name || cs.id}
+                  </div>
+                  <div className="text-[11px] text-[#94A3B8] mt-1">
+                    Issues will be generated from this case's documents, with page references.
+                  </div>
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      {cases.length > casesPerPage && (
+        <div className="mt-4 flex items-center justify-between">
+          <div className="text-[11px] text-[#94A3B8]">
+            Showing {(casesPage - 1) * casesPerPage + 1} to {Math.min(casesPage * casesPerPage, cases.length)} of {cases.length}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              disabled={casesPage === 1}
+              onClick={() => setCasesPage(p => p - 1)}
+              className="p-1 rounded-lg border border-[#E2E8F0] disabled:opacity-30"
+            >
+              <ChevronLeftIcon className="h-4 w-4 text-[#64748B]" />
+            </button>
+            <button
+              disabled={casesPage * casesPerPage >= cases.length}
+              onClick={() => setCasesPage(p => p + 1)}
+              className="p-1 rounded-lg border border-[#E2E8F0] disabled:opacity-30"
+            >
+              <ChevronLeftIcon className="h-4 w-4 text-[#64748B] rotate-180" />
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
   const runAnalyze = async () => {
     if (inputMode === 'case' && !selectedCaseId) {
       toast.info('Select one of your cases first');
       return;
     }
-    if (inputMode === 'text' && !caseText.trim() && !file) {
+    if (inputMode === 'case' && freshMode && !caseText.trim()) {
+      toast.info('Describe what the client wants — the objective drives a fresh matter\'s grounds');
+      return;
+    }
+    if (inputMode === 'text' && selectedCaseId && !caseText.trim()) {
+      toast.info('Describe what the client wants — the description drives the selected case\'s research');
+      return;
+    }
+    if (inputMode === 'text' && !selectedCaseId && !caseText.trim() && !file) {
       toast.info('Paste your case details or upload a document first');
       return;
     }
     setAnalyzing(true);
     try {
       const data = inputMode === 'case'
-        ? await judgementApi.analyzeCase(selectedCaseId, caseText.trim(), researchMode)
-        : (file
-          ? await judgementApi.analyzeUpload(file, caseText.trim(), researchMode)
-          : await judgementApi.analyze({ text: caseText.trim(), mode: researchMode }));
+        ? (freshMode
+          ? await judgementApi.analyzeCaseFresh(selectedCaseId, caseText.trim())
+          : await judgementApi.analyzeCase(selectedCaseId, caseText.trim(), researchMode))
+        : (selectedCaseId
+          // Paste tab with a case selected: fresh research — all of the
+          // case's documents + the typed description as the objective.
+          ? await judgementApi.analyzeCaseFresh(selectedCaseId, caseText.trim())
+          : file
+            ? await judgementApi.analyzeUpload(file, caseText.trim(), researchMode)
+            : await judgementApi.analyze({ text: caseText.trim(), mode: researchMode }));
       setAnalysis(data);
       setSelectedIds(new Set((data.suggestedIssues || []).map((i) => i.id)));
       setCustomIssues([]);
@@ -648,71 +740,7 @@ export default function CitationResearchPanel() {
 
               {inputMode === 'case' && (
                 <div className="mt-4">
-                  {casesLoading && (
-                    <div className="flex items-center gap-2 text-sm text-[#64748B] py-6 justify-center">
-                      <ArrowPathIcon className="h-4 w-4 animate-spin" /> Loading your cases…
-                    </div>
-                  )}
-                  {!casesLoading && cases.length === 0 && (
-                    <div className="rounded-xl border border-dashed border-[#CBD5E1] bg-white px-4 py-8 text-center text-sm text-[#64748B]">
-                      No cases found in your Projects. Upload case documents under Projects first,
-                      or switch to “Paste or upload”.
-                    </div>
-                  )}
-                  <div className="grid md:grid-cols-2 gap-3">
-                    {cases.slice((casesPage - 1) * casesPerPage, casesPage * casesPerPage).map((cs) => {
-                      const active = selectedCaseId === cs.id;
-                      return (
-                        <button
-                          key={cs.id}
-                          onClick={() => setSelectedCaseId(active ? null : cs.id)}
-                          className={`text-left rounded-xl border p-4 transition-all ${
-                            active
-                              ? 'border-[#21C1B6] bg-[#F0FDFA] shadow-sm'
-                              : 'border-[#E2E8F0] bg-white hover:border-[#CBD5E1] hover:shadow-sm'
-                          }`}
-                        >
-                          <div className="flex items-start gap-3">
-                            <span className={`h-9 w-9 rounded-lg flex items-center justify-center shrink-0 ${active ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
-                              <BriefcaseIcon className={`h-5 w-5 ${active ? 'text-[#21C1B6]' : 'text-[#94A3B8]'}`} />
-                            </span>
-                            <div className="min-w-0">
-                              <div className="text-sm font-semibold text-[#0F172A] leading-snug truncate">
-                                {cs.case_title || cs.name || cs.id}
-                              </div>
-                              <div className="text-[11px] text-[#94A3B8] mt-1">
-                                Issues will be generated from this case's documents, with page references.
-                              </div>
-                            </div>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {cases.length > casesPerPage && (
-                    <div className="mt-4 flex items-center justify-between">
-                      <div className="text-[11px] text-[#94A3B8]">
-                        Showing {(casesPage - 1) * casesPerPage + 1} to {Math.min(casesPage * casesPerPage, cases.length)} of {cases.length}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          disabled={casesPage === 1}
-                          onClick={() => setCasesPage(p => p - 1)}
-                          className="p-1 rounded-lg border border-[#E2E8F0] disabled:opacity-30"
-                        >
-                          <ChevronLeftIcon className="h-4 w-4 text-[#64748B]" />
-                        </button>
-                        <button
-                          disabled={casesPage * casesPerPage >= cases.length}
-                          onClick={() => setCasesPage(p => p + 1)}
-                          className="p-1 rounded-lg border border-[#E2E8F0] disabled:opacity-30"
-                        >
-                          <ChevronLeftIcon className="h-4 w-4 text-[#64748B] rotate-180" />
-                        </button>
-                      </div>
-                    </div>
-                  )}
+                  <CasePicker />
 
                   {/* History for the selected case — its past citation research */}
                   {selectedCaseId && caseHistory.length > 0 && (
@@ -728,20 +756,75 @@ export default function CitationResearchPanel() {
                 </div>
               )}
 
+              {/* Fresh-matter toggle: nothing drafted yet — proposed grounds
+                  are built from ALL case documents + the typed objective. */}
+              {inputMode === 'case' && (
+                <label className={`mt-4 flex items-start gap-3 rounded-xl border p-3.5 cursor-pointer transition-colors ${
+                  freshMode ? 'border-[#21C1B6] bg-[#F0FDFA]' : 'border-[#E2E8F0] bg-white hover:border-[#21C1B6]/40'
+                }`}>
+                  <input
+                    type="checkbox"
+                    checked={freshMode}
+                    onChange={(e) => setFreshMode(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-[#CBD5E1] accent-[#21C1B6]"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-sm font-semibold text-[#0F172A]">
+                      Fresh matter — nothing drafted or filed yet
+                    </span>
+                    <span className="block mt-0.5 text-[12px] text-[#64748B] leading-relaxed">
+                      The system reads all of this case's source documents and builds
+                      <span className="font-semibold"> proposed grounds</span> from what you
+                      want to achieve. Describe your objective below — it is required.
+                    </span>
+                  </span>
+                </label>
+              )}
+
+              {/* Paste tab: optionally research one of the user's cases with
+                  the typed description — the fresh route reads ALL of the
+                  case's documents and treats the description as the objective.
+                  Picker first, description box below it. */}
+              {inputMode === 'text' && (
+                <div className="mt-5">
+                  <div className="flex items-center gap-3">
+                    <span className="h-px flex-1 bg-[#E2E8F0]" />
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-[#94A3B8]">
+                      Select one of your cases (optional) — the description below drives its research
+                    </span>
+                    <span className="h-px flex-1 bg-[#E2E8F0]" />
+                  </div>
+                  <div className="mt-3">
+                    <CasePicker />
+                  </div>
+                  {selectedCaseId && (
+                    <div className="mt-3 rounded-xl border border-[#99F6E4] bg-[#F0FDFA] px-4 py-2.5 text-[12px] text-[#0D9488] leading-relaxed">
+                      The system will read <span className="font-semibold">all documents of the selected case</span> and
+                      build <span className="font-semibold">proposed grounds</span> from your description below — describe
+                      what the client wants, then Analyse. Deselect the case to research pasted text instead.
+                    </div>
+                  )}
+                </div>
+              )}
+
               <textarea
                 value={caseText}
                 onChange={(e) => setCaseText(e.target.value)}
-                rows={inputMode === 'case' ? 3 : 9}
+                rows={inputMode === 'case' ? (freshMode ? 5 : 3) : (selectedCaseId ? 5 : 9)}
                 placeholder={inputMode === 'case'
-                  ? 'Optional instruction, e.g. "we act for the workmen; focus on the wage revision demand"'
-                  : 'Paste the case summary, client brief, or your instructions… (e.g. FIR under S.420 IPC against a director over a supply-contract dispute; we want the FIR quashed)'}
+                  ? (freshMode
+                    ? 'Describe what the client wants (required) — e.g. "we act for the accused director; the FIR arises from a supply-contract dispute and we want it quashed" or "we act for the supplier; recover the unpaid invoices with interest"'
+                    : 'Optional instruction, e.g. "we act for the workmen; focus on the wage revision demand"')
+                  : (selectedCaseId
+                    ? 'Describe what the client wants for the selected case (required) — e.g. "we act for the accused; seek regular bail" — the system reads all the case documents and builds proposed grounds from this'
+                    : 'Paste the case summary, client brief, or your instructions… (e.g. FIR under S.420 IPC against a director over a supply-contract dispute; we want the FIR quashed)')}
                 className="mt-4 w-full bg-white border border-[#E2E8F0] text-[#0F172A] text-sm rounded-xl p-4 outline-none focus:border-[#21C1B6]/50 focus:ring-2 focus:ring-[#21C1B6]/10 leading-relaxed shadow-sm placeholder:text-[#94A3B8]"
               />
 
               {/* One research method: pleaded grounds + spotted issues are
                   extracted together in a single combined pass. */}
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                {inputMode === 'text' && (
+                {inputMode === 'text' && !selectedCaseId && (
                   <label className="flex items-center gap-2 cursor-pointer text-sm text-[#64748B] hover:text-[#0F172A]">
                     <ArrowUpTrayIcon className="h-4 w-4" />
                     <span>{file ? file.name : 'Attach petition / judgment (PDF, DOCX)'}</span>
@@ -753,7 +836,7 @@ export default function CitationResearchPanel() {
                     />
                   </label>
                 )}
-                {inputMode === 'text' && file && (
+                {inputMode === 'text' && !selectedCaseId && file && (
                   <button onClick={() => setFile(null)} className="text-xs text-[#94A3B8] hover:text-[#21C1B6]">
                     Remove file
                   </button>
@@ -833,11 +916,11 @@ export default function CitationResearchPanel() {
             </div>
           )}
 
-          {/* Extraction metadata (grounds + combined modes) */}
-          {(isGrounds || isCombined) && groundsMeta && (
+          {/* Extraction metadata (grounds + combined + fresh modes) */}
+          {(isGrounds || isCombined || isFresh) && groundsMeta && (
             <div className="mt-3 rounded-xl border border-[#E2E8F0] bg-white px-4 py-3">
               <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-[#475569]">
-                <span><span className="font-semibold text-[#0F172A]">{groundsMeta.totalGrounds ?? suggested.length}</span> pleaded ground{(groundsMeta.totalGrounds ?? suggested.length) === 1 ? '' : 's'}</span>
+                <span><span className="font-semibold text-[#0F172A]">{groundsMeta.totalGrounds ?? suggested.length}</span> {isFresh ? 'proposed' : 'pleaded'} ground{(groundsMeta.totalGrounds ?? suggested.length) === 1 ? '' : 's'}</span>
                 {groundsMeta.spottedIssues != null && (
                   <span><span className="font-semibold text-[#0F172A]">{groundsMeta.spottedIssues}</span> spotted issue{groundsMeta.spottedIssues === 1 ? '' : 's'}</span>
                 )}
@@ -859,7 +942,7 @@ export default function CitationResearchPanel() {
 
           <div className="mt-7 flex items-center justify-between">
             <h2 className="text-sm font-bold text-[#0F172A]">
-              {isGrounds ? 'Grounds of the case' : isCombined ? 'Grounds & issues' : 'Legal issues'} <span className="ml-2 font-medium text-[#94A3B8]">{selectedIds.size} of {suggested.length} selected</span>
+              {isGrounds ? 'Grounds of the case' : isCombined ? 'Grounds & issues' : isFresh ? 'Proposed grounds for this matter' : 'Legal issues'} <span className="ml-2 font-medium text-[#94A3B8]">{selectedIds.size} of {suggested.length} selected</span>
             </h2>
             {selectedIds.size > 0 && (
               <button onClick={() => setSelectedIds(new Set())} className="text-xs font-medium text-[#21C1B6] hover:text-[#1AA49B]">
@@ -875,7 +958,8 @@ export default function CitationResearchPanel() {
               <div className="text-xs text-[#94A3B8] italic col-span-2">
                 {isGrounds ? 'No pleaded grounds were found — add your own below.'
                   : isCombined ? 'No grounds or issues were found — add your own below.'
-                    : 'No issues were suggested — add your own below.'}
+                    : isFresh ? 'No grounds could be proposed — describe your objective more precisely and re-analyse.'
+                      : 'No issues were suggested — add your own below.'}
               </div>
             )}
             {suggested.map((issue) => {

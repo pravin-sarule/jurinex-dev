@@ -30,6 +30,7 @@ from agents import (
 )
 from config import get_settings
 from schemas import (
+    AnalyzeCaseFreshRequest,
     AnalyzeCaseRequest,
     AnalyzeResponse,
     Candidate,
@@ -284,6 +285,47 @@ async def analyze_from_case(request: AnalyzeCaseRequest, http_request: Request) 
         clarificationQuestion=context.clarification_question,
         caseId=request.caseId, caseTitle=case_title or None,
         researchMode=request.mode, groundsMeta=grounds_meta or None,
+    )
+
+
+@app.post("/api/v1/analyze/case/fresh", response_model=AnalyzeResponse)
+async def analyze_fresh_case(request: AnalyzeCaseFreshRequest,
+                             http_request: Request) -> AnalyzeResponse:
+    """Fresh-matter research (own route): the case has NO drafted pleading
+    yet, so there are no grounds to read. ALL of the case's source documents
+    are pulled from the agentic document service and the lawyer's stated
+    OBJECTIVE (what the client wants) drives PROPOSED grounds — then the
+    identical pipeline (query generation → IK fan-out → per-judgment
+    verification → reports) runs unchanged."""
+    objective = (request.objective or "").strip()
+    if not objective:
+        raise HTTPException(status_code=400,
+                            detail="objective is required — describe what the client wants to achieve")
+    auth_header = http_request.headers.get("authorization")
+    user_id = http_request.headers.get("x-user-id") or request.userId
+    try:
+        case_title, pages, llm_text, full_text = await fetch_case_pages(
+            request.caseId, auth_header, user_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Document service unreachable: {exc}")
+
+    # The objective leads the LLM text, and joins the source text so the
+    # anti-invention guard doesn't strike objective-derived statements.
+    llm_text = f"[CLIENT'S OBJECTIVE]\n{objective}\n\n{llm_text}"
+    full_text = f"{full_text}\n\n{objective}"
+
+    session_id, context, issues, grounds_meta = await analyze_case(
+        llm_text, source_text=full_text, pages=pages, mode="fresh",
+        objective=objective)
+    _tag_session(session_id, user_id, case_title or None, str(request.caseId))
+    return AnalyzeResponse(
+        sessionId=session_id, caseContext=context, suggestedIssues=issues,
+        needsClarification=context.needs_clarification,
+        clarificationQuestion=context.clarification_question,
+        caseId=request.caseId, caseTitle=case_title or None,
+        researchMode="fresh", groundsMeta=grounds_meta or None,
     )
 
 

@@ -398,6 +398,25 @@ function folderPathSegment(folderName) {
   return encodeURIComponent(String(folderName ?? '').trim());
 }
 
+/**
+ * LLM shape-drift guard for extracted case fields: some prompt/model
+ * combinations wrap each field as {value, status, evidence} instead of the
+ * plain value. The create-case form renders these values directly, and React
+ * throws "Objects are not valid as a React child" on such wrappers — unwrap
+ * recursively. Party objects ({fullName, role, …}) have no `value` key and
+ * pass through untouched.
+ */
+const flattenExtractedValues = (v) => {
+  if (Array.isArray(v)) return v.map(flattenExtractedValues);
+  if (v && typeof v === 'object') {
+    if ('value' in v) return flattenExtractedValues(v.value);
+    const out = {};
+    for (const key of Object.keys(v)) out[key] = flattenExtractedValues(v[key]);
+    return out;
+  }
+  return v;
+};
+
 const getAuthHeader = () => {
   const token = localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('access_token') || localStorage.getItem('jwt') || localStorage.getItem('auth_token');
   const userId = getUserIdForDrafting();
@@ -812,7 +831,7 @@ const documentApi = {
   extractCaseFieldsFromFolder: async (folderName) => {
     try {
       console.log(`[extractCaseFieldsFromFolder] 🔍 Extracting fields from folder: ${folderName}`);
-      
+
       // URL encode the folderName to handle paths with slashes
       const encodedFolderName = encodeURIComponent(folderName);
       const response = await axios.post(
@@ -825,10 +844,10 @@ const documentApi = {
       );
 
       console.log(`[extractCaseFieldsFromFolder] ✅ Extraction completed`);
-      
+
       return {
         success: true,
-        extractedData: response.data.extractedData || {},
+        extractedData: flattenExtractedValues(response.data.extractedData || {}),
       };
     } catch (error) {
       console.error('[extractCaseFieldsFromFolder] ❌ Error:', error);
@@ -868,7 +887,7 @@ const documentApi = {
       return {
         success: true,
         folderName,
-        extractedData: extracted?.extractedData || {},
+        extractedData: flattenExtractedValues(extracted?.extractedData || {}),
         uploadedFiles: uploadResult.uploadedFiles || [],
       };
     } catch (error) {
