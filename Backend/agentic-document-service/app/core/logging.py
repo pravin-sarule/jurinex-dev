@@ -196,7 +196,7 @@ def _compute_widths() -> None:
     elif term < 130:
         comp, model = 16, 20
     else:
-        comp, model = 20, 24
+        comp, model = 22, 24
 
     _S.widths = {'time': 8, 'level': 5, 'component': comp, 'function': 19, 'model': model}
     cols = ['time', 'level', 'component'] + (['function'] if _S.show_function else []) + ['model']
