@@ -5,10 +5,11 @@ import './styles/ClaudeAI.css';
 import './styles/modern-ui.css';
 import App from './App.jsx';
 import { AuthProvider } from './context/AuthContext.jsx';
-import { ThemeProvider } from './context/ThemeContext.jsx';
+import { ThemeProvider, initThemePref } from './context/ThemeContext.jsx';
 import { initFontPref } from './utils/fontPrefs.js';
 
-// Apply the user's saved site-wide font (Settings → Appearance) before first paint.
+// Apply saved theme + font before first paint (Settings → Appearance).
+initThemePref();
 initFontPref();
 
 // pdfmake emits "Ran out of space in font private use area" for large fonts

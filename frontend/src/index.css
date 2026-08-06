@@ -169,6 +169,27 @@ html[data-theme='sepia'] {
   background: #faf6ec;
 }
 
+/* Evergreen — same mechanism as sepia/dark: one root filter restyles the
+   ENTIRE app (every page, including hardcoded light colors). Active only
+   when Settings → Appearance → Theme = Evergreen. */
+html[data-theme='evergreen'] {
+  filter: sepia(0.34) hue-rotate(88deg) saturate(0.86) contrast(0.97);
+  background: #eef6f2;
+  color-scheme: light;
+}
+
+/* Deep green shell for dark-by-design chrome (sidebar / mobile header).
+   Same .jnx-keep-colors hook dark mode uses; background stays exact while
+   the root filter above tints the rest of the page. */
+html[data-theme='evergreen'] .jnx-keep-colors {
+  background-color: #062f2a !important;
+}
+
+/* Theme swatches keep designed preview colors (parallel to dark-mode rule). */
+html[data-theme='evergreen'] .jnx-theme-swatch {
+  filter: contrast(1.03) saturate(1.16) hue-rotate(-88deg) sepia(0);
+}
+
 /* ------------------------------------------------------------------ */
 /* Text-size preference (Settings → Appearance → Font size).           */
 /* TEXT ONLY — layout, buttons and menus never scale. Chat/analysis    */
