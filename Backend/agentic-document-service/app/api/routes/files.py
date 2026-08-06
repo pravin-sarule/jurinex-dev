@@ -5487,6 +5487,9 @@ async def intelligent_chat_stream(
                     )
                 except Exception as _tok_exc:
                     logger.debug("[Route:intelligent_chat_stream] draft token log skipped: %s", _tok_exc)
+            # Report the provider that ACTUALLY answered. This was hardcoded to
+            # "gemini_direct", which mislabelled every Claude/DeepSeek/Kimi request.
+            _routing_label = f"{str(locals().get('stream_provider') or 'gemini')}_direct"
             usage_totals = flush_aggregated_token_usage_table(
                 usage_session_key,
                 endpoint="/api/files/{folder}/intelligent-chat/stream",
@@ -5495,7 +5498,7 @@ async def intelligent_chat_stream(
                 request_id=request_id,
                 model_name=actual_model_name,
                 answer_length=len(answer or ""),
-                routing="gemini_direct",
+                routing=_routing_label,
                 retrieved_chunks=_rag_chunks_used,
             ) or {
                 "inputTokens": input_tokens,
