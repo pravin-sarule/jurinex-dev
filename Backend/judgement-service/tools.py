@@ -450,6 +450,10 @@ class IndianKanoonClient:
         settings = get_settings()
         self._semaphore = asyncio.Semaphore(settings.ik_max_concurrency)
         self._http: httpx.AsyncClient | None = None
+        # Set on HTTP 401/403 — the token was REJECTED (prepaid balance out /
+        # token expired). Surfaced to the UI so an auth failure never
+        # masquerades as an honest "0 citations". Cleared by the next 200.
+        self.auth_failed = False
 
     @property
     def _token(self) -> str | None:
@@ -491,9 +495,17 @@ class IndianKanoonClient:
             try:
                 async with self._semaphore:
                     resp = await self._client().post(url, params=params or {}, headers=headers)
+                if resp.status_code in (401, 403):
+                    self.auth_failed = True
+                    logger.error("[IK] token REJECTED (HTTP %s) for %s — the Indian "
+                                 "Kanoon prepaid account is likely out of balance or "
+                                 "the token expired; every search returns empty until "
+                                 "it is recharged", resp.status_code, path)
+                    return None
                 if resp.status_code >= 400:
                     logger.warning("[IK] HTTP %s for %s: %s", resp.status_code, path, resp.text[:200])
                     return None
+                self.auth_failed = False
                 return resp.json()
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 if attempt < settings.ik_max_retries:

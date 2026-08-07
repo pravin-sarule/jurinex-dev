@@ -131,7 +131,12 @@ def _budget_case_text(raw_text: str, budget: int) -> str:
 
 
 def _gen_config(temperature: float) -> genai_types.GenerateContentConfig:
-    return genai_types.GenerateContentConfig(temperature=temperature)
+    # Determinism (user requirement: the same case must yield the same
+    # issues, queries and judgments on every run): temperature is forced to
+    # 0 regardless of the per-agent request. The argument is kept so
+    # per-agent tuning can return by deleting one line.
+    del temperature
+    return genai_types.GenerateContentConfig(temperature=0.0)
 
 
 # ─── Agentic Document Context Service (Section 5) ────────────────────────────
@@ -205,42 +210,57 @@ def build_document_context_agent() -> SequentialAgent:
 def build_issue_split_agent() -> LlmAgent:
     return LlmAgent(
         name="issue_split",
-        model=get_settings().gemini_model,
+        model=get_settings().gemini_fallback_model,
         description="Splits a case summary into distinct legal issues.",
         instruction=(
-            "You are an expert Indian litigator. Split the case summary provided by "
-            "the user into its DISTINCT legal issues for precedent research.\n\n"
-            "Be EXHAUSTIVE: enumerate EVERY distinct issue the summary supports (up "
-            "to 12), never just the most obvious ones — sweep maintainability/"
-            "limitation, validity of the proceeding, the ingredients of EACH offence "
-            "or claim invoked, abuse-of-process angles, evidentiary questions, and "
-            "relief-specific questions. Never drop an issue to keep the list short.\n\n"
-            "An issue counts as separate ONLY if it is governed by a different area or "
-            "body of law (e.g. repeal/savings law vs. quashing jurisprudence vs. "
-            "directors' cheque liability). Do NOT split rephrasings of the same legal "
-            "question into multiple issues, and do NOT merge genuinely distinct bodies "
-            "of law into one vague issue. A simple single-question case yields exactly "
-            "one issue.\n\n"
-            "Frame each issue as a court would: 'Whether ...?' — ONE SHORT sentence, "
-            "HARD LIMIT 25 words, shape 'Whether <legal question> where <ONE generic "
-            "decisive circumstance>?' (e.g. 'Whether the FIR under Section 306 IPC "
-            "is liable to be quashed when the suicide note does not name the "
-            "accused?'). At most ONE qualifying clause — never chain 'especially "
-            "when…' clauses. Describe facts by legal category only and actors only "
-            "by their legal role ('the planning authority', 'the accused', 'the "
-            "landowner') — no party or person names, no place names, no property "
-            "identifiers (Gat/Survey/CTS/plot numbers), no case or docket numbers, "
-            "no dates. Never add a provision the summary does not support. Order "
-            "issues by importance to the client's relief. Number ids from 1.\n\n"
-            "For EACH issue also fill: title (a standardized ground name a "
+            "Act as an expert Indian legal researcher and advocate, equally at home "
+            "in criminal, civil and commercial litigation. You receive the CLIENT'S "
+            "raw case material (facts, pleadings, FIR, documents and a structured "
+            "context). Extract EVERY distinct legal issue suitable for precedent "
+            "research — a COMPLETE sweep, never just the most obvious grounds.\n\n"
+            "1. Work through the case SYSTEMATICALLY, in this order:\n"
+            "   (a) maintainability / jurisdiction / limitation / alternative remedy;\n"
+            "   (b) validity of the proceeding itself (repealed or wrong statute, "
+            "want of sanction, mandatory procedure not followed);\n"
+            "   (c) the ingredients of EACH offence or claim invoked — offences on "
+            "different shelves (cheating vs forgery vs common intention vs criminal "
+            "breach of trust) are SEPARATE issues where the material challenges them;\n"
+            "   (d) abuse of process / mala fide / counterblast angles;\n"
+            "   (e) evidentiary and burden questions the stage allows;\n"
+            "   (f) relief-specific and consequential questions.\n"
+            "List up to 12 issues; NEVER drop an issue merely to keep the list short "
+            "— the user picks which to research, so completeness costs nothing, but "
+            "a missed issue is a missed line of authority. An ISSUE is a question "
+            "the court must answer — not a fact, a topic, an argument, or the relief "
+            "itself.\n\n"
+            "2. COMPLETENESS CHECK before answering: re-read the material — every "
+            "charged provision, every contention, every defence and every relief "
+            "must map to at least one issue.\n\n"
+            "3. THE CLIENT'S PRESENT CASE ONLY: annexed judgments, orders and "
+            "pleadings from other or earlier proceedings are background, never "
+            "sources of issues; frame earlier-litigation effects as the present "
+            "doctrine (e.g. res judicata), never around a case number.\n\n"
+            "4. Identify the PROCEDURAL STAGE first (quashing / bail / discharge / "
+            "leave to defend / injunction / trial / appeal / writ) and frame every "
+            "issue at that stage's standard of review — threshold stages ask "
+            "'whether the allegations, taken at their highest, disclose…', never "
+            "'whether the accused actually did…'.\n\n"
+            "5. Frame each issue as a court would: 'Whether ...?' — ONE SHORT "
+            "sentence, HARD LIMIT 25 words, shape 'Whether <legal question> where "
+            "<ONE generic decisive circumstance>?'. At most ONE qualifying clause. "
+            "Facts by legal category only, actors by legal role only ('the accused', "
+            "'the planning authority') — no party or person names, place names, "
+            "property identifiers, case numbers, or dates. Never add a provision "
+            "the material does not support. Ground everything in the material — "
+            "never invent. Order by importance to the client's relief; ids from 1.\n\n"
+            "6. For EACH issue also fill: title (a standardized ground name a "
             "practitioner would recognise, in ANY field of law), doctrine (short "
-            "doctrinal label), sub_doctrine (the SPECIFIC trigger/test within "
-            "the doctrine as ONE short snake_case label — e.g. civil_colour, "
-            "settlement, triable_issue, balance_of_convenience, "
-            "repealed_statute_fir — coin whatever fits the field), "
-            "statutory_hook (the governing provision), and perspective "
-            "('petitioner'/'respondent'/'neutral'). Return strict JSON matching "
-            "the schema."
+            "doctrinal label), sub_doctrine (the SPECIFIC trigger/test within the "
+            "doctrine as ONE short snake_case label — e.g. civil_colour, settlement, "
+            "triable_issue, balance_of_convenience, repealed_statute_fir — coin "
+            "whatever fits the field), statutory_hook (the governing provision), "
+            "and perspective ('petitioner'/'respondent'/'neutral'). Return strict "
+            "JSON matching the schema."
         ),
         generate_content_config=_gen_config(0.25),
         output_schema=IssueList,
@@ -297,7 +317,7 @@ _KEYWORD_SYNTAX_ADVANCED = (
 def build_keyword_extract_agent(style: str = "simple") -> LlmAgent:
     return LlmAgent(
         name="keyword_extract",
-        model=get_settings().gemini_model,
+        model=get_settings().gemini_fallback_model,
         description="Generates anchor queries + four-axis search terms for one legal issue.",
         instruction=(
             "You are an expert Indian legal-research librarian building Indian Kanoon "
@@ -913,14 +933,14 @@ async def spot_issues(raw_text: str, context: CaseContext) -> list[Issue]:
     """Stage 1 on Claude (spec issue-spotter prompt): procedural stage first,
     then stage-framed issues with doctrine + statutory hook + perspective.
     Falls back to the Gemini issue-split agent when Claude is unavailable."""
+    user = (
+        f"CASE MATERIAL:\n{_budget_case_text(raw_text, _llm_budget() - 4000)}\n\n"
+        f"STRUCTURED CONTEXT (already extracted and source-verified):\n"
+        f"Facts: {context.facts[:1500]}\n"
+        f"Procedural history: {context.procedural_history[:800]}\n"
+        f"Relief sought: {context.relief_sought[:300]}"
+    )
     if claude_available():
-        user = (
-            f"CASE MATERIAL:\n{_budget_case_text(raw_text, _llm_budget() - 4000)}\n\n"
-            f"STRUCTURED CONTEXT (already extracted and source-verified):\n"
-            f"Facts: {context.facts[:1500]}\n"
-            f"Procedural history: {context.procedural_history[:800]}\n"
-            f"Relief sought: {context.relief_sought[:300]}"
-        )
         result = await claude_parse(ISSUE_SPOTTER_SYSTEM, user, IssueSpotResult)
         if result is not None:
             context.procedural_stage = result.procedural_stage.strip() or None
@@ -943,7 +963,10 @@ async def spot_issues(raw_text: str, context: CaseContext) -> list[Issue]:
                 for idx, s in enumerate(result.issues[:MAX_ISSUES]) if s.issue.strip()
             ]
         logger.warning("[claude] issue spotter unavailable — Gemini issue split fallback")
-    out = await run_agent_once(build_issue_split_agent(), context.raw_case_summary, ["issues"])
+    # The fallback gets the SAME full case material as the Claude path — it
+    # previously received only raw_case_summary (one paragraph), which is why
+    # fallback runs under-spotted or found nothing beyond the grounds.
+    out = await run_agent_once(build_issue_split_agent(), user, ["issues"])
     issue_list = IssueList.model_validate(out.get("issues") or {"issues": []})
     return issue_list.issues[:MAX_ISSUES]
 
@@ -992,7 +1015,7 @@ def build_grounds_extract_agent() -> LlmAgent:
     schema as the Claude path, so downstream conversion is identical."""
     return LlmAgent(
         name="grounds_extract",
-        model=get_settings().gemini_model,
+        model=get_settings().gemini_fallback_model,
         description="Extracts the legal grounds pleaded in a filing.",
         instruction=GROUNDS_EXTRACTOR_SYSTEM,
         generate_content_config=_gen_config(0.1),
@@ -1097,7 +1120,7 @@ def build_fresh_extract_agent() -> LlmAgent:
     and schema as the Claude path, so downstream conversion is identical."""
     return LlmAgent(
         name="fresh_extract",
-        model=get_settings().gemini_model,
+        model=get_settings().gemini_fallback_model,
         description="Formulates proposed grounds for a fresh, unfiled matter.",
         instruction=FRESH_CASE_SYSTEM,
         generate_content_config=_gen_config(0.1),
@@ -1577,6 +1600,14 @@ async def _process_issue(issue: Issue, context: CaseContext,
     if round1["scored"]:
         return {"issue": issue, "keywords": keywords, **round1}
 
+    if curated:
+        # The user hand-picked EXACTLY these queries — never substitute a
+        # generated set behind their back. An honest empty tells them their
+        # selection found nothing usable; widening is their call.
+        logger.info("[pipeline] issue %s: curated queries found no usable judgment — "
+                    "honest empty, no auto-reformulation", issue.id)
+        return {"issue": issue, "keywords": keywords, **round1}
+
     # No usable judgment — reformulate ONCE for this issue and fetch fresh.
     tried = list(keywords.anchor_queries) + list(keywords.contra_queries) + keywords.all_terms()
     logger.info("[pipeline] issue %s: no usable judgment — reformulating queries and retrying",
@@ -1703,8 +1734,17 @@ def assemble_response(
         total_drops += len(drops)
 
         items: list[ResultItem] = []
+        # IK indexes many judgments under SEVERAL doc-ids (reported copy +
+        # order copy, '…'-truncated party lists). Collapse near-duplicates by
+        # normalized title — it embeds the decision date, and the list is
+        # already best-first, so the top-ranked copy is the one kept.
+        seen_titles: set[str] = set()
         for result in clean:
             cand = candidates[result.doc_id]
+            title_key = re.sub(r"[^a-z0-9]+", "", (cand.title or "").lower()) or result.doc_id
+            if title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
             _, court_label = authority_signal(cand)
             pin = None
             if result.pinpoint:

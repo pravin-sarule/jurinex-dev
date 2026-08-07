@@ -113,6 +113,7 @@ def _parse_once(system: str, user: str, output_model: type[TModel],
             response = client.messages.parse(
                 model=model_id,
                 max_tokens=max_tokens,
+                temperature=0.0,  # determinism: same case → same output
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 output_format=output_model,
@@ -134,6 +135,7 @@ def _parse_once(system: str, user: str, output_model: type[TModel],
             response = client.messages.create(
                 model=model_id,
                 max_tokens=max_tokens,
+                temperature=0.0,  # determinism: same case → same output
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 extra_body={"output_config": {"format": {
@@ -160,6 +162,7 @@ def _parse_once(system: str, user: str, output_model: type[TModel],
     response = client.messages.create(
         model=model_id,
         max_tokens=max_tokens,
+        temperature=0.0,  # determinism: same case → same output
         system=system + schema_note,
         messages=[{"role": "user", "content": user}],
     )
