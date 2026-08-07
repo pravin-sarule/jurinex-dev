@@ -253,8 +253,10 @@ def _kimi_supports_thinking_off(api_model: str) -> bool:
 
 
 # ── Prompt-cache reporting ────────────────────────────────────────────────────
-# Moonshot caches any prompt PREFIX longer than 256 tokens automatically — there is
-# no parameter to enable it and no cache id to manage. A cold call omits the
+# Moonshot caches prompts automatically — there is no parameter to enable it and no
+# cache id to manage. The docs claim a 256-token minimum prefix; measured on this
+# account a 26-token prompt cached at 100% on an identical repeat, so size is not the
+# real constraint — a byte-identical request is. A cold call omits the
 # `cached_tokens` field entirely; a warm one reports it BOTH at usage.cached_tokens
 # and usage.prompt_tokens_details.cached_tokens (verified live, stream + non-stream).
 #
@@ -329,7 +331,7 @@ def _log_kimi_cache(api_model: str, usage: Any, *, phase: str) -> int:
         else:
             logger.info(
                 "[DocumentAI] ○ Kimi cache MISS  %s  cached=0/%s input tokens (0%%)  "
-                "(cold prefix, or prefix under the 256-token minimum)",
+                "(cold prompt, or the tail differs from anything cached)",
                 api_model, f"{prompt_tokens:,}",
             )
         return cached

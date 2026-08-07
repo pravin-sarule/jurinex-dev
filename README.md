@@ -349,15 +349,40 @@ retries with `reasoning_effort:"low"` instead, so a new model id can never hard-
 
 ### Prompt caching
 
-Moonshot caches prompts automatically — no parameter, no cache id, no TTL to manage — and bills
-cached input at roughly 80–90% off. The console logs now report it on every Kimi call:
+Moonshot caches prompts automatically — there is no parameter to enable it, no cache id to
+manage and no TTL to set — and bills cached input at roughly **80–90% off**. The console logs
+report the outcome on every Kimi call:
 
 ```
 ⚡ Kimi cache HIT   kimi-k2.6  cached=1,830/1,830 input tokens (100%)  billed_full=0  saved≈$0.0014
-○ Kimi cache MISS  kimi-k2.6  cached=0/4,070 input tokens (0%)  (cold prefix, or prefix under the 256-token minimum)
+○ Kimi cache MISS  kimi-k2.6  cached=0/4,070 input tokens (0%)  (cold prompt, or the tail differs from anything cached)
 ```
 
-The `Cached Input (cache hit)` row also appears in the per-call and final aggregated token tables.
+> **There is no measured minimum prompt size.** Moonshot's docs mention a 256-token floor;
+> live testing on this account cached a **26-token** prompt at 100% on the second identical
+> call. Size is not the constraint — *exactness* is (see the caveat below).
+
+A **cold** call omits the `cached_tokens` field entirely; a **warm** one reports it in *both*
+`usage.cached_tokens` and `usage.prompt_tokens_details.cached_tokens` (verified live, streaming
+and non-streaming). `_cached_input_tokens()` reads either, plus Anthropic's
+`cache_read_input_tokens` spelling, so the same helper works for Claude.
+
+The `saved≈$` figure uses published **input** rates (USD per 1M tokens, miss → hit). Output rates
+are deliberately not guessed, so the number is an input-side estimate only — a model with no
+entry here simply logs the hit without a dollar figure:
+
+| Model prefix | Cache miss | Cache hit | Discount |
+| ------------ | ---------- | --------- | -------- |
+| `kimi-k3`    | $3.00      | $0.30     | 90%      |
+| `kimi-k2.7`  | $0.95      | $0.19     | 80%      |
+| `kimi-k2.6`  | $0.95      | $0.16     | 83%      |
+| `kimi-k2.5`  | $0.60      | $0.10     | 83%      |
+
+Cache reporting is wrapped in a `try/except` that can never break a response — if anything goes
+wrong it degrades to a `debug` line and returns 0.
+
+The `Cached Input (cache hit)` row also appears in the per-call and final aggregated token
+tables — see [Token accounting in the console](#token-accounting-in-the-console).
 
 > ⚠️ **Measured caveat — a shared prefix is NOT enough.** Moonshot's docs advise keeping a stable
 > prefix and varying only the tail. Live testing against this account did **not** reproduce that:
@@ -392,6 +417,63 @@ clear choice when latency matters. `kimi-k3` has the slowest time-to-first-token
 Moonshot returns **no rate-limit headers**, so per-account TPM/RPM quotas cannot be read from the
 API — check the Moonshot console for your tier. Rate limiting is real regardless: `429` responses
 were observed during normal use (the client auto-retries).
+
+### Token accounting in the console
+
+Every chat request prints token usage to the document service's console, from
+[`app/services/token_usage_log.py`](Backend/agentic-document-service/app/services/token_usage_log.py).
+There are **two** tables and they answer different questions:
+
+| Table | Title | Emitted by | Scope |
+| ----- | ----- | ---------- | ----- |
+| Per-call | `TOKEN USAGE - <context> (response complete)` | `log_token_usage_table()`, called inside each provider adapter | **one** LLM call |
+| Aggregated | `FINAL AGGREGATED TOKEN USAGE (response complete)` | `flush_aggregated_token_usage_table()`, called by the route once the answer is finished | **every** call made while answering one question |
+
+The aggregated table is the one to trust for cost. A single chat answer routinely makes several
+LLM calls (query rewriting, retrieval scoring, the answer itself) plus embedding calls, and only
+the aggregate sums them.
+
+Rows shown, when the data is available:
+
+```
+Endpoint · Routing · User ID · Session ID · Request ID
+Primary Model / Model / Models · Providers
+Input Tokens (total) · Output Tokens (total) · Total Tokens (total) · LLM Calls
+Cached Input (cache hit) · Billed at full price
+Answer Length · Retrieved Chunks (RAG)
+```
+
+Two things worth knowing when reading it:
+
+- **`Cached Input` is a subset of `Input Tokens`, not an extra.** `Billed at full price`
+  (`input − cached`) is what you actually pay the miss rate on, and it only appears when
+  something was cached. On a miss the row reads `0 (cache MISS)`.
+- **`Routing` reflects the provider that actually ran**, derived from the resolved stream
+  provider (`kimi_direct`, `claude_direct`, `deepseek_direct`, `gemini_direct`). It used to be
+  hardcoded to `gemini_direct` regardless of the model.
+
+#### Gotcha: usage is accumulated in a *thread-local*
+
+`record_token_usage()` appends to a per-session accumulator keyed off a **thread-local** session
+key. Gemini runs on the request's own event-loop thread, so it picks that key up for free — but
+Claude, DeepSeek and Kimi are driven through `loop.run_in_executor(...)`, which puts them on a
+**worker thread that has no session key bound**. Their usage was recorded against no session, so
+their rows landed in the per-call table but the aggregated table showed blank `Session ID`,
+`User ID`, `LLM Calls` and `Retrieved Chunks`.
+
+The fix is that each executor-backed stream helper binds and unbinds explicitly:
+
+```python
+bind_token_usage_session(usage_session_key)
+try:
+    ...                       # the blocking provider SDK call
+finally:
+    unbind_token_usage_session()
+```
+
+**If you add a new provider that runs in a thread or a `run_in_executor` block, you must do the
+same** — otherwise its tokens silently vanish from the aggregated total and the answer looks
+cheaper than it was.
 
 ### Free-tier override
 
