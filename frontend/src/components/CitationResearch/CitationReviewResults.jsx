@@ -604,15 +604,28 @@ export default function CitationReviewResults({
     if (c) return c;
     return scoreOf(b) - scoreOf(a);
   });
+  // IK lists the same judgment under several doc-ids ('…'-truncated titles,
+  // reported + order copies). Collapse by normalized title (it embeds the
+  // decision date) keeping the best-sorted copy — covers sessions stored
+  // before the server-side dedupe existed.
+  const dedupeResults = (results) => {
+    const seen = new Set();
+    return results.filter((it) => {
+      const key = (it.title || '').toLowerCase().replace(/[^a-z0-9]+/g, '') || it.docId;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
 
   const visibleIssues = useMemo(
     () => issues
       .filter((issue) => activeIssueId == null || issue.id === activeIssueId)
       .map((issue) => ({
         ...issue,
-        results: sortResults((issue.results || []).filter(
+        results: dedupeResults(sortResults((issue.results || []).filter(
           (it) => courtFilter === 'all' || (it.court || 'Unknown court') === courtFilter,
-        )),
+        ))),
       })),
     [issues, activeIssueId, courtFilter], // eslint-disable-line react-hooks/exhaustive-deps
   );
