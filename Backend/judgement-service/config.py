@@ -47,12 +47,14 @@ class Settings(BaseSettings):
     # --- Gemini / Google AI ---
     google_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash"
-    # Model for the CLAUDE-FALLBACK analysis jobs (issue spotting, grounds/
-    # fresh extraction, query generation) when the Anthropic API is exhausted
-    # or unavailable — a stronger flash so fallback quality degrades less.
+    # Models for the CLAUDE-FALLBACK analysis jobs when the Anthropic API is
+    # exhausted or unavailable. Extraction (issue spotting, grounds, fresh)
+    # runs on the Pro tier so grounds + spotted issues keep their quality;
+    # query generation runs ~12×/analyze, so it stays on a strong flash.
     # Primary Gemini jobs (classify/extract/verifier/summaries) keep
     # gemini_model.
-    gemini_fallback_model: str = "gemini-3.6-flash"
+    gemini_fallback_model: str = "gemini-3.1-pro-preview"  # = gemini-pro-latest today, pinned
+    gemini_keyword_fallback_model: str = "gemini-3.6-flash"
     gemini_embedding_model: str = "models/gemini-embedding-001"
     embedding_dim: int = 768
 

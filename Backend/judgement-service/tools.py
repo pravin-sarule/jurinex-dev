@@ -291,6 +291,89 @@ def verify_context_against_source(draft: CaseContextDraft, source_text: str,
     )
 
 
+def verify_issues_against_source(issues: list, source_text: str) -> list[str]:
+    """Anti-invention guard for the ISSUES/GROUNDS stage — same philosophy as
+    verify_context_against_source, one stage later: no extractor may attach a
+    provision or authority the case material does not contain.
+
+    High-precision, one-way: a reference is struck ONLY when a parseable
+    section/act in it is POSITIVELY absent from the source (roman-numeral or
+    unparseable references are kept — false strikes would delete real law).
+    - statutory_hook: blanked when unsupported (the legal question survives;
+      only the unverifiable citation goes).
+    - legal_framework: unsupported entries dropped.
+    - case_law_cited: authorities whose lead party name never appears in the
+      material are dropped — extractors must not introduce case law the
+      papers do not cite.
+    Mutates issues in place; returns human-readable notes for the UI."""
+    norm_source = normalize_ws(source_text or "")
+    notes: list[str] = []
+    if not norm_source:
+        return notes
+    # OCR-tolerant view: '260 A (2)(a)' and '260A(2)(a)' must compare equal —
+    # section presence is checked against an alphanumeric-squashed source too.
+    squashed_source = re.sub(r"[^a-z0-9]+", "", norm_source)
+
+    def _positively_absent(ref: str) -> bool:
+        sections = list(_SECTION_RE.finditer(ref or ""))
+        if sections:
+            # The SECTION NUMBER is the primary key: drafts abbreviate act
+            # names ('B.N.S.S.', 'Cr.P.C.') and spellings vary ('Nagarik' /
+            # 'Nagrik'), so an unmatchable act name must never strike a ref
+            # whose section number the material plainly contains.
+            for m in sections:
+                num_squashed = re.sub(r"[^a-z0-9]+", "", m.group(1).lower())
+                if (normalize_ws(f"section {m.group(1)}") in norm_source
+                        or normalize_ws(m.group(1)) in norm_source
+                        or (num_squashed and num_squashed in squashed_source)):
+                    return False
+            return True  # every section number in the ref is absent
+        absent = False
+        for m in _ACT_RE.finditer(ref or ""):
+            act = normalize_ws(m.group(1))
+            head = " ".join(act.split()[-4:])
+            # Acronym tolerance: 'Bharatiya Nagarik Suraksha Sanhita' matches
+            # a source that only ever writes 'BNSS' / 'B.N.S.S.'.
+            acronym = "".join(w[0] for w in re.findall(r"[a-z]+", act)
+                              if w not in ("of", "the", "and"))
+            if (act in norm_source or head in norm_source
+                    or re.sub(r"[^a-z0-9]+", "", act) in squashed_source
+                    or (len(acronym) >= 3 and acronym in squashed_source)):
+                continue
+            absent = True
+        return absent
+
+    for issue in issues:
+        label = issue.title or (issue.issue or "")[:60]
+        if issue.statutory_hook and _positively_absent(issue.statutory_hook):
+            notes.append(f"Removed unverifiable provision '{issue.statutory_hook}' "
+                         f"from '{label}' — it does not appear in the case material.")
+            issue.statutory_hook = None
+        if getattr(issue, "legal_framework", None):
+            kept = [ref for ref in issue.legal_framework if not _positively_absent(ref)]
+            for ref in set(issue.legal_framework) - set(kept):
+                note = f"Removed unverifiable provision '{ref}' from '{label}'."
+                # One note per provision per issue — the hook strike above may
+                # already have reported the same reference.
+                if not any(f"'{ref}'" in n and f"'{label}'" in n for n in notes):
+                    notes.append(note)
+            issue.legal_framework = kept
+        if getattr(issue, "case_law_cited", None):
+            kept_cases = []
+            for case_name in issue.case_law_cited:
+                lead = normalize_ws(re.split(r"\s+v(?:s|ersus)?\.?\s+", case_name, 1)[0])
+                lead = " ".join(lead.split()[:4])
+                if lead and lead in norm_source:
+                    kept_cases.append(case_name)
+                else:
+                    notes.append(f"Removed case law '{case_name}' from '{label}' — "
+                                 f"not cited in the case material.")
+            issue.case_law_cited = kept_cases
+    if notes:
+        logger.warning("[anti-invention] issues/grounds guard: %d reference(s) struck", len(notes))
+    return notes
+
+
 # ─── Case fetcher (agentic document service) ─────────────────────────────────
 
 _MAX_FILE_TEXT = 120_000       # per-file cap for the anti-invention source text

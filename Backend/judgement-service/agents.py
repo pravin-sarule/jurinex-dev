@@ -81,6 +81,7 @@ from tools import (
     statutory_shelf_patterns,
     to_ik_operators,
     verify_context_against_source,
+    verify_issues_against_source,
 )
 
 logger = logging.getLogger(__name__)
@@ -317,7 +318,7 @@ _KEYWORD_SYNTAX_ADVANCED = (
 def build_keyword_extract_agent(style: str = "simple") -> LlmAgent:
     return LlmAgent(
         name="keyword_extract",
-        model=get_settings().gemini_fallback_model,
+        model=get_settings().gemini_keyword_fallback_model,
         description="Generates anchor queries + four-axis search terms for one legal issue.",
         instruction=(
             "You are an expert Indian legal-research librarian building Indian Kanoon "
@@ -929,16 +930,33 @@ async def run_agent_once(agent, message: str, output_keys: list[str]) -> dict[st
 
 # ─── Claude stages: issue spotting + query generation ───────────────────────
 
-async def spot_issues(raw_text: str, context: CaseContext) -> list[Issue]:
+async def spot_issues(raw_text: str, context: CaseContext,
+                      covered: list[str] | None = None) -> list[Issue]:
     """Stage 1 on Claude (spec issue-spotter prompt): procedural stage first,
     then stage-framed issues with doctrine + statutory hook + perspective.
-    Falls back to the Gemini issue-split agent when Claude is unavailable."""
+    Falls back to the Gemini issue-split agent when Claude is unavailable.
+    covered: gap-filler mode — questions already researched; the model must
+    list ONLY genuinely distinct further issues (or nothing)."""
+    covered_note = ""
+    if covered:
+        listed = "\n".join(f"- {c}" for c in covered[:20])
+        covered_note = (
+            "\n\nALREADY COVERED — the questions below are already being "
+            "researched; do NOT repeat or rephrase them. List ONLY genuinely "
+            "DISTINCT further issues the material supports: the ingredients of "
+            "EACH offence or claim separately, maintainability / jurisdiction / "
+            "limitation, validity of the proceeding, evidentiary and burden "
+            "questions, and interim / consequential relief. If nothing distinct "
+            "remains, return an empty list.\n"
+            f"{listed}"
+        )
     user = (
         f"CASE MATERIAL:\n{_budget_case_text(raw_text, _llm_budget() - 4000)}\n\n"
         f"STRUCTURED CONTEXT (already extracted and source-verified):\n"
         f"Facts: {context.facts[:1500]}\n"
         f"Procedural history: {context.procedural_history[:800]}\n"
         f"Relief sought: {context.relief_sought[:300]}"
+        f"{covered_note}"
     )
     if claude_available():
         result = await claude_parse(ISSUE_SPOTTER_SYSTEM, user, IssueSpotResult)
@@ -968,7 +986,16 @@ async def spot_issues(raw_text: str, context: CaseContext) -> list[Issue]:
     # fallback runs under-spotted or found nothing beyond the grounds.
     out = await run_agent_once(build_issue_split_agent(), user, ["issues"])
     issue_list = IssueList.model_validate(out.get("issues") or {"issues": []})
-    return issue_list.issues[:MAX_ISSUES]
+    spotted = issue_list.issues[:MAX_ISSUES]
+    for item in spotted:
+        # SPOTTED issues are never pleaded grounds. The Issue schema carries
+        # optional ground fields, and a thorough fallback model (3.1 Pro)
+        # fills them ("Question I" …) — which made every spotted issue
+        # masquerade as a ground: counted/grouped as pleaded, spotted=0,
+        # and the overflow truncated at the combined cap. Force-blank them.
+        item.ground_label = None
+        item.ground_ref = None
+    return spotted
 
 
 # ─── Custom issues: user-typed issues get the SAME pipeline treatment ───────
@@ -1200,6 +1227,12 @@ async def extract_fresh(raw_text: str, context: CaseContext, objective: str,
     # ceiling as issue spotting; the merged list holds both kinds.
     ground_issues = _grounds_to_issues(result, cap=MAX_ISSUES)
     merged = _merge_spotted_issues(ground_issues, spotted)
+    # Gap-filler (same as combined mode): few surviving spotted issues → one
+    # more pass restricted to genuinely uncovered categories.
+    if sum(1 for i in merged if not i.ground_label) <= 2:
+        covered = [i.title or i.issue for i in merged]
+        merged = _merge_spotted_issues(
+            merged, await spot_issues(raw_text, context, covered=covered))
     dropped = max(0, len(merged) - MAX_COMBINED_ITEMS) \
         + max(0, len(result.grounds) - len(ground_issues))
     merged = merged[:MAX_COMBINED_ITEMS]
@@ -1267,18 +1300,27 @@ def _merge_spotted_issues(base: list[Issue], spotted: list[Issue]) -> list[Issue
                       for g in base if g.doctrine and g.statutory_hook}
     ground_questions = [_question_tokens(g.issue) for g in base]
     merged: list[Issue] = list(base)
+    dropped: list[str] = []
     for issue in spotted:
+        label = issue.title or issue.issue[:60]
         tokens = _question_tokens(issue.issue)
         if any(_same_question(tokens, gq) for gq in ground_questions):
+            dropped.append(f"{label} [same question]")
             continue
         trigger = _dedup_key(issue.sub_doctrine)
         if trigger:
             if trigger in ground_triggers:
+                dropped.append(f"{label} [trigger {issue.sub_doctrine}]")
                 continue
         elif issue.doctrine and issue.statutory_hook and (
                 _dedup_key(issue.doctrine), _dedup_key(issue.statutory_hook)) in ground_shelves:
+            dropped.append(f"{label} [doctrine+hook shelf]")
             continue
         merged.append(issue)
+    if dropped:
+        # Transparency: absorbed ≠ lost — the ground already raises it.
+        logger.info("[merge] %d spotted issue(s) absorbed by existing grounds: %s",
+                    len(dropped), "; ".join(dropped))
     return merged
 
 
@@ -1299,6 +1341,14 @@ async def extract_combined(raw_text: str, context: CaseContext,
         spot_issues(raw_text, context),
     )
     merged = _merge_spotted_issues(grounds, spotted)
+    # Gap-filler: pleaded grounds often absorb most spotted issues — when few
+    # survive, ONE more spotter pass hunts only the categories grounds rarely
+    # plead (per-offence ingredients, maintainability/jurisdiction, procedural
+    # validity, evidentiary, interim/consequential relief).
+    if sum(1 for i in merged if not i.ground_label) <= 2:
+        covered = [i.title or i.issue for i in merged]
+        merged = _merge_spotted_issues(
+            merged, await spot_issues(raw_text, context, covered=covered))
 
     if not merged:
         # Both extractors came back empty — clarification (set by them) stands.
@@ -1864,6 +1914,11 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
                 "No distinct legal issue could be identified. Please describe "
                 "the legal question you want precedents for.")
         if issues:
+            # Anti-invention guard (issues/grounds stage): provisions and
+            # authorities the case material does not contain are struck NOW,
+            # before queries are generated on top of them. Strikes are
+            # server-log only — never shown to users (their request).
+            verify_issues_against_source(issues, source)
             # Stage 2 up-front: the UI shows each issue's IK queries under its
             # title, and /search/run reuses them — generated exactly once.
             # Sibling titles ride along so no two issues share boilerplate queries.

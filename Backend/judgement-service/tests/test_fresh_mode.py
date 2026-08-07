@@ -1,6 +1,6 @@
-"""Fresh mode: a case with NO drafted pleading gets PROPOSED grounds built
+﻿"""Fresh mode: a case with NO drafted pleading gets PROPOSED grounds built
 from its source documents anchored to the lawyer's stated objective, riding
-the same GroundsExtractResult → Issue contract as every other mode."""
+the same GroundsExtractResult â†’ Issue contract as every other mode."""
 
 import asyncio
 
@@ -26,7 +26,7 @@ def _context() -> CaseContext:
 
 def _result() -> GroundsExtractResult:
     return GroundsExtractResult(
-        document_type_label="Fresh matter — no draft on record",
+        document_type_label="Fresh matter â€” no draft on record",
         party="the supplier",
         forum="",
         procedural_stage="summary suit for recovery",
@@ -36,14 +36,14 @@ def _result() -> GroundsExtractResult:
                 title="Admitted Liability in Written Acknowledgements",
                 summary="The buyer's emails acknowledge the invoices...",
                 research_question="Whether a summary decree can follow where liability stands admitted in written correspondence?",
-                doctrine="summary suit — leave to defend",
+                doctrine="summary suit â€” leave to defend",
                 sub_doctrine="triable_issue",
                 statutory_hook="Order 37 CPC",
                 statutes=["Order 37 CPC"],
-                origin="pleaded",   # model forgot — backstop must fix
+                origin="pleaded",   # model forgot â€” backstop must fix
             ),
             ExtractedGround(
-                ground_label="",    # model forgot the label — backstop must fill
+                ground_label="",    # model forgot the label â€” backstop must fill
                 title="Interest on Delayed Payment",
                 summary="Invoices carry an interest clause...",
                 research_question="Whether contractual interest is recoverable where invoices stipulate a rate accepted by conduct?",
@@ -63,7 +63,7 @@ def test_fresh_extraction_labels_and_maps(monkeypatch):
         captured["user"] = user
         return _result()
 
-    async def _no_spotted(raw_text, ctx):
+    async def _no_spotted(raw_text, ctx, covered=None):
         return []
 
     monkeypatch.setattr(agents, "claude_available", lambda: True)
@@ -90,7 +90,7 @@ def test_fresh_empty_result_asks_for_clarification(monkeypatch):
     async def _fake_parse(*args, **kwargs):
         return GroundsExtractResult(insufficient_material=True)
 
-    async def _no_spotted(raw_text, ctx):
+    async def _no_spotted(raw_text, ctx, covered=None):
         return []
 
     monkeypatch.setattr(agents, "claude_available", lambda: True)
@@ -109,13 +109,15 @@ def test_fresh_merges_spotted_issues(monkeypatch):
     async def _fake_parse(system, user, model, **kwargs):
         return _result()
 
-    async def _spotted(raw_text, ctx):
+    async def _spotted(raw_text, ctx, covered=None):
+        if covered is not None:
+            return []
         return [
-            # Duplicate of proposed ground 2's trigger — must be dropped.
+            # Duplicate of proposed ground 2's trigger â€” must be dropped.
             Issue(id=1, issue="Whether interest is payable on the delayed invoices?",
-                  doctrine="contract — interest", sub_doctrine="interest_stipulation",
+                  doctrine="contract â€” interest", sub_doctrine="interest_stipulation",
                   statutory_hook="Section 34 CPC"),
-            # Genuinely new question (distinct trigger) — must survive.
+            # Genuinely new question (distinct trigger) â€” must survive.
             Issue(id=2, issue="Whether the commercial court has pecuniary jurisdiction over the claim?",
                   doctrine="jurisdiction", sub_doctrine="pecuniary_jurisdiction",
                   statutory_hook="Section 12 Commercial Courts Act"),
