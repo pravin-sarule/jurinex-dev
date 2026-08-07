@@ -585,6 +585,19 @@ class IndianKanoonClient:
                                  "the token expired; every search returns empty until "
                                  "it is recharged", resp.status_code, path)
                     return None
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    # Throttling / transient server errors are RETRIED with
+                    # backoff — at a 24-wide burst, dropping the call would
+                    # silently lose candidates.
+                    if attempt < settings.ik_max_retries:
+                        delay = 0.5 * (2 ** (attempt - 1))
+                        logger.warning("[IK] HTTP %s for %s — retry in %.1fs",
+                                       resp.status_code, path, delay)
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.error("[IK] HTTP %s for %s after %d attempts",
+                                 resp.status_code, path, attempt)
+                    return None
                 if resp.status_code >= 400:
                     logger.warning("[IK] HTTP %s for %s: %s", resp.status_code, path, resp.text[:200])
                     return None

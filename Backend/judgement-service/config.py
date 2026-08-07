@@ -115,7 +115,10 @@ class Settings(BaseSettings):
 
     # --- IK fetch behaviour ---
     ik_candidate_cap: int = 30
-    ik_max_concurrency: int = 6
+    # Global window for ALL IK calls across every concurrent issue — the
+    # pipeline runs issues in parallel, so this is the real wall-time knob
+    # (13 issues × ~8 searches + 12 doc fetches ≈ 250 calls share it).
+    ik_max_concurrency: int = 24
     ik_timeout_seconds: float = 60.0
     ik_max_retries: int = 3
     ik_full_doc_top_n: int = 10
