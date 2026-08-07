@@ -26,8 +26,11 @@ def test_checked_plus_own_queries_replace_anchors():
         '"civil dispute given criminal colour" quash',
         '"mala fide intention" quash FIR',
     ]
-    # Everything else untouched.
-    assert out["1"].contra_queries == ['"quashing petition" dismissed']
+    # Curated = STRICT: contra queries are cleared too — the user's list is
+    # the WHOLE query set (they were never fetched in curated mode, and
+    # displaying them read as "the system used queries I didn't pick").
+    assert out["1"].contra_queries == []
+    # Axis terms stay — they score, they don't fetch.
     assert out["1"].statutory == ["Section 482 CrPC"]
 
 

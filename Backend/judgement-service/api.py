@@ -415,6 +415,9 @@ async def search_run(session_id: str, request: RunSearchRequest,
     context.needs_clarification = False
     context.clarification_question = None
 
+    logger.info("[run] session %s issueIds=%s custom=%d overrides=%s",
+                session_id, request.issueIds, len(request.customIssues),
+                {k: len(v) for k, v in (request.queryOverrides or {}).items()} or "none")
     response = await run_issue_search(session_id, context, chosen,
                                       query_overrides=request.queryOverrides or None)
     if ik_client.auth_failed and not any(i.results for i in response.issues):

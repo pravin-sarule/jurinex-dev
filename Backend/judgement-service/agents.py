@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import Any
 
 from google.adk.agents import LlmAgent, SequentialAgent
@@ -1691,10 +1692,17 @@ async def issue_fanout(issues: list[Issue], context: CaseContext,
     curated_ids = curated_ids or set()
 
     async def _safe(issue: Issue) -> dict[str, Any]:
+        t0 = time.perf_counter()
         try:
-            return await _process_issue(issue, context, keywords_map.get(str(issue.id)),
-                                        curated=str(issue.id) in curated_ids,
-                                        query_style=query_style)
+            result = await _process_issue(issue, context, keywords_map.get(str(issue.id)),
+                                          curated=str(issue.id) in curated_ids,
+                                          query_style=query_style)
+            logger.info("[timing] issue %s: %.1fs (%d candidates → %d results%s)",
+                        issue.id, time.perf_counter() - t0,
+                        len(result.get("candidates") or {}),
+                        len(result.get("scored") or []),
+                        ", curated" if str(issue.id) in curated_ids else "")
+            return result
         except Exception:
             logger.exception("[pipeline] issue %s failed", issue.id)
             return {"issue": issue, "keywords": None, "candidates": {}, "scored": []}
@@ -1876,6 +1884,7 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
     issues mode."""
     source = source_text or raw_text
     session_id = sessions.new_session_id()
+    _t0 = time.perf_counter()
 
     out = await run_agent_once(
         build_document_context_agent(), raw_text,
@@ -1885,6 +1894,7 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
         out.get("doc_classification") or {"document_type": "mixed"})
     draft = CaseContextDraft.model_validate(out.get("case_context_draft") or {})
     context = verify_context_against_source(draft, source, classification.document_type)
+    _t_ctx = time.perf_counter()
 
     issues: list[Issue] = []
     issue_keywords: dict[str, Any] = {}
@@ -1913,6 +1923,7 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
             context.clarification_question = (
                 "No distinct legal issue could be identified. Please describe "
                 "the legal question you want precedents for.")
+        _t_stage1 = time.perf_counter()
         if issues:
             # Anti-invention guard (issues/grounds stage): provisions and
             # authorities the case material does not contain are struck NOW,
@@ -1933,6 +1944,10 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
                 # format); contra queries still run in the search itself.
                 issue_obj.queries = list(kw.anchor_queries)
                 issue_keywords[str(issue_obj.id)] = kw.model_dump()
+            logger.info("[timing] analyze mode=%s: context=%.1fs stage1=%.1fs "
+                        "queries=%.1fs (%d issues)", mode, _t_ctx - _t0,
+                        _t_stage1 - _t_ctx, time.perf_counter() - _t_stage1,
+                        len(issues))
 
     sessions.save(session_id, {
         "caseContext": context.model_dump(),
@@ -1967,6 +1982,11 @@ def apply_query_overrides(keywords_map: dict[str, KeywordSet],
             if text and text not in cleaned:
                 cleaned.append(text)
         kw.anchor_queries = cleaned[:MAX_QUERIES_PER_ISSUE]
+        # Curated = STRICT: the user's list is the WHOLE query set for this
+        # issue. Contra queries are neither fetched (anchors_only) nor kept —
+        # leaving them in made the results page show system queries the user
+        # never selected ("3 queries used" against one ticked box).
+        kw.contra_queries = []
     return keywords_map
 
 
