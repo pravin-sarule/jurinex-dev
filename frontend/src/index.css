@@ -215,6 +215,7 @@ html[data-jnx-textscale] :is(p, li, dd, dt, figcaption, blockquote, td, th):not(
   .response-content *):not(
   .analysis-page-ai-response *):not(
   .chat-thread-card__body *):not(
+  [data-jnx-citation] *):not(
   li li):not(
   blockquote blockquote):not(
   :is(li, td, th, blockquote) p) {

@@ -112,9 +112,9 @@ function Switch({ on, label, onToggle }) {
 function StepLab({ n, title, note }) {
   return (
     <div className="flex items-center gap-2.5 mb-3 min-w-0">
-      <span className="h-[22px] w-[22px] shrink-0 rounded-full bg-[#0F1B21] text-white text-[11px] font-bold flex items-center justify-center">{n}</span>
-      <h2 className="text-sm font-bold tracking-[-0.01em] text-[#0F1B21] whitespace-nowrap">{title}</h2>
-      {note && <span className="text-xs font-medium text-[#93A2A7] truncate">{note}</span>}
+      <span className="h-[22px] w-[22px] shrink-0 rounded-full bg-[#0F1B21] text-white text-[length:calc(11px*var(--jnx-text-scale,1))] font-bold flex items-center justify-center">{n}</span>
+      <h2 className="text-[length:calc(14px*var(--jnx-text-scale,1))] font-bold tracking-[-0.01em] text-[#0F1B21] whitespace-nowrap">{title}</h2>
+      {note && <span className="text-[length:calc(12px*var(--jnx-text-scale,1))] font-medium text-[#93A2A7] truncate">{note}</span>}
       <span className="h-px flex-1 bg-[#E5ECEB] min-w-[16px]" />
     </div>
   );
@@ -128,7 +128,7 @@ const REFINE_MODES = [
 
 function BandPill({ band }) {
   return (
-    <span className={`px-2 py-0.5 rounded-md text-[11px] font-semibold tracking-wide ${BAND_STYLES[band] || BAND_STYLES.RED}`}>
+    <span className={`px-2 py-0.5 rounded-md text-[length:calc(11px*var(--jnx-text-scale,1))] font-semibold tracking-wide ${BAND_STYLES[band] || BAND_STYLES.RED}`}>
       {band}
     </span>
   );
@@ -136,7 +136,7 @@ function BandPill({ band }) {
 
 function Chip({ text }) {
   return (
-    <span className="px-2.5 py-1 rounded-full text-[11px] font-medium bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0] whitespace-nowrap">
+    <span className="px-2.5 py-1 rounded-full text-[length:calc(11px*var(--jnx-text-scale,1))] font-medium bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0] whitespace-nowrap">
       {text}
     </span>
   );
@@ -150,25 +150,25 @@ function ResultCard({ item, demoted }) {
           href={item.url || undefined}
           target="_blank"
           rel="noreferrer"
-          className="text-sm font-semibold text-[#0F172A] hover:text-[#21C1B6] leading-snug"
+          className="text-[length:calc(14px*var(--jnx-text-scale,1))] font-semibold text-[#0F172A] hover:text-[#21C1B6] leading-snug"
         >
           {item.title || item.docId}
         </a>
         <div className="flex items-center gap-2 shrink-0">
           <BandPill band={item.band} />
-          <span className="text-xs text-[#64748B] font-semibold">{Math.round((item.score || 0) * 100)}%</span>
+          <span className="text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#64748B] font-semibold">{Math.round((item.score || 0) * 100)}%</span>
         </div>
       </div>
-      <div className="mt-1 text-xs text-[#64748B]">
+      <div className="mt-1 text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#64748B]">
         {item.court}{item.year ? ` · ${item.year}` : ''}
       </div>
       {item.redFlag && (
-        <div className="mt-2 rounded-lg bg-[#FEF2F2] border border-[#FECACA] px-3 py-2 text-xs font-semibold text-[#991B1B]">
+        <div className="mt-2 rounded-lg bg-[#FEF2F2] border border-[#FECACA] px-3 py-2 text-[length:calc(12px*var(--jnx-text-scale,1))] font-semibold text-[#991B1B]">
           ⚠ Flagged: negative treatment — do not rely without checking.
         </div>
       )}
       {item.pinpoint && (
-        <blockquote className="mt-3 border-l-2 border-[#21C1B6]/50 bg-[#F8FAFC] rounded-r-lg pl-3 pr-3 py-2 text-xs text-[#475569] italic leading-relaxed">
+        <blockquote className="mt-3 border-l-2 border-[#21C1B6]/50 bg-[#F8FAFC] rounded-r-lg pl-3 pr-3 py-2 text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#475569] italic leading-relaxed">
           {item.pinpoint}
         </blockquote>
       )}
@@ -221,9 +221,9 @@ function IssueResults({ sessionId, issue }) {
           <span className="h-8 w-8 rounded-lg bg-[#F0FDFA] flex items-center justify-center shrink-0">
             <ScaleIcon className="h-4.5 w-4.5 text-[#21C1B6]" style={{ height: 18, width: 18 }} />
           </span>
-          <h3 className="text-[15px] font-bold text-[#0F172A] leading-snug font-serif pt-1">{issue.issue}</h3>
+          <h3 className="text-[length:calc(15px*var(--jnx-text-scale,1))] font-bold text-[#0F172A] leading-snug font-serif pt-1">{issue.issue}</h3>
         </div>
-        <div className="text-[11px] font-medium text-[#94A3B8] whitespace-nowrap pt-1.5">
+        <div className="text-[length:calc(11px*var(--jnx-text-scale,1))] font-medium text-[#94A3B8] whitespace-nowrap pt-1.5">
           {rows.length} result{rows.length === 1 ? '' : 's'}
         </div>
       </div>
@@ -233,7 +233,7 @@ function IssueResults({ sessionId, issue }) {
         <select
           value={mode}
           onChange={(e) => setMode(e.target.value)}
-          className="bg-white border border-[#E2E8F0] text-[#475569] text-xs rounded-lg px-2 py-2 outline-none focus:border-[#21C1B6]/50"
+          className="bg-white border border-[#E2E8F0] text-[#475569] text-[length:calc(12px*var(--jnx-text-scale,1))] rounded-lg px-2 py-2 outline-none focus:border-[#21C1B6]/50"
         >
           {REFINE_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
         </select>
@@ -242,19 +242,19 @@ function IssueResults({ sessionId, issue }) {
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') applyRefine(); }}
           placeholder='Refine these results, e.g. "Supreme Court after 2015"'
-          className="flex-1 min-w-[220px] bg-white border border-[#E2E8F0] text-[#0F172A] text-xs rounded-lg px-3 py-2 outline-none focus:border-[#21C1B6]/50 placeholder:text-[#94A3B8]"
+          className="flex-1 min-w-[220px] bg-white border border-[#E2E8F0] text-[#0F172A] text-[length:calc(12px*var(--jnx-text-scale,1))] rounded-lg px-3 py-2 outline-none focus:border-[#21C1B6]/50 placeholder:text-[#94A3B8]"
         />
         <button
           onClick={() => applyRefine()}
           disabled={refining}
-          className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-white hover:bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0] disabled:opacity-50"
+          className="px-3.5 py-2 rounded-lg text-[length:calc(12px*var(--jnx-text-scale,1))] font-semibold bg-white hover:bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0] disabled:opacity-50"
         >
           {refining ? 'Refining…' : 'Refine'}
         </button>
         {(refined || query) && (
           <button
             onClick={() => { setRefined(null); setQuery(''); setCurrentPage(1); }}
-            className="px-2 py-2 rounded-lg text-xs text-[#94A3B8] hover:text-[#475569]"
+            className="px-2 py-2 rounded-lg text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#94A3B8] hover:text-[#475569]"
           >
             Reset
           </button>
@@ -263,10 +263,10 @@ function IssueResults({ sessionId, issue }) {
 
       {refined?.escapeHatch && (
         <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-[#FDE68A] bg-[#FFFBEB] px-3 py-2.5">
-          <span className="text-xs text-[#92400E]">{refined.escapeHatch.offer}</span>
+          <span className="text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#92400E]">{refined.escapeHatch.offer}</span>
           <button
             onClick={() => applyRefine('ik_escape')}
-            className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#21C1B6] hover:bg-[#1AA49B] text-white"
+            className="shrink-0 px-3 py-1.5 rounded-lg text-[length:calc(12px*var(--jnx-text-scale,1))] font-semibold bg-[#21C1B6] hover:bg-[#1AA49B] text-white"
           >
             Search all of Indian Kanoon
           </button>
@@ -275,7 +275,7 @@ function IssueResults({ sessionId, issue }) {
 
       <div className="mt-4 grid gap-3">
         {paginatedRows.length === 0 && (
-          <div className="text-xs text-[#94A3B8] italic">No precedents surfaced for this issue.</div>
+          <div className="text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#94A3B8] italic">No precedents surfaced for this issue.</div>
         )}
         {paginatedRows.map(({ item, demoted }) => (
           <ResultCard key={item.docId} item={item} demoted={demoted} />
@@ -284,7 +284,7 @@ function IssueResults({ sessionId, issue }) {
 
       {totalPages > 1 && (
         <div className="mt-6 pt-4 border-t border-[#F1F5F9] flex items-center justify-between">
-          <div className="text-xs text-[#64748B]">
+          <div className="text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#64748B]">
             Showing <span className="font-semibold text-[#0F172A]">{(currentPage - 1) * itemsPerPage + 1}</span> to <span className="font-semibold text-[#0F172A]">{Math.min(currentPage * itemsPerPage, rows.length)}</span> of <span className="font-semibold text-[#0F172A]">{rows.length}</span>
           </div>
           <div className="flex items-center gap-1">
@@ -304,7 +304,7 @@ function IssueResults({ sessionId, issue }) {
                     <button
                       key={p}
                       onClick={() => setCurrentPage(p)}
-                      className={`min-w-[28px] h-7 text-xs font-semibold rounded-lg transition-colors ${
+                      className={`min-w-[28px] h-7 text-[length:calc(12px*var(--jnx-text-scale,1))] font-semibold rounded-lg transition-colors ${
                         currentPage === p
                           ? 'bg-[#21C1B6] text-white'
                           : 'text-[#475569] hover:bg-[#F1F5F9]'
@@ -622,7 +622,7 @@ export default function CitationResearchPanel() {
         className="group flex items-center gap-2 rounded-lg px-2 py-[7px] cursor-pointer transition-colors hover:bg-[#EFF4F3]"
       >
         <MagnifyingGlassIcon className="h-4 w-4 shrink-0 text-[#93A2A7]" />
-        <span className="min-w-0 flex-1 truncate text-[13px] text-[#25353C] group-hover:text-[#0F1B21]">
+        <span className="min-w-0 flex-1 truncate text-[length:calc(13px*var(--jnx-text-scale,1))] text-[#25353C] group-hover:text-[#0F1B21]">
           {name}
         </span>
         {entry.citationCount === 0 && (
@@ -858,7 +858,7 @@ export default function CitationResearchPanel() {
     });
 
     return (
-      <div className="min-h-full bg-[#F6F9F8] px-4 pt-7 pb-16 sm:px-6 md:px-9 md:pt-9 overflow-x-clip lg:h-full lg:overflow-hidden lg:flex lg:flex-col lg:pb-6">
+      <div data-jnx-citation className="min-h-full bg-[#F6F9F8] px-4 pt-7 pb-16 sm:px-6 md:px-9 md:pt-9 overflow-x-clip lg:h-full lg:overflow-hidden lg:flex lg:flex-col lg:pb-6">
         <div className="max-w-[1240px] mx-auto min-w-0 w-full lg:flex-1 lg:min-h-0 lg:flex lg:flex-col">
 
           {/* Header */}
@@ -867,8 +867,8 @@ export default function CitationResearchPanel() {
               <SparklesIcon className="h-[21px] w-[21px]" />
             </div>
             <div>
-              <h1 className="text-[23px] font-extrabold tracking-[-0.02em] text-[#0F1B21] leading-tight">Citation Research</h1>
-              <p className="text-[13.5px] text-[#64757C] mt-1 max-w-[66ch]">
+              <h1 className="text-[length:calc(23px*var(--jnx-text-scale,1))] font-extrabold tracking-[-0.02em] text-[#0F1B21] leading-tight">Citation Research</h1>
+              <p className="text-[length:calc(13.5px*var(--jnx-text-scale,1))] text-[#64757C] mt-1 max-w-[66ch]">
                 Pick one of your cases or upload a document — the system finds the legal issues and grounds,
                 then retrieves <b className="font-semibold text-[#0E8371]">verified Indian Kanoon precedents</b> for each one.
               </p>
@@ -896,7 +896,7 @@ export default function CitationResearchPanel() {
                     role="tab"
                     aria-selected={inputMode === key}
                     onClick={() => setInputMode(key)}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-[9px] text-[13px] font-semibold transition-colors ${
+                    className={`flex items-center gap-2 px-4 py-2 rounded-[9px] text-[length:calc(13px*var(--jnx-text-scale,1))] font-semibold transition-colors ${
                       inputMode === key
                         ? 'bg-[#0F1B21] text-white'
                         : 'text-[#64757C] hover:bg-[#EFF4F3] hover:text-[#25353C]'
@@ -918,10 +918,10 @@ export default function CitationResearchPanel() {
                           value={caseFilter}
                           onChange={(e) => setCaseFilter(e.target.value)}
                           placeholder="Search by party name or case number…"
-                          className="w-full bg-transparent border-0 outline-none py-[9px] text-[13px] text-[#0F1B21] placeholder:text-[#93A2A7]"
+                          className="w-full bg-transparent border-0 outline-none py-[9px] text-[length:calc(13px*var(--jnx-text-scale,1))] text-[#0F1B21] placeholder:text-[#93A2A7]"
                         />
                       </div>
-                      <span className="text-xs font-medium text-[#93A2A7] whitespace-nowrap">
+                      <span className="text-[length:calc(12px*var(--jnx-text-scale,1))] font-medium text-[#93A2A7] whitespace-nowrap">
                         {isFiltering
                           ? `${totalFiltered} match${totalFiltered === 1 ? '' : 'es'}`
                           : `Showing ${pageStart}–${pageEnd} of ${totalFiltered}`}
@@ -930,18 +930,18 @@ export default function CitationResearchPanel() {
                   )}
 
                   {casesLoading && (
-                    <div className="flex items-center justify-center gap-2 py-8 text-sm text-[#64757C]">
+                    <div className="flex items-center justify-center gap-2 py-8 text-[length:calc(14px*var(--jnx-text-scale,1))] text-[#64757C]">
                       <ArrowPathIcon className="h-4 w-4 animate-spin" /> Loading your cases…
                     </div>
                   )}
                   {!casesLoading && cases.length === 0 && (
-                    <div className="rounded-[14px] border-[1.5px] border-dashed border-[#E5ECEB] bg-white px-4 py-8 text-center text-sm text-[#64757C]">
+                    <div className="rounded-[14px] border-[1.5px] border-dashed border-[#E5ECEB] bg-white px-4 py-8 text-center text-[length:calc(14px*var(--jnx-text-scale,1))] text-[#64757C]">
                       No cases found in your Projects. Upload case documents under Projects first,
                       or switch to "Upload document".
                     </div>
                   )}
                   {!casesLoading && cases.length > 0 && totalFiltered === 0 && (
-                    <div className="rounded-[14px] border-[1.5px] border-dashed border-[#E5ECEB] bg-white px-4 py-8 text-center text-sm text-[#64757C]">
+                    <div className="rounded-[14px] border-[1.5px] border-dashed border-[#E5ECEB] bg-white px-4 py-8 text-center text-[length:calc(14px*var(--jnx-text-scale,1))] text-[#64757C]">
                       No case matches "{caseFilter.trim()}".
                     </div>
                   )}
@@ -972,24 +972,24 @@ export default function CitationResearchPanel() {
                         >
                           <div className="flex-1 w-full px-4 pt-3.5 pb-3 min-w-0">
                             <div className="flex items-center gap-2 mb-2.5 min-w-0">
-                              <span className="text-[10.5px] font-semibold tracking-[0.07em] uppercase text-[#64757C] truncate">
+                              <span className="text-[length:calc(10.5px*var(--jnx-text-scale,1))] font-semibold tracking-[0.07em] uppercase text-[#64757C] truncate">
                                 {caseRefOf(cs)}
                               </span>
-                              <span className={`ml-auto shrink-0 text-[10.5px] font-semibold px-[9px] py-[3px] rounded-full border whitespace-nowrap ${chip.cls}`}>
+                              <span className={`ml-auto shrink-0 text-[length:calc(10.5px*var(--jnx-text-scale,1))] font-semibold px-[9px] py-[3px] rounded-full border whitespace-nowrap ${chip.cls}`}>
                                 {chip.text}
                               </span>
                             </div>
-                            <div className="text-[14.5px] font-bold text-[#0F1B21] tracking-[-0.01em] leading-[1.35]">{petitioner}</div>
+                            <div className="text-[length:calc(14.5px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21] tracking-[-0.01em] leading-[1.35]">{petitioner}</div>
                             {respondent ? (
                               <>
-                                <div className="text-[11px] italic text-[#93A2A7] my-[3px]">v.</div>
-                                <div className="text-[14.5px] font-bold text-[#0F1B21] tracking-[-0.01em] leading-[1.35]">{respondent}</div>
+                                <div className="text-[length:calc(11px*var(--jnx-text-scale,1))] italic text-[#93A2A7] my-[3px]">v.</div>
+                                <div className="text-[length:calc(14.5px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21] tracking-[-0.01em] leading-[1.35]">{respondent}</div>
                               </>
                             ) : (
-                              <div className="text-xs text-[#93A2A7] mt-1">Respondent not yet on record</div>
+                              <div className="text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#93A2A7] mt-1">Respondent not yet on record</div>
                             )}
                           </div>
-                          <div className="w-full flex items-center gap-2 px-4 py-[9px] border-t border-[#EFF4F3] bg-[#FCFDFD] text-[11.5px] text-[#93A2A7]">
+                          <div className="w-full flex items-center gap-2 px-4 py-[9px] border-t border-[#EFF4F3] bg-[#FCFDFD] text-[length:calc(11.5px*var(--jnx-text-scale,1))] text-[#93A2A7]">
                             <span className="truncate">{updatedLabel(cs.updated_at || cs.created_at)}</span>
                             <span className={`ml-auto h-[19px] w-[19px] shrink-0 rounded-full border-[1.5px] flex items-center justify-center transition-all duration-200 ${
                               active ? 'bg-[#0E8371] border-[#0E8371]' : 'bg-white border-[#E5ECEB]'
@@ -1006,7 +1006,7 @@ export default function CitationResearchPanel() {
                   {/* Pagination */}
                   {totalFiltered > casesPerPage && (
                     <div className="mt-3 flex items-center gap-2 shrink-0">
-                      <span className="text-xs text-[#93A2A7] mr-auto">
+                      <span className="text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#93A2A7] mr-auto">
                         Showing {pageStart}–{pageEnd} of {totalFiltered} cases
                       </span>
                       <button
@@ -1041,12 +1041,12 @@ export default function CitationResearchPanel() {
                     <span className="mx-auto mb-[11px] h-11 w-11 rounded-xl bg-white border border-[#BFE9DF] shadow-sm flex items-center justify-center text-[#0E8371]">
                       <ArrowUpTrayIcon className="h-5 w-5" />
                     </span>
-                    <strong className="block text-sm font-bold text-[#0F1B21]">
+                    <strong className="block text-[length:calc(14px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21]">
                       {files.length
                         ? `${files.length} document${files.length === 1 ? '' : 's'} ready — click to add more`
                         : 'Drop a petition, reply or order here'}
                     </strong>
-                    <span className="block text-[12.5px] text-[#64757C] mt-[3px]">
+                    <span className="block text-[length:calc(12.5px*var(--jnx-text-scale,1))] text-[#64757C] mt-[3px]">
                       {files.length
                         ? 'All documents are analysed together as one matter.'
                         : 'or click to browse — PDF, DOCX or TXT · select one or several'}
@@ -1064,8 +1064,8 @@ export default function CitationResearchPanel() {
                       {files.map((f, idx) => (
                         <div key={`${f.name}|${f.size}`} className="flex items-center gap-2.5 rounded-[10px] border border-[#E5ECEB] bg-white px-3 py-2">
                           <DocumentTextIcon className="h-4 w-4 text-[#0E8371] shrink-0" />
-                          <span className="min-w-0 flex-1 truncate text-[13px] text-[#0F1B21]">{f.name}</span>
-                          <span className="text-[11px] text-[#93A2A7] shrink-0">{(f.size / 1024).toFixed(0)} KB</span>
+                          <span className="min-w-0 flex-1 truncate text-[length:calc(13px*var(--jnx-text-scale,1))] text-[#0F1B21]">{f.name}</span>
+                          <span className="text-[length:calc(11px*var(--jnx-text-scale,1))] text-[#93A2A7] shrink-0">{(f.size / 1024).toFixed(0)} KB</span>
                           <button
                             type="button"
                             onClick={() => removeFile(idx)}
@@ -1087,10 +1087,10 @@ export default function CitationResearchPanel() {
                     placeholder={files.length
                       ? `Research name (optional) — e.g. "${files[0].name.replace(/\.[^.]+$/, '')}"`
                       : 'Research name (optional) — how it appears under Recent research'}
-                    className="mt-3 w-full bg-[#FBFDFC] border-[1.5px] border-[#E5ECEB] text-[#0F1B21] text-[13px] rounded-[11px] px-3.5 py-2.5 outline-none transition-all focus:border-[#3FC8B4] focus:bg-white focus:ring-[3px] focus:ring-[#3FC8B4]/15 placeholder:text-[#93A2A7]"
+                    className="mt-3 w-full bg-[#FBFDFC] border-[1.5px] border-[#E5ECEB] text-[#0F1B21] text-[length:calc(13px*var(--jnx-text-scale,1))] rounded-[11px] px-3.5 py-2.5 outline-none transition-all focus:border-[#3FC8B4] focus:bg-white focus:ring-[3px] focus:ring-[#3FC8B4]/15 placeholder:text-[#93A2A7]"
                   />
                   <div className="mt-3">
-                    <label className="block text-[11px] font-semibold tracking-[0.06em] uppercase text-[#64757C] mb-[7px]">
+                    <label className="block text-[length:calc(11px*var(--jnx-text-scale,1))] font-semibold tracking-[0.06em] uppercase text-[#64757C] mb-[7px]">
                       Optional description — steers the analysis
                     </label>
                     <textarea
@@ -1099,7 +1099,7 @@ export default function CitationResearchPanel() {
                       onChange={(e) => setCaseText(e.target.value)}
                       rows={3}
                       placeholder='e.g. "we act for the accused; seek regular bail" — the grounds and issues extracted from the documents follow this'
-                      className="w-full resize-none overflow-hidden bg-[#FBFDFC] border-[1.5px] border-[#E5ECEB] text-[#0F1B21] rounded-[11px] px-3.5 py-3 text-[13px] leading-relaxed outline-none transition-all focus:border-[#3FC8B4] focus:bg-white focus:ring-[3px] focus:ring-[#3FC8B4]/15 placeholder:text-[#93A2A7]"
+                      className="w-full resize-none overflow-hidden bg-[#FBFDFC] border-[1.5px] border-[#E5ECEB] text-[#0F1B21] rounded-[11px] px-3.5 py-3 text-[length:calc(13px*var(--jnx-text-scale,1))] leading-relaxed outline-none transition-all focus:border-[#3FC8B4] focus:bg-white focus:ring-[3px] focus:ring-[#3FC8B4]/15 placeholder:text-[#93A2A7]"
                     />
                   </div>
                 </div>
@@ -1119,14 +1119,14 @@ export default function CitationResearchPanel() {
                       <div className="flex items-start gap-[13px] px-[17px] py-[15px] cursor-pointer" onClick={toggleFresh}>
                         <div className="flex-1 min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
-                            <strong className="text-[13.5px] font-bold text-[#0F1B21] tracking-[-0.01em]">
+                            <strong className="text-[length:calc(13.5px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21] tracking-[-0.01em]">
                               Fresh matter — nothing drafted or filed yet
                             </strong>
-                            <span className="text-[10px] font-bold uppercase tracking-[0.06em] text-[#B97F24] bg-[#FCF5E7] border border-[#F0E1C0] px-[7px] py-0.5 rounded-[5px]">
+                            <span className="text-[length:calc(10px*var(--jnx-text-scale,1))] font-bold uppercase tracking-[0.06em] text-[#B97F24] bg-[#FCF5E7] border border-[#F0E1C0] px-[7px] py-0.5 rounded-[5px]">
                               Objective required
                             </span>
                           </div>
-                          <p className="text-[12.5px] text-[#64757C] mt-1 max-w-[66ch]">
+                          <p className="text-[length:calc(12.5px*var(--jnx-text-scale,1))] text-[#64757C] mt-1 max-w-[66ch]">
                             The system reads all of this case's source documents and builds{' '}
                             <b className="font-semibold text-[#25353C]">proposed grounds</b> from what you want to achieve.
                           </p>
@@ -1136,7 +1136,7 @@ export default function CitationResearchPanel() {
                       <div className={`grid grid-cols-1 transition-[grid-template-rows] duration-300 ${freshMode ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
                         <div className="overflow-hidden">
                           <div className="px-[17px] pb-[17px]">
-                            <label htmlFor="jnx-objective" className="block text-[11px] font-semibold tracking-[0.06em] uppercase text-[#64757C] mb-[7px]">
+                            <label htmlFor="jnx-objective" className="block text-[length:calc(11px*var(--jnx-text-scale,1))] font-semibold tracking-[0.06em] uppercase text-[#64757C] mb-[7px]">
                               What are you trying to achieve?
                             </label>
                             <textarea
@@ -1146,16 +1146,16 @@ export default function CitationResearchPanel() {
                               onChange={(e) => setCaseText(e.target.value)}
                               rows={3}
                               placeholder='e.g. "We act for the workmen; focus on the wage revision demand and seek reinstatement with back wages."'
-                              className="w-full min-h-[96px] resize-none overflow-hidden bg-[#FBFDFC] border-[1.5px] border-[#E5ECEB] text-[#0F1B21] rounded-[11px] px-3.5 py-3 text-[13px] leading-relaxed outline-none transition-all focus:border-[#3FC8B4] focus:bg-white focus:ring-[3px] focus:ring-[#3FC8B4]/15 placeholder:text-[#93A2A7]"
+                              className="w-full min-h-[96px] resize-none overflow-hidden bg-[#FBFDFC] border-[1.5px] border-[#E5ECEB] text-[#0F1B21] rounded-[11px] px-3.5 py-3 text-[length:calc(13px*var(--jnx-text-scale,1))] leading-relaxed outline-none transition-all focus:border-[#3FC8B4] focus:bg-white focus:ring-[3px] focus:ring-[#3FC8B4]/15 placeholder:text-[#93A2A7]"
                             />
                             <div className="mt-2 flex flex-wrap items-center gap-[7px]">
-                              <span className="text-[11.5px] text-[#93A2A7] mr-0.5">Quick start:</span>
+                              <span className="text-[length:calc(11.5px*var(--jnx-text-scale,1))] text-[#93A2A7] mr-0.5">Quick start:</span>
                               {QUICK_FILLS.map((qf) => (
                                 <button
                                   key={qf.label}
                                   type="button"
                                   onClick={() => { setCaseText(qf.text); caseTextRef.current?.focus(); }}
-                                  className="border border-[#E5ECEB] bg-white text-[#64757C] text-[11.5px] font-semibold px-[11px] py-[5px] rounded-full transition-colors hover:border-[#3FC8B4] hover:text-[#0E8371] hover:bg-[#E9F9F5]"
+                                  className="border border-[#E5ECEB] bg-white text-[#64757C] text-[length:calc(11.5px*var(--jnx-text-scale,1))] font-semibold px-[11px] py-[5px] rounded-full transition-colors hover:border-[#3FC8B4] hover:text-[#0E8371] hover:bg-[#E9F9F5]"
                                 >
                                   {qf.label}
                                 </button>
@@ -1174,13 +1174,13 @@ export default function CitationResearchPanel() {
                   }`}>
                     <div className="flex items-start gap-[13px] px-[17px] py-[15px] cursor-pointer" onClick={() => setAdvancedSearch((v) => !v)}>
                       <div className="flex-1 min-w-0">
-                        <strong className="text-[13.5px] font-bold text-[#0F1B21] tracking-[-0.01em]">
+                        <strong className="text-[length:calc(13.5px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21] tracking-[-0.01em]">
                           Advanced search — Boolean queries
                         </strong>
-                        <p className="text-[12.5px] text-[#64757C] mt-1 max-w-[66ch]">
+                        <p className="text-[length:calc(12.5px*var(--jnx-text-scale,1))] text-[#64757C] mt-1 max-w-[66ch]">
                           Builds precision queries with{' '}
-                          <code className="text-[11.5px] font-mono font-semibold text-[#25353C] bg-[#EFF4F3] px-[5px] py-px rounded">AND</code> /{' '}
-                          <code className="text-[11.5px] font-mono font-semibold text-[#25353C] bg-[#EFF4F3] px-[5px] py-px rounded">OR</code>{' '}
+                          <code className="text-[length:calc(11.5px*var(--jnx-text-scale,1))] font-mono font-semibold text-[#25353C] bg-[#EFF4F3] px-[5px] py-px rounded">AND</code> /{' '}
+                          <code className="text-[length:calc(11.5px*var(--jnx-text-scale,1))] font-mono font-semibold text-[#25353C] bg-[#EFF4F3] px-[5px] py-px rounded">OR</code>{' '}
                           operators and grouped synonyms. Leave off to use the standard keyword queries.
                         </p>
                       </div>
@@ -1189,10 +1189,10 @@ export default function CitationResearchPanel() {
                     <div className={`grid grid-cols-1 transition-[grid-template-rows] duration-300 ${advancedSearch ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
                       <div className="overflow-hidden">
                         <div className="px-[17px] pb-[17px]">
-                          <div className="block text-[11px] font-semibold tracking-[0.06em] uppercase text-[#64757C] mb-[7px]">
+                          <div className="block text-[length:calc(11px*var(--jnx-text-scale,1))] font-semibold tracking-[0.06em] uppercase text-[#64757C] mb-[7px]">
                             Example of what the system will send
                           </div>
-                          <div className="bg-[#0F1B21] rounded-[11px] px-[15px] py-3 font-mono text-[11.5px] leading-[1.8] text-[#CBDDDC] overflow-x-auto whitespace-nowrap">
+                          <div className="bg-[#0F1B21] rounded-[11px] px-[15px] py-3 font-mono text-[length:calc(11.5px*var(--jnx-text-scale,1))] leading-[1.8] text-[#CBDDDC] overflow-x-auto whitespace-nowrap">
                             "quashing of FIR" <b className="text-[#5BDCC9] font-bold">AND</b> ("malafide" <b className="text-[#5BDCC9] font-bold">OR</b> "ulterior motive") <b className="text-[#5BDCC9] font-bold">AND</b> <span className="text-[#EFC27E]">section 482</span>
                           </div>
                         </div>
@@ -1211,7 +1211,7 @@ export default function CitationResearchPanel() {
                   type="button"
                   onClick={runAnalyze}
                   disabled={analyzing}
-                  className={`w-full flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-[13px] text-[14.5px] font-bold tracking-[-0.01em] transition-all ${
+                  className={`w-full flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-[13px] text-[length:calc(14.5px*var(--jnx-text-scale,1))] font-bold tracking-[-0.01em] transition-all ${
                     analyzing
                       ? 'bg-[#E1E9E8] text-[#93A2A7] cursor-not-allowed'
                       : 'bg-gradient-to-b from-[#5BDCC9] to-[#3FC8B4] text-[#053B33] shadow-[0_10px_24px_-10px_rgba(63,200,180,0.8)] hover:-translate-y-px hover:shadow-[0_14px_30px_-11px_rgba(63,200,180,0.95)]'
@@ -1222,7 +1222,7 @@ export default function CitationResearchPanel() {
                     : <SparklesIcon className="h-[17px] w-[17px]" />}
                   {analyzing ? 'Analysing…' : 'Analyse case'}
                 </button>
-                <div className="text-center text-[11.5px] text-[#93A2A7] mt-2">
+                <div className="text-center text-[length:calc(11.5px*var(--jnx-text-scale,1))] text-[#93A2A7] mt-2">
                   Runs in under a minute · results are <b className="font-semibold text-[#64757C]">saved to the case</b> so you can leave the page.
                 </div>
 
@@ -1230,8 +1230,8 @@ export default function CitationResearchPanel() {
                 {analyzing && (
                   <div ref={pipeRef} className="mt-3.5 rounded-[14px] border-[1.5px] border-[#BFE9DF] bg-white px-[19px] py-[17px] shadow-[0_2px_5px_rgba(15,27,33,0.04),0_10px_24px_-12px_rgba(15,27,33,0.12)]">
                     <div className="flex items-center mb-3">
-                      <strong className="text-[13.5px] font-bold text-[#0F1B21]">Analysing your case</strong>
-                      <span className="ml-auto text-xs font-bold text-[#0E8371]">{pct}%</span>
+                      <strong className="text-[length:calc(13.5px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21]">Analysing your case</strong>
+                      <span className="ml-auto text-[length:calc(12px*var(--jnx-text-scale,1))] font-bold text-[#0E8371]">{pct}%</span>
                     </div>
                     <div className="h-[5px] rounded-full bg-[#EFF4F3] overflow-hidden mb-3.5">
                       <div
@@ -1244,7 +1244,7 @@ export default function CitationResearchPanel() {
                       return (
                         <div
                           key={label}
-                          className={`flex items-center gap-2.5 py-[5px] text-[12.5px] ${
+                          className={`flex items-center gap-2.5 py-[5px] text-[length:calc(12.5px*var(--jnx-text-scale,1))] ${
                             state === 'active' ? 'text-[#0F1B21] font-semibold' : state === 'done' ? 'text-[#64757C]' : 'text-[#93A2A7]'
                           }`}
                         >
@@ -1258,8 +1258,8 @@ export default function CitationResearchPanel() {
                             {state === 'done' && <CheckIcon strokeWidth={3.6} className="h-[9px] w-[9px] text-white" />}
                           </span>
                           <span className="flex-1 min-w-0 truncate">{label}</span>
-                          {state === 'active' && <small className="ml-auto text-[11px] font-normal text-[#93A2A7]">running…</small>}
-                          {state === 'done' && <small className="ml-auto text-[11px] text-[#93A2A7]">done</small>}
+                          {state === 'active' && <small className="ml-auto text-[length:calc(11px*var(--jnx-text-scale,1))] font-normal text-[#93A2A7]">running…</small>}
+                          {state === 'done' && <small className="ml-auto text-[length:calc(11px*var(--jnx-text-scale,1))] text-[#93A2A7]">done</small>}
                         </div>
                       );
                     })}
@@ -1275,21 +1275,21 @@ export default function CitationResearchPanel() {
                 <button
                   type="button"
                   onClick={() => setRecentsCollapsed((v) => !v)}
-                  className="w-full shrink-0 flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] font-semibold text-[#64757C] transition-colors hover:text-[#0F1B21] hover:bg-[#EFF4F3]"
+                  className="w-full shrink-0 flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[length:calc(13px*var(--jnx-text-scale,1))] font-semibold text-[#64757C] transition-colors hover:text-[#0F1B21] hover:bg-[#EFF4F3]"
                 >
                   Recents
                   <ChevronRightIcon strokeWidth={2.4} className={`h-3.5 w-3.5 transition-transform ${recentsCollapsed ? '' : 'rotate-90'}`} />
                   {tabHistory.length > 0 && (
-                    <span className="ml-auto text-[11px] font-medium text-[#93A2A7]">{tabHistory.length}</span>
+                    <span className="ml-auto text-[length:calc(11px*var(--jnx-text-scale,1))] font-medium text-[#93A2A7]">{tabHistory.length}</span>
                   )}
                 </button>
                 {!recentsCollapsed && (
                   <>
                     {historyLoading && (
-                      <div className="px-2 py-2 text-xs text-[#93A2A7]">Loading history…</div>
+                      <div className="px-2 py-2 text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#93A2A7]">Loading history…</div>
                     )}
                     {!historyLoading && tabHistory.length === 0 && (
-                      <div className="px-2 py-2 text-xs text-[#93A2A7]">
+                      <div className="px-2 py-2 text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#93A2A7]">
                         {inputMode === 'case'
                           ? 'No research on your cases yet — it will appear here.'
                           : 'No research on uploaded documents yet — it will appear here.'}
@@ -1330,7 +1330,7 @@ export default function CitationResearchPanel() {
       low: 'text-[#991B1B] bg-[#FEF2F2] border-[#FECACA]',
       spotted: 'text-[#3D6FA8] bg-[#EDF3FA] border-[#CDDEF0]',
     };
-    const warnPill = 'inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#B97F24] bg-[#FCF5E7] border border-[#F0E1C0] px-2.5 py-1 rounded-full';
+    const warnPill = 'inline-flex items-center gap-1.5 text-[length:calc(11px*var(--jnx-text-scale,1))] font-semibold text-[#B97F24] bg-[#FCF5E7] border border-[#F0E1C0] px-2.5 py-1 rounded-full';
 
     const Tick = ({ on, size = 20, onToggle, label }) => (
       <button
@@ -1390,15 +1390,15 @@ export default function CitationResearchPanel() {
               />
             </span>
             <span className="flex-1 min-w-0 block">
-              <span className="flex flex-wrap items-center gap-[7px] text-[9.5px] font-bold tracking-[0.09em] uppercase text-[#93A2A7] mb-0.5">
+              <span className="flex flex-wrap items-center gap-[7px] text-[length:calc(9.5px*var(--jnx-text-scale,1))] font-bold tracking-[0.09em] uppercase text-[#93A2A7] mb-0.5">
                 {label}
                 {badgeKey && (
-                  <span className={`px-[7px] py-px rounded-[5px] border text-[9.5px] font-bold tracking-[0.05em] ${BADGES[badgeKey] || BADGES.medium}`}>
+                  <span className={`px-[7px] py-px rounded-[5px] border text-[length:calc(9.5px*var(--jnx-text-scale,1))] font-bold tracking-[0.05em] ${BADGES[badgeKey] || BADGES.medium}`}>
                     {badgeText}
                   </span>
                 )}
               </span>
-              <span className="block text-sm font-bold text-[#0F1B21] tracking-[-0.012em] leading-[1.35]">
+              <span className="block text-[length:calc(14px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21] tracking-[-0.012em] leading-[1.35]">
                 {heading}
               </span>
             </span>
@@ -1408,12 +1408,12 @@ export default function CitationResearchPanel() {
           <div className="pl-[46px] pr-[15px] pt-2">
             {desc && (
               <>
-                <p className={`text-xs text-[#64757C] leading-[1.55] ${expanded ? '' : 'line-clamp-3'}`}>{desc}</p>
+                <p className={`text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#64757C] leading-[1.55] ${expanded ? '' : 'line-clamp-3'}`}>{desc}</p>
                 {isLong && (
                   <button
                     type="button"
                     onClick={() => setExpandedDesc((prev) => ({ ...prev, [issue.id]: !expanded }))}
-                    className="text-[11px] font-bold text-[#0E8371] mt-0.5 rounded-md hover:bg-[#E9F9F5] px-0.5"
+                    className="text-[length:calc(11px*var(--jnx-text-scale,1))] font-bold text-[#0E8371] mt-0.5 rounded-md hover:bg-[#E9F9F5] px-0.5"
                   >
                     {expanded ? 'Read less' : 'Read more'}
                   </button>
@@ -1423,20 +1423,20 @@ export default function CitationResearchPanel() {
             {Array.isArray(issue.legal_framework) && issue.legal_framework.length > 0 && (
               <span className="mt-2 flex flex-wrap gap-1.5">
                 {issue.legal_framework.map((law, li) => (
-                  <span key={li} className="text-[10.5px] font-semibold text-[#25353C] bg-[#EFF4F3] border border-[#E5ECEB] px-[9px] py-[2.5px] rounded-full">
+                  <span key={li} className="text-[length:calc(10.5px*var(--jnx-text-scale,1))] font-semibold text-[#25353C] bg-[#EFF4F3] border border-[#E5ECEB] px-[9px] py-[2.5px] rounded-full">
                     {law}
                   </span>
                 ))}
               </span>
             )}
             {Array.isArray(issue.case_law_cited) && issue.case_law_cited.length > 0 && (
-              <span className="mt-1.5 block text-[11px] text-[#64757C]">
+              <span className="mt-1.5 block text-[length:calc(11px*var(--jnx-text-scale,1))] text-[#64757C]">
                 <span className="font-semibold">Case law cited:</span>{' '}
                 <span className="italic">{issue.case_law_cited.join('; ')}</span>
               </span>
             )}
             {(issue.source || issue.ground_ref) && (
-              <span className="mt-1.5 block text-[10.5px] text-[#93A2A7] truncate">
+              <span className="mt-1.5 block text-[length:calc(10.5px*var(--jnx-text-scale,1))] text-[#93A2A7] truncate">
                 {[issue.ground_ref, issue.source].filter(Boolean).join(' · ')}
               </span>
             )}
@@ -1446,8 +1446,8 @@ export default function CitationResearchPanel() {
           {Array.isArray(issue.queries) && issue.queries.length > 0 && (
             <div className="mt-[11px] mb-[13px] ml-[46px] mr-[15px] bg-[#FBFDFC] border border-[#EFF4F3] rounded-[11px] overflow-hidden">
               <div className="flex items-center px-3 pt-2 pb-1.5">
-                <span className="text-[9.5px] font-bold tracking-[0.09em] uppercase text-[#93A2A7]">Search queries</span>
-                <span className="ml-auto text-[10px] text-[#93A2A7]">untick to exclude</span>
+                <span className="text-[length:calc(9.5px*var(--jnx-text-scale,1))] font-bold tracking-[0.09em] uppercase text-[#93A2A7]">Search queries</span>
+                <span className="ml-auto text-[length:calc(10px*var(--jnx-text-scale,1))] text-[#93A2A7]">untick to exclude</span>
               </div>
               {issue.queries.map((q, qi) => {
                 const checked = picks.selected.includes(q);
@@ -1462,7 +1462,7 @@ export default function CitationResearchPanel() {
                     className="flex items-center gap-2 px-3 py-[5.5px] cursor-pointer transition-colors hover:bg-[#E9F9F5]"
                   >
                     <Tick on={checked} size={16} onToggle={() => toggleQuery(issue, q)} label={checked ? 'Exclude this query' : 'Include this query'} />
-                    <span className={`flex-1 min-w-0 truncate text-[11.5px] ${checked ? 'text-[#25353C]' : 'text-[#93A2A7] line-through'}`}>
+                    <span className={`flex-1 min-w-0 truncate text-[length:calc(11.5px*var(--jnx-text-scale,1))] ${checked ? 'text-[#25353C]' : 'text-[#93A2A7] line-through'}`}>
                       {q}
                     </span>
                   </div>
@@ -1474,7 +1474,7 @@ export default function CitationResearchPanel() {
                   <span className="h-4 w-4 shrink-0 rounded-[5px] bg-[#0E8371] flex items-center justify-center">
                     <CheckIcon strokeWidth={3.4} className="h-[9px] w-[9px] text-white" />
                   </span>
-                  <span className="flex-1 min-w-0 truncate text-[11.5px] font-semibold text-[#0E8371]">{q}</span>
+                  <span className="flex-1 min-w-0 truncate text-[length:calc(11.5px*var(--jnx-text-scale,1))] font-semibold text-[#0E8371]">{q}</span>
                   <button
                     type="button"
                     onClick={(e) => { e.stopPropagation(); removeOwnQuery(issue, q); }}
@@ -1493,12 +1493,12 @@ export default function CitationResearchPanel() {
                   onChange={(e) => setQueryDrafts((prev) => ({ ...prev, [issue.id]: e.target.value }))}
                   onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addOwnQuery(issue); } }}
                   placeholder='Add your own query, e.g. "mala fide intention" quash FIR'
-                  className="flex-1 min-w-0 bg-transparent border-0 outline-none text-[11.5px] text-[#0F1B21] placeholder:text-[#93A2A7]"
+                  className="flex-1 min-w-0 bg-transparent border-0 outline-none text-[length:calc(11.5px*var(--jnx-text-scale,1))] text-[#0F1B21] placeholder:text-[#93A2A7]"
                 />
                 <button
                   type="button"
                   onClick={() => addOwnQuery(issue)}
-                  className="shrink-0 text-[11px] font-bold text-[#0E8371] px-1.5 py-0.5 rounded-md hover:bg-[#3FC8B4]/15"
+                  className="shrink-0 text-[length:calc(11px*var(--jnx-text-scale,1))] font-bold text-[#0E8371] px-1.5 py-0.5 rounded-md hover:bg-[#3FC8B4]/15"
                 >
                   Add
                 </button>
@@ -1510,7 +1510,7 @@ export default function CitationResearchPanel() {
     };
 
     return (
-      <div className="min-h-full bg-[#F6F9F8] px-4 pt-5 pb-5 sm:px-6 md:px-7 overflow-x-clip lg:h-full lg:overflow-hidden">
+      <div data-jnx-citation className="min-h-full bg-[#F6F9F8] px-4 pt-5 pb-5 sm:px-6 md:px-7 overflow-x-clip lg:h-full lg:overflow-hidden">
         <div className="max-w-[1380px] mx-auto w-full min-w-0 flex flex-col gap-3 lg:h-full lg:min-h-0">
 
           {/* Header row */}
@@ -1519,8 +1519,8 @@ export default function CitationResearchPanel() {
               <SparklesIcon className="h-[18px] w-[18px]" />
             </div>
             <div className="min-w-0">
-              <h1 className="text-lg font-extrabold tracking-[-0.02em] text-[#0F1B21] leading-tight">What should we research?</h1>
-              <p className="text-[12.5px] text-[#64757C] mt-px truncate">
+              <h1 className="text-[length:calc(18px*var(--jnx-text-scale,1))] font-extrabold tracking-[-0.02em] text-[#0F1B21] leading-tight">What should we research?</h1>
+              <p className="text-[length:calc(12.5px*var(--jnx-text-scale,1))] text-[#64757C] mt-px truncate">
                 {isGrounds
                   ? 'These are the grounds pleaded in the filing — pick the ones you need judgments for, or add your own.'
                   : isCombined
@@ -1533,7 +1533,7 @@ export default function CitationResearchPanel() {
             <button
               onClick={runAnalyze}
               disabled={analyzing}
-              className="ml-auto shrink-0 flex items-center gap-1.5 px-3.5 py-2 rounded-[10px] text-xs font-semibold border border-[#E5ECEB] bg-white text-[#64757C] shadow-sm transition-colors hover:border-[#BFE9DF] hover:text-[#0E8371] disabled:opacity-60"
+              className="ml-auto shrink-0 flex items-center gap-1.5 px-3.5 py-2 rounded-[10px] text-[length:calc(12px*var(--jnx-text-scale,1))] font-semibold border border-[#E5ECEB] bg-white text-[#64757C] shadow-sm transition-colors hover:border-[#BFE9DF] hover:text-[#0E8371] disabled:opacity-60"
             >
               <ArrowPathIcon className={`h-3.5 w-3.5 ${analyzing ? 'animate-spin' : ''}`} />
               Re-analyse
@@ -1546,7 +1546,7 @@ export default function CitationResearchPanel() {
               {ctxFull && (
                 <div className="min-w-0 flex items-start gap-[11px] rounded-[14px] border border-[#BFE9DF] bg-gradient-to-b from-[#F6FDFB] to-white px-[15px] py-[11px]">
                   <ScaleIcon className="h-4 w-4 mt-0.5 shrink-0 text-[#0E8371]" />
-                  <p className={`min-w-0 flex-1 text-xs text-[#64757C] leading-[1.55] ${ctxExpanded ? '' : 'line-clamp-2'}`}>
+                  <p className={`min-w-0 flex-1 text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#64757C] leading-[1.55] ${ctxExpanded ? '' : 'line-clamp-2'}`}>
                     {analysis?.caseTitle && (
                       <>
                         <b className="font-bold text-[#0F1B21]">{analysis.caseTitle}</b>
@@ -1559,7 +1559,7 @@ export default function CitationResearchPanel() {
                     <button
                       type="button"
                       onClick={() => setCtxExpanded((v) => !v)}
-                      className="shrink-0 self-end text-[11.5px] font-bold text-[#0E8371] px-1.5 py-0.5 rounded-md hover:bg-[#E9F9F5]"
+                      className="shrink-0 self-end text-[length:calc(11.5px*var(--jnx-text-scale,1))] font-bold text-[#0E8371] px-1.5 py-0.5 rounded-md hover:bg-[#E9F9F5]"
                     >
                       {ctxExpanded ? 'Less' : 'More'}
                     </button>
@@ -1569,27 +1569,27 @@ export default function CitationResearchPanel() {
               {(isGrounds || isCombined || isFresh) && groundsMeta && (
                 <div className="min-w-0 flex items-center rounded-[14px] border border-[#E5ECEB] bg-white px-[15px] py-[11px]">
                   <div className="flex-1 min-w-0 pr-3">
-                    <div className="text-[9.5px] font-semibold tracking-[0.08em] uppercase text-[#93A2A7] whitespace-nowrap">
+                    <div className="text-[length:calc(9.5px*var(--jnx-text-scale,1))] font-semibold tracking-[0.08em] uppercase text-[#93A2A7] whitespace-nowrap">
                       {isFresh ? 'Proposed grounds' : 'Grounds'}
                     </div>
-                    <div className="text-[17px] font-extrabold text-[#0F1B21] leading-tight">{groundsMeta.totalGrounds ?? suggested.length}</div>
+                    <div className="text-[length:calc(17px*var(--jnx-text-scale,1))] font-extrabold text-[#0F1B21] leading-tight">{groundsMeta.totalGrounds ?? suggested.length}</div>
                   </div>
                   {groundsMeta.spottedIssues != null && (
                     <div className="flex-1 min-w-0 px-3 border-l border-[#EFF4F3]">
-                      <div className="text-[9.5px] font-semibold tracking-[0.08em] uppercase text-[#93A2A7] whitespace-nowrap">Spotted issues</div>
-                      <div className="text-[17px] font-extrabold text-[#0F1B21] leading-tight">{groundsMeta.spottedIssues}</div>
+                      <div className="text-[length:calc(9.5px*var(--jnx-text-scale,1))] font-semibold tracking-[0.08em] uppercase text-[#93A2A7] whitespace-nowrap">Spotted issues</div>
+                      <div className="text-[length:calc(17px*var(--jnx-text-scale,1))] font-extrabold text-[#0F1B21] leading-tight">{groundsMeta.spottedIssues}</div>
                     </div>
                   )}
                   {groundsMeta.documentType && (
                     <div className="flex-1 min-w-0 px-3 border-l border-[#EFF4F3]">
-                      <div className="text-[9.5px] font-semibold tracking-[0.08em] uppercase text-[#93A2A7] whitespace-nowrap">Document</div>
-                      <div className="text-sm font-extrabold text-[#0F1B21] truncate">{groundsMeta.documentType}</div>
+                      <div className="text-[length:calc(9.5px*var(--jnx-text-scale,1))] font-semibold tracking-[0.08em] uppercase text-[#93A2A7] whitespace-nowrap">Document</div>
+                      <div className="text-[length:calc(14px*var(--jnx-text-scale,1))] font-extrabold text-[#0F1B21] truncate">{groundsMeta.documentType}</div>
                     </div>
                   )}
                   {groundsMeta.party && (
                     <div className="flex-1 min-w-0 pl-3 border-l border-[#EFF4F3]">
-                      <div className="text-[9.5px] font-semibold tracking-[0.08em] uppercase text-[#93A2A7] whitespace-nowrap">Acting for</div>
-                      <div className="text-sm font-extrabold text-[#0F1B21] truncate">{groundsMeta.party}</div>
+                      <div className="text-[length:calc(9.5px*var(--jnx-text-scale,1))] font-semibold tracking-[0.08em] uppercase text-[#93A2A7] whitespace-nowrap">Acting for</div>
+                      <div className="text-[length:calc(14px*var(--jnx-text-scale,1))] font-extrabold text-[#0F1B21] truncate">{groundsMeta.party}</div>
                     </div>
                   )}
                 </div>
@@ -1598,17 +1598,17 @@ export default function CitationResearchPanel() {
           )}
 
           {analysis?.needsClarification && (
-            <div className="shrink-0 rounded-[11px] border border-[#F0E1C0] bg-[#FCF5E7] px-3.5 py-2 text-xs text-[#B97F24]">
+            <div className="shrink-0 rounded-[11px] border border-[#F0E1C0] bg-[#FCF5E7] px-3.5 py-2 text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#B97F24]">
               {analysis.clarificationQuestion} — add detail via Re-analyse, or type your own search below and run anyway.
             </div>
           )}
 
           {/* Toolbar: heading + counts + kind filter + cap warnings + clear */}
           <div className="flex flex-wrap items-center gap-2.5 shrink-0 min-w-0">
-            <h2 className="text-sm font-bold text-[#0F1B21] tracking-[-0.01em]">
+            <h2 className="text-[length:calc(14px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21] tracking-[-0.01em]">
               {isGrounds ? 'Grounds of the case' : isCombined ? 'Grounds & issues' : isFresh ? 'Proposed grounds' : 'Legal issues'}
             </h2>
-            <span className="text-xs font-medium text-[#93A2A7]">
+            <span className="text-[length:calc(12px*var(--jnx-text-scale,1))] font-medium text-[#93A2A7]">
               <b className="font-bold text-[#0E8371]">{selectedIds.size}</b> of {suggested.length} selected
             </span>
             {showFilter && (
@@ -1624,12 +1624,12 @@ export default function CitationResearchPanel() {
                     role="tab"
                     aria-selected={effFilter === key}
                     onClick={() => setIssueFilter(key)}
-                    className={`flex items-center gap-1.5 px-3 py-[5.5px] rounded-[7px] text-xs font-semibold transition-colors ${
+                    className={`flex items-center gap-1.5 px-3 py-[5.5px] rounded-[7px] text-[length:calc(12px*var(--jnx-text-scale,1))] font-semibold transition-colors ${
                       effFilter === key ? 'bg-[#0F1B21] text-white' : 'text-[#64757C] hover:bg-[#EFF4F3]'
                     }`}
                   >
                     {label}
-                    <em className={`not-italic text-[10px] font-bold px-1.5 py-px rounded-full ${
+                    <em className={`not-italic text-[length:calc(10px*var(--jnx-text-scale,1))] font-bold px-1.5 py-px rounded-full ${
                       effFilter === key ? 'bg-white/20 text-white' : 'bg-[#EFF4F3] text-[#64757C]'
                     }`}>{count}</em>
                   </button>
@@ -1646,11 +1646,11 @@ export default function CitationResearchPanel() {
             ))}
             <span className="flex-1" />
             {selectedIds.size > 0 ? (
-              <button onClick={clearAllIssues} className="shrink-0 text-xs font-semibold text-[#64757C] px-2 py-1 rounded-lg transition-colors hover:text-[#C24444] hover:bg-[#FBEDED]">
+              <button onClick={clearAllIssues} className="shrink-0 text-[length:calc(12px*var(--jnx-text-scale,1))] font-semibold text-[#64757C] px-2 py-1 rounded-lg transition-colors hover:text-[#C24444] hover:bg-[#FBEDED]">
                 Clear all
               </button>
             ) : (
-              <button onClick={selectAllIssues} className="shrink-0 text-xs font-semibold text-[#0E8371] px-2 py-1 rounded-lg transition-colors hover:bg-[#E9F9F5]">
+              <button onClick={selectAllIssues} className="shrink-0 text-[length:calc(12px*var(--jnx-text-scale,1))] font-semibold text-[#0E8371] px-2 py-1 rounded-lg transition-colors hover:bg-[#E9F9F5]">
                 Select all
               </button>
             )}
@@ -1659,7 +1659,7 @@ export default function CitationResearchPanel() {
           {/* Board — the only scrolling region at lg */}
           <div className="grid grid-cols-1 md:grid-cols-2 auto-rows-max gap-3 content-start min-w-0 lg:flex-1 lg:min-h-0 lg:overflow-y-auto p-1 -m-1">
             {suggested.length === 0 && customIssues.length === 0 && (
-              <div className="md:col-span-2 rounded-[14px] border-[1.5px] border-dashed border-[#E5ECEB] bg-white px-4 py-8 text-center text-xs text-[#93A2A7]">
+              <div className="md:col-span-2 rounded-[14px] border-[1.5px] border-dashed border-[#E5ECEB] bg-white px-4 py-8 text-center text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#93A2A7]">
                 {isGrounds ? 'No pleaded grounds were found — add your own below.'
                   : isCombined ? 'No grounds or issues were found — add your own below.'
                     : isFresh ? 'No grounds could be proposed — describe your objective more precisely and re-analyse.'
@@ -1676,11 +1676,11 @@ export default function CitationResearchPanel() {
                     <CheckIcon strokeWidth={3.4} className="h-[11px] w-[11px] text-white" />
                   </span>
                   <span className="flex-1 min-w-0">
-                    <span className="flex items-center gap-[7px] text-[9.5px] font-bold tracking-[0.09em] uppercase text-[#93A2A7] mb-0.5">
+                    <span className="flex items-center gap-[7px] text-[length:calc(9.5px*var(--jnx-text-scale,1))] font-bold tracking-[0.09em] uppercase text-[#93A2A7] mb-0.5">
                       Custom · Added by you
-                      <span className={`px-[7px] py-px rounded-[5px] border text-[9.5px] font-bold tracking-[0.05em] ${BADGES.spotted}`}>Custom</span>
+                      <span className={`px-[7px] py-px rounded-[5px] border text-[length:calc(9.5px*var(--jnx-text-scale,1))] font-bold tracking-[0.05em] ${BADGES.spotted}`}>Custom</span>
                     </span>
-                    <span className="block text-sm font-bold text-[#0F1B21] tracking-[-0.012em] leading-[1.35]">{text}</span>
+                    <span className="block text-[length:calc(14px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21] tracking-[-0.012em] leading-[1.35]">{text}</span>
                   </span>
                   <button
                     type="button"
@@ -1702,7 +1702,7 @@ export default function CitationResearchPanel() {
             <div className="flex flex-wrap items-center gap-2.5 border-t border-[#E5ECEB] bg-white/95 backdrop-blur px-3.5 py-3 sm:px-4 md:rounded-2xl md:border md:bg-white md:shadow-[0_2px_5px_rgba(15,27,33,0.04),0_10px_24px_-12px_rgba(15,27,33,0.12)]">
               <button
                 onClick={resetAll}
-                className="shrink-0 flex items-center gap-1.5 px-2.5 py-2 rounded-[10px] text-[12.5px] font-semibold text-[#64757C] transition-colors hover:bg-[#EFF4F3] hover:text-[#25353C]"
+                className="shrink-0 flex items-center gap-1.5 px-2.5 py-2 rounded-[10px] text-[length:calc(12.5px*var(--jnx-text-scale,1))] font-semibold text-[#64757C] transition-colors hover:bg-[#EFF4F3] hover:text-[#25353C]"
               >
                 <ChevronLeftIcon className="h-3.5 w-3.5" /> Start over
               </button>
@@ -1719,14 +1719,14 @@ export default function CitationResearchPanel() {
                   }}
                   rows={1}
                   placeholder="Search in your own words — e.g. Whether bail may be granted pending appeal under Article 136"
-                  className="flex-1 min-w-0 bg-transparent border-0 outline-none resize-none overflow-y-auto py-[9px] text-[12.5px] leading-relaxed text-[#0F1B21] placeholder:text-[#93A2A7]"
+                  className="flex-1 min-w-0 bg-transparent border-0 outline-none resize-none overflow-y-auto py-[9px] text-[length:calc(12.5px*var(--jnx-text-scale,1))] leading-relaxed text-[#0F1B21] placeholder:text-[#93A2A7]"
                 />
               </div>
               <button
                 onClick={addCustomIssue}
                 disabled={!customDraft.trim() || addingIssue}
                 title="Add this search — it gets its own card and queries, like the suggested ones"
-                className="shrink-0 flex items-center gap-1.5 px-3.5 py-[9px] rounded-[11px] text-[12.5px] font-bold border border-[#E5ECEB] bg-white text-[#25353C] transition-colors hover:border-[#3FC8B4] hover:text-[#0E8371] hover:bg-[#E9F9F5] disabled:opacity-50"
+                className="shrink-0 flex items-center gap-1.5 px-3.5 py-[9px] rounded-[11px] text-[length:calc(12.5px*var(--jnx-text-scale,1))] font-bold border border-[#E5ECEB] bg-white text-[#25353C] transition-colors hover:border-[#3FC8B4] hover:text-[#0E8371] hover:bg-[#E9F9F5] disabled:opacity-50"
               >
                 {addingIssue
                   ? (<><ArrowPathIcon className="h-3.5 w-3.5 animate-spin" /> Analysing…</>)
@@ -1735,7 +1735,7 @@ export default function CitationResearchPanel() {
               <button
                 onClick={runSearch}
                 disabled={searching || totalSelected === 0}
-                className="shrink-0 flex items-center gap-2 px-[22px] py-[10px] rounded-xl text-[13.5px] font-bold tracking-[-0.01em] transition-all bg-gradient-to-b from-[#5BDCC9] to-[#3FC8B4] text-[#053B33] shadow-[0_8px_18px_-8px_rgba(63,200,180,0.8)] hover:-translate-y-px disabled:bg-none disabled:bg-[#E1E9E8] disabled:text-[#93A2A7] disabled:shadow-none disabled:cursor-not-allowed disabled:hover:translate-y-0"
+                className="shrink-0 flex items-center gap-2 px-[22px] py-[10px] rounded-xl text-[length:calc(13.5px*var(--jnx-text-scale,1))] font-bold tracking-[-0.01em] transition-all bg-gradient-to-b from-[#5BDCC9] to-[#3FC8B4] text-[#053B33] shadow-[0_8px_18px_-8px_rgba(63,200,180,0.8)] hover:-translate-y-px disabled:bg-none disabled:bg-[#E1E9E8] disabled:text-[#93A2A7] disabled:shadow-none disabled:cursor-not-allowed disabled:hover:translate-y-0"
               >
                 {searching ? <ArrowPathIcon className="h-[15px] w-[15px] animate-spin" /> : <MagnifyingGlassIcon className="h-[15px] w-[15px]" />}
                 {searching ? 'Searching…' : `Run search (${totalSelected})`}
