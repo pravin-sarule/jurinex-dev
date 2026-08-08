@@ -5,6 +5,7 @@ import {
   BriefcaseIcon,
   CheckIcon,
   ChevronLeftIcon,
+  ChevronRightIcon,
   DocumentTextIcon,
   MagnifyingGlassIcon,
   PlusIcon,
@@ -61,26 +62,63 @@ const partiesOf = (cs) => {
   return [title || cs.id, ''];
 };
 
-/** Compact relative time for the card footer. */
-const timeAgo = (iso) => {
-  if (!iso) return '';
+/** "Updated yesterday" / "23 Jul 2026" style footer line for case cards. */
+const updatedLabel = (iso) => {
+  if (!iso) return 'Case documents on record';
   const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return '';
+  if (Number.isNaN(then)) return 'Case documents on record';
   const days = Math.floor((Date.now() - then) / 86400000);
-  if (days <= 0) return 'Today';
-  if (days === 1) return 'Yesterday';
-  if (days < 7) return `${days} days ago`;
-  if (days < 14) return 'Last week';
+  if (days <= 0) return 'Updated today';
+  if (days === 1) return 'Updated yesterday';
+  if (days < 7) return `Updated ${days} days ago`;
+  if (days < 14) return 'Updated last week';
   return new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 };
 
-// Grounds-mode extraction confidence (per ground) — semantic status tints,
-// same palette as the bands.
-const CONFIDENCE_STYLES = {
-  high: 'bg-[#F0FDF4] text-[#166534] border border-[#BBF7D0]',
-  medium: 'bg-[#FFFBEB] text-[#92400E] border border-[#FDE68A]',
-  low: 'bg-[#FEF2F2] text-[#991B1B] border border-[#FECACA]',
+// "07 Aug, 10:52" from the session's ISO timestamp — formatted from the raw
+// string so the stored time is shown unchanged, exactly as the API returns it.
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const historyStamp = (iso) => {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (!m) return String(iso || '').slice(0, 16);
+  return `${m[3]} ${MONTH_SHORT[Number(m[2]) - 1] || m[2]}, ${m[4]}:${m[5]}`;
 };
+
+// Quick-start templates for the fresh-matter objective box.
+const QUICK_FILLS = [
+  { label: 'Quash the FIR', text: 'We act for the applicants. Seek quashing of the FIR — the dispute is purely civil and the complaint is a counterblast to our recovery suit.' },
+  { label: 'Anticipatory bail', text: 'We act for the applicant. Seek anticipatory bail — no custodial interrogation is needed and the applicant has no antecedents.' },
+  { label: 'Stay of proceedings', text: 'We act for the respondents. Seek stay of the trial court proceedings pending disposal of this petition.' },
+  { label: 'Wage revision', text: 'We act for the workmen; focus on the wage revision demand and seek reinstatement with back wages.' },
+];
+
+/** Toggle used by the Research options cards. */
+function Switch({ on, label, onToggle }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      className={`relative mt-0.5 h-[23px] w-10 shrink-0 rounded-full transition-colors duration-200 ${on ? 'bg-[#0E8371]' : 'bg-[#D8E1E0]'}`}
+    >
+      <span className={`absolute top-[3px] left-[3px] h-[17px] w-[17px] rounded-full bg-white shadow-[0_1px_3px_rgba(15,27,33,0.3)] transition-transform duration-200 ${on ? 'translate-x-[17px]' : 'translate-x-0'}`} />
+    </button>
+  );
+}
+
+/** Numbered section label: (n) Title ─────── note */
+function StepLab({ n, title, note }) {
+  return (
+    <div className="flex items-center gap-2.5 mb-3 min-w-0">
+      <span className="h-[22px] w-[22px] shrink-0 rounded-full bg-[#0F1B21] text-white text-[11px] font-bold flex items-center justify-center">{n}</span>
+      <h2 className="text-sm font-bold tracking-[-0.01em] text-[#0F1B21] whitespace-nowrap">{title}</h2>
+      {note && <span className="text-xs font-medium text-[#93A2A7] truncate">{note}</span>}
+      <span className="h-px flex-1 bg-[#E5ECEB] min-w-[16px]" />
+    </div>
+  );
+}
 
 const REFINE_MODES = [
   { value: 'facet', label: 'Filter (court / year / band)' },
@@ -311,6 +349,7 @@ export default function CitationResearchPanel() {
   const [casesLoading, setCasesLoading] = useState(true);
   const [casesPage, setCasesPage] = useState(1);
   const casesPerPage = 6;
+  const [caseFilter, setCaseFilter] = useState('');
   const [selectedCaseId, setSelectedCaseId] = useState(null);
   const [caseText, setCaseText] = useState('');
   // Fresh matter: the case has NO drafted pleading yet — the system reads
@@ -358,6 +397,11 @@ export default function CitationResearchPanel() {
   const [queryPicks, setQueryPicks] = useState({});
   const [queryDrafts, setQueryDrafts] = useState({}); // issueId -> input text
 
+  // Issues-step UI state: kind filter, per-card "Read more", context expand.
+  const [issueFilter, setIssueFilter] = useState('all');
+  const [expandedDesc, setExpandedDesc] = useState({});
+  const [ctxExpanded, setCtxExpanded] = useState(false);
+
   // Auto-grow effects live below every state they read (TDZ-safe).
   useEffect(() => { autoGrow(caseTextRef.current); }, [caseText, freshMode, inputMode, step]);
   // The sticky-bar composer behaves like a chat input: one line tall,
@@ -368,6 +412,19 @@ export default function CitationResearchPanel() {
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight + 2, 96)}px`;
   }, [customDraft, step]);
+
+  // Analyse progress card: steps advance on a timer while the real API call
+  // runs; the last step stays active until the response lands.
+  const [pipeStep, setPipeStep] = useState(0);
+  const pipeRef = useRef(null);
+  useEffect(() => {
+    if (!analyzing) { setPipeStep(0); return undefined; }
+    setPipeStep(0);
+    pipeRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    const t1 = setTimeout(() => setPipeStep(1), 8000);
+    const t2 = setTimeout(() => setPipeStep(2), 20000);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, [analyzing]);
 
   const totalSelected = selectedIds.size + customIssues.length;
   const suggested = analysis?.suggestedIssues || [];
@@ -429,6 +486,7 @@ export default function CitationResearchPanel() {
   // Research history — every past search stored in the citationTest DB.
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
+  const [recentsCollapsed, setRecentsCollapsed] = useState(false);
   // Silent refresh keeps the sidebar in sync after analyze/run/back-to-input;
   // a transient failure keeps the previous list instead of blanking it.
   const refreshHistory = useCallback((initial = false) => {
@@ -482,11 +540,18 @@ export default function CitationResearchPanel() {
     }
   };
 
-  // History entries belonging to the currently selected case.
-  const caseHistory = useMemo(
-    () => history.filter((h) => h.caseId && String(h.caseId) === String(selectedCaseId)),
-    [history, selectedCaseId],
-  );
+  // Case-grid search: filter by party names, case number/ref or title.
+  const filteredCases = useMemo(() => {
+    const q = caseFilter.trim().toLowerCase();
+    if (!q) return cases;
+    return cases.filter((cs) =>
+      `${caseRefOf(cs)} ${partiesOf(cs).join(' ')} ${cs.case_title || cs.name || ''}`.toLowerCase().includes(q));
+  }, [cases, caseFilter]);
+  useEffect(() => { setCasesPage(1); }, [caseFilter]);
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(filteredCases.length / casesPerPage));
+    setCasesPage((p) => Math.min(p, maxPage));
+  }, [filteredCases.length, casesPerPage]);
 
   // Each tab shows only its own research: case-based sessions carry a
   // caseId; uploaded-document sessions don't.
@@ -538,158 +603,47 @@ export default function CitationResearchPanel() {
     }
   };
 
-  // Row is a div (not a button) so the delete control can nest inside it.
-  const HistoryRow = ({ entry }) => (
-    <div
-      onClick={() => openHistory(entry.sessionId)}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => { if (e.key === 'Enter') openHistory(entry.sessionId); }}
-      className="w-full text-left rounded-xl border border-[#E2E8F0] bg-white px-4 py-3 hover:border-[#21C1B6]/60 hover:shadow-sm transition-all flex items-center gap-3 cursor-pointer"
-    >
-      <span className="h-9 w-9 rounded-lg bg-[#F0FDFA] flex items-center justify-center shrink-0">
-        <MagnifyingGlassIcon className="text-[#21C1B6]" style={{ height: 18, width: 18 }} />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block text-sm font-semibold text-[#0F172A] truncate">
-          {entry.caseTitle || entry.summary || entry.sessionId}
-        </span>
-        <span className="block text-[11px] text-[#94A3B8] mt-0.5">
-          {entry.citationCount > 0 ? (
-            <>{entry.issueCount} issue{entry.issueCount === 1 ? '' : 's'} · {entry.citationCount} citation{entry.citationCount === 1 ? '' : 's'} · {String(entry.updatedAt).slice(0, 16)}</>
-          ) : (
-            <span className="text-[#D97706] font-medium">analysed only — no search run yet · {String(entry.updatedAt).slice(0, 16)}</span>
-          )}
-        </span>
-      </span>
-      <span className="text-[11px] font-bold shrink-0" style={{ color: '#1AA49B' }}>
-        {entry.citationCount > 0 ? 'Open →' : 'Continue →'}
-      </span>
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); deleteHistory(entry); }}
-        disabled={deletingId === entry.sessionId}
-        title="Delete this research and its reports"
-        className="shrink-0 h-8 w-8 rounded-lg flex items-center justify-center text-[#94A3B8] hover:text-[#DC2626] hover:bg-[#FEF2F2] transition-colors disabled:opacity-50"
+  // Compact "Recents" row: icon + one truncated line; the full title and
+  // details live in the hover tooltip, delete appears on hover. A div (not
+  // a button) so the delete control can nest inside it.
+  const HistoryRow = ({ entry }) => {
+    const name = entry.caseTitle || entry.summary || entry.sessionId;
+    const meta = entry.citationCount > 0
+      ? `${entry.issueCount} issue${entry.issueCount === 1 ? '' : 's'} · ${entry.citationCount} citation${entry.citationCount === 1 ? '' : 's'} · ${historyStamp(entry.updatedAt)}`
+      : `analysed only — no search run yet · ${historyStamp(entry.updatedAt)}`;
+    const deleting = deletingId === entry.sessionId;
+    return (
+      <div
+        onClick={() => openHistory(entry.sessionId)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter') openHistory(entry.sessionId); }}
+        title={`${name}\n${meta}`}
+        className="group flex items-center gap-2 rounded-lg px-2 py-[7px] cursor-pointer transition-colors hover:bg-[#EFF4F3]"
       >
-        {deletingId === entry.sessionId
-          ? <ArrowPathIcon className="animate-spin" style={{ height: 15, width: 15 }} />
-          : <TrashIcon style={{ height: 15, width: 15 }} />}
-      </button>
-    </div>
-  );
-
-  const contextLine = useMemo(() => {
-    const ctx = analysis?.caseContext;
-    if (!ctx) return '';
-    const summary = ctx.raw_case_summary || ctx.facts || '';
-    return summary.length > 260 ? `${summary.slice(0, 260)}…` : summary;
-  }, [analysis]);
-
-  // Case grid + pagination, shared by the "My cases" tab and the optional
-  // case picker on the "Paste or upload" tab (fresh research: case documents
-  // + the typed description as the objective).
-  const CasePicker = () => (
-    <div>
-      {casesLoading && (
-        <div className="flex items-center gap-2 text-sm text-[#64748B] py-6 justify-center">
-          <ArrowPathIcon className="h-4 w-4 animate-spin" /> Loading your cases…
-        </div>
-      )}
-      {!casesLoading && cases.length === 0 && (
-        <div className="rounded-xl border border-dashed border-[#CBD5E1] bg-white px-4 py-8 text-center text-sm text-[#64748B]">
-          No cases found in your Projects. Upload case documents under Projects first,
-          or switch to “Paste or upload”.
-        </div>
-      )}
-      <div className="grid md:grid-cols-2 gap-3">
-        {cases.slice((casesPage - 1) * casesPerPage, casesPage * casesPerPage).map((cs) => {
-          const active = selectedCaseId === cs.id;
-          const [petitioner, respondent] = partiesOf(cs);
-          const research = researchByCase[String(cs.id)];
-          const court = (() => {
-            const s = (cs.court_name || '').toString().trim();
-            return s && !/^\d+$/.test(s) ? s : '';
-          })();
-          const footer = [court, timeAgo(cs.updated_at || cs.created_at)].filter(Boolean);
-          return (
-            <button
-              key={cs.id}
-              onClick={() => setSelectedCaseId(active ? null : cs.id)}
-              className={`text-left rounded-xl border transition-all overflow-hidden flex flex-col ${
-                active
-                  ? 'border-[#21C1B6] bg-[#F0FDFA] ring-1 ring-[#21C1B6]/25 shadow-sm'
-                  : 'border-[#E2E8F0] bg-white hover:border-[#CBD5E1] hover:shadow-sm'
-              }`}
-            >
-              <div className="p-4 flex-1 min-w-0 w-full">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-[10.5px] font-bold tracking-[0.12em] uppercase text-[#64748B] truncate">
-                    {caseRefOf(cs)}
-                  </span>
-                  {research ? (
-                    <span className="shrink-0 inline-flex items-center gap-1.5 rounded-full bg-[#F0FDF4] border border-[#BBF7D0] px-2 py-0.5 text-[10px] font-bold text-[#166534]">
-                      <span className="h-1.5 w-1.5 rounded-full bg-[#22C55E]" />
-                      {research.issueCount} issue{research.issueCount === 1 ? '' : 's'}
-                    </span>
-                  ) : (
-                    <span className="shrink-0 rounded-full bg-[#F8FAFC] border border-[#E2E8F0] px-2 py-0.5 text-[10px] font-semibold text-[#94A3B8]">
-                      No research yet
-                    </span>
-                  )}
-                </div>
-                <div className="mt-2.5 min-w-0">
-                  <div className="text-[15px] font-bold text-[#0F172A] leading-snug truncate">{petitioner}</div>
-                  {respondent ? (
-                    <>
-                      <div className="text-[11px] italic text-[#94A3B8] leading-tight my-1">v.</div>
-                      <div className="text-[15px] font-bold text-[#0F172A] leading-snug truncate">{respondent}</div>
-                    </>
-                  ) : (
-                    <div className="text-[12px] text-[#94A3B8] mt-1.5">Respondent not yet on record.</div>
-                  )}
-                </div>
-              </div>
-              <div className={`w-full px-4 py-2.5 border-t flex items-center gap-1.5 text-[11px] text-[#64748B] ${
-                active ? 'border-[#99F6E4]/70' : 'border-[#F1F5F9]'
-              }`}>
-                {footer.map((part, fi) => (
-                  <React.Fragment key={fi}>
-                    {fi > 0 && <span className="text-[#CBD5E1]">·</span>}
-                    <span className={fi === 0 ? 'truncate' : 'shrink-0'}>{part}</span>
-                  </React.Fragment>
-                ))}
-                {footer.length === 0 && <span className="text-[#94A3B8]">Case documents on record</span>}
-              </div>
-            </button>
-          );
-        })}
+        <MagnifyingGlassIcon className="h-4 w-4 shrink-0 text-[#93A2A7]" />
+        <span className="min-w-0 flex-1 truncate text-[13px] text-[#25353C] group-hover:text-[#0F1B21]">
+          {name}
+        </span>
+        {entry.citationCount === 0 && (
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#B97F24]" />
+        )}
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); deleteHistory(entry); }}
+          disabled={deleting}
+          title="Delete this research and its reports"
+          className={`shrink-0 h-6 w-6 rounded-md flex items-center justify-center text-[#93A2A7] hover:text-[#C24444] hover:bg-[#FBEDED] transition-colors ${
+            deleting ? 'opacity-60' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'
+          }`}
+        >
+          {deleting
+            ? <ArrowPathIcon className="animate-spin" style={{ height: 13, width: 13 }} />
+            : <TrashIcon style={{ height: 13, width: 13 }} />}
+        </button>
       </div>
-      {cases.length > casesPerPage && (
-        <div className="mt-4 flex items-center justify-between">
-          <div className="text-[11px] text-[#94A3B8]">
-            Showing {(casesPage - 1) * casesPerPage + 1} to {Math.min(casesPage * casesPerPage, cases.length)} of {cases.length}
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              disabled={casesPage === 1}
-              onClick={() => setCasesPage(p => p - 1)}
-              className="p-1 rounded-lg border border-[#E2E8F0] disabled:opacity-30"
-            >
-              <ChevronLeftIcon className="h-4 w-4 text-[#64748B]" />
-            </button>
-            <button
-              disabled={casesPage * casesPerPage >= cases.length}
-              onClick={() => setCasesPage(p => p + 1)}
-              className="p-1 rounded-lg border border-[#E2E8F0] disabled:opacity-30"
-            >
-              <ChevronLeftIcon className="h-4 w-4 text-[#64748B] rotate-180" />
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+    );
+  };
 
   const runAnalyze = async () => {
     if (inputMode === 'case' && !selectedCaseId) {
@@ -883,118 +837,219 @@ export default function CitationResearchPanel() {
     try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* non-fatal */ }
   };
 
-  const PageHeader = ({ title, subtitle, right }) => (
-    <div className="flex items-start justify-between gap-4">
-      <div className="flex items-center gap-3.5">
-        <div className="h-11 w-11 rounded-xl bg-[#F0FDFA] flex items-center justify-center shrink-0">
-          <SparklesIcon className="h-6 w-6 text-[#21C1B6]" />
-        </div>
-        <div>
-          <h1 className="text-xl font-bold text-[#0F172A]">{title}</h1>
-          <p className="text-sm text-[#64748B] mt-0.5">{subtitle}</p>
-        </div>
-      </div>
-      {right}
-    </div>
-  );
-
   // ── Step 1: case input ──────────────────────────────────────────────────
   if (step === 'input') {
-    return (
-      <div className="min-h-full bg-[#F8FAFC] pt-6 px-6 pb-20 md:pt-10 md:px-10 md:pb-28">
-        <div className="max-w-6xl mx-auto">
-          <PageHeader
-            title="Citation Research"
-            subtitle="Pick one of your cases or upload a document — the system finds the legal issues and grounds, then retrieves verified Indian Kanoon precedents for each one."
-          />
+    const isFiltering = caseFilter.trim().length > 0;
+    const totalFiltered = filteredCases.length;
+    const pageStart = totalFiltered === 0 ? 0 : (casesPage - 1) * casesPerPage + 1;
+    const pageEnd = Math.min(casesPage * casesPerPage, totalFiltered);
+    const pagedCases = filteredCases.slice((casesPage - 1) * casesPerPage, casesPage * casesPerPage);
+    const runSub = (advancedSearch ? 'Boolean precision search' : 'Standard keyword search')
+      + (inputMode === 'case' && freshMode ? ' · grounds from your objective' : '');
+    const analyzeSteps = [
+      inputMode === 'case' ? 'Reading the case documents' : 'Reading the uploaded documents',
+      inputMode === 'case' && freshMode ? 'Building proposed grounds from your objective' : 'Finding legal issues and grounds',
+      'Generating search queries for each one',
+    ];
+    const pct = Math.round(((Math.min(pipeStep, analyzeSteps.length - 1) + 1) / analyzeSteps.length) * 100);
+    const toggleFresh = () => setFreshMode((v) => {
+      if (!v) setTimeout(() => caseTextRef.current?.focus(), 320);
+      return !v;
+    });
 
-          <div className="mt-7 grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px] items-start">
-            {/* Left column: pick a case (or paste/upload) and analyse it */}
-            <div className="min-w-0">
-              {/* Source selector: an existing case, or pasted/uploaded input */}
-              {/* Segmented source toggle — active tab is the dark pill. */}
-              <div className="inline-flex items-center gap-1 rounded-xl border border-[#E2E8F0] bg-white p-1 shadow-sm">
+    return (
+      <div className="min-h-full bg-[#F6F9F8] px-4 pt-7 pb-16 sm:px-6 md:px-9 md:pt-9 overflow-x-clip lg:h-full lg:overflow-hidden lg:flex lg:flex-col lg:pb-6">
+        <div className="max-w-[1240px] mx-auto min-w-0 w-full lg:flex-1 lg:min-h-0 lg:flex lg:flex-col">
+
+          {/* Header */}
+          <header className="flex gap-[15px] mb-[26px] shrink-0">
+            <div className="h-11 w-11 shrink-0 rounded-[13px] bg-gradient-to-br from-[#E9F9F5] to-[#D9F4EE] border border-[#BFE9DF] flex items-center justify-center text-[#0E8371]">
+              <SparklesIcon className="h-[21px] w-[21px]" />
+            </div>
+            <div>
+              <h1 className="text-[23px] font-extrabold tracking-[-0.02em] text-[#0F1B21] leading-tight">Citation Research</h1>
+              <p className="text-[13.5px] text-[#64757C] mt-1 max-w-[66ch]">
+                Pick one of your cases or upload a document — the system finds the legal issues and grounds,
+                then retrieves <b className="font-semibold text-[#0E8371]">verified Indian Kanoon precedents</b> for each one.
+              </p>
+            </div>
+          </header>
+
+          <div className="grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_320px] lg:grid-rows-[minmax(0,1fr)] items-start lg:items-stretch lg:flex-1 lg:min-h-0">
+            {/* ── Left column: bounded at lg — steps 1–2 scroll (the cases pane
+                flexes inside them); the Analyse section is pinned below and
+                never scrolls away. */}
+            <div className="min-w-0 lg:flex lg:flex-col lg:min-h-0">
+              <div className="lg:flex-1 lg:min-h-0 lg:flex lg:flex-col lg:overflow-y-auto lg:overflow-x-hidden lg:pr-1">
+
+              {/* STEP 1 — choose a case (or upload) */}
+              <StepLab n="1" title="Choose a case" note="or upload a document" />
+
+              <div role="tablist" className="inline-flex items-center gap-[3px] rounded-xl border border-[#E5ECEB] bg-white p-1 shadow-sm mb-3.5 shrink-0 lg:self-start">
                 {[
                   { key: 'case', label: 'My cases', icon: BriefcaseIcon },
                   { key: 'text', label: 'Upload document', icon: DocumentTextIcon },
                 ].map(({ key, label, icon: TabIcon }) => (
                   <button
                     key={key}
+                    type="button"
+                    role="tab"
+                    aria-selected={inputMode === key}
                     onClick={() => setInputMode(key)}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+                    className={`flex items-center gap-2 px-4 py-2 rounded-[9px] text-[13px] font-semibold transition-colors ${
                       inputMode === key
-                        ? 'bg-[#0F172A] text-white shadow-sm'
-                        : 'text-[#64748B] hover:text-[#0F172A]'
+                        ? 'bg-[#0F1B21] text-white'
+                        : 'text-[#64757C] hover:bg-[#EFF4F3] hover:text-[#25353C]'
                     }`}
                   >
-                    <TabIcon className="h-4 w-4" /> {label}
+                    <TabIcon className="h-[15px] w-[15px]" /> {label}
                   </button>
                 ))}
               </div>
 
               {inputMode === 'case' && (
-                <div className="mt-4">
-                  <CasePicker />
-
-                  {/* History for the selected case — its past citation research */}
-                  {selectedCaseId && caseHistory.length > 0 && (
-                    <div className="mt-5 rounded-xl border border-[#99F6E4] bg-[#F0FDFA]/60 p-3">
-                      <div className="text-xs font-bold text-[#0F172A]">
-                        Past research for this case ({caseHistory.length})
+                <div className="lg:flex lg:flex-col lg:flex-1">
+                  {/* Search within the cases */}
+                  {!casesLoading && cases.length > 0 && (
+                    <div className="flex items-center gap-2.5 mb-3 shrink-0">
+                      <div className="flex-1 flex items-center gap-2 bg-white border border-[#E5ECEB] rounded-[10px] px-[13px] transition-all focus-within:border-[#3FC8B4] focus-within:ring-[3px] focus-within:ring-[#3FC8B4]/15">
+                        <MagnifyingGlassIcon className="h-[15px] w-[15px] shrink-0 text-[#93A2A7]" />
+                        <input
+                          value={caseFilter}
+                          onChange={(e) => setCaseFilter(e.target.value)}
+                          placeholder="Search by party name or case number…"
+                          className="w-full bg-transparent border-0 outline-none py-[9px] text-[13px] text-[#0F1B21] placeholder:text-[#93A2A7]"
+                        />
                       </div>
-                      <div className="mt-2 space-y-2">
-                        {caseHistory.map((entry) => <HistoryRow key={entry.sessionId} entry={entry} />)}
-                      </div>
+                      <span className="text-xs font-medium text-[#93A2A7] whitespace-nowrap">
+                        {isFiltering
+                          ? `${totalFiltered} match${totalFiltered === 1 ? '' : 'es'}`
+                          : `Showing ${pageStart}–${pageEnd} of ${totalFiltered}`}
+                      </span>
                     </div>
                   )}
+
+                  {casesLoading && (
+                    <div className="flex items-center justify-center gap-2 py-8 text-sm text-[#64757C]">
+                      <ArrowPathIcon className="h-4 w-4 animate-spin" /> Loading your cases…
+                    </div>
+                  )}
+                  {!casesLoading && cases.length === 0 && (
+                    <div className="rounded-[14px] border-[1.5px] border-dashed border-[#E5ECEB] bg-white px-4 py-8 text-center text-sm text-[#64757C]">
+                      No cases found in your Projects. Upload case documents under Projects first,
+                      or switch to "Upload document".
+                    </div>
+                  )}
+                  {!casesLoading && cases.length > 0 && totalFiltered === 0 && (
+                    <div className="rounded-[14px] border-[1.5px] border-dashed border-[#E5ECEB] bg-white px-4 py-8 text-center text-sm text-[#64757C]">
+                      No case matches "{caseFilter.trim()}".
+                    </div>
+                  )}
+
+                  {/* Only the cases scroll — the page itself never grows with them. */}
+                  <div className="max-h-[400px] lg:max-h-none lg:flex-1 lg:min-h-44 overflow-y-auto min-w-0 p-1 -m-1">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {pagedCases.map((cs) => {
+                      const active = selectedCaseId === cs.id;
+                      const [petitioner, respondent] = partiesOf(cs);
+                      const research = researchByCase[String(cs.id)];
+                      const chip = research
+                        ? (research.citationCount > 0
+                          ? { cls: 'text-[#0E8371] bg-[#E9F9F5] border-[#BFE9DF]', text: `${research.citationCount} citation${research.citationCount === 1 ? '' : 's'}` }
+                          : { cls: 'text-[#B97F24] bg-[#FCF5E7] border-[#F0E1C0]', text: 'Analysed only' })
+                        : { cls: 'text-[#B97F24] bg-[#FCF5E7] border-[#F0E1C0]', text: 'No research yet' };
+                      return (
+                        <button
+                          key={cs.id}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => setSelectedCaseId(active ? null : cs.id)}
+                          className={`relative text-left flex flex-col overflow-hidden rounded-[14px] border-[1.5px] bg-white transition-all duration-200 ${
+                            active
+                              ? 'border-[#3FC8B4] shadow-[0_0_0_3px_rgba(63,200,180,0.16),0_2px_5px_rgba(15,27,33,0.04),0_10px_24px_-12px_rgba(15,27,33,0.12)]'
+                              : 'border-[#E5ECEB] hover:border-[#BFE9DF] hover:shadow-[0_2px_5px_rgba(15,27,33,0.04),0_10px_24px_-12px_rgba(15,27,33,0.12)] hover:-translate-y-px'
+                          }`}
+                        >
+                          <div className="flex-1 w-full px-4 pt-3.5 pb-3 min-w-0">
+                            <div className="flex items-center gap-2 mb-2.5 min-w-0">
+                              <span className="text-[10.5px] font-semibold tracking-[0.07em] uppercase text-[#64757C] truncate">
+                                {caseRefOf(cs)}
+                              </span>
+                              <span className={`ml-auto shrink-0 text-[10.5px] font-semibold px-[9px] py-[3px] rounded-full border whitespace-nowrap ${chip.cls}`}>
+                                {chip.text}
+                              </span>
+                            </div>
+                            <div className="text-[14.5px] font-bold text-[#0F1B21] tracking-[-0.01em] leading-[1.35]">{petitioner}</div>
+                            {respondent ? (
+                              <>
+                                <div className="text-[11px] italic text-[#93A2A7] my-[3px]">v.</div>
+                                <div className="text-[14.5px] font-bold text-[#0F1B21] tracking-[-0.01em] leading-[1.35]">{respondent}</div>
+                              </>
+                            ) : (
+                              <div className="text-xs text-[#93A2A7] mt-1">Respondent not yet on record</div>
+                            )}
+                          </div>
+                          <div className="w-full flex items-center gap-2 px-4 py-[9px] border-t border-[#EFF4F3] bg-[#FCFDFD] text-[11.5px] text-[#93A2A7]">
+                            <span className="truncate">{updatedLabel(cs.updated_at || cs.created_at)}</span>
+                            <span className={`ml-auto h-[19px] w-[19px] shrink-0 rounded-full border-[1.5px] flex items-center justify-center transition-all duration-200 ${
+                              active ? 'bg-[#0E8371] border-[#0E8371]' : 'bg-white border-[#E5ECEB]'
+                            }`}>
+                              <CheckIcon strokeWidth={3.4} className={`h-2.5 w-2.5 text-white transition-all duration-200 ${active ? 'opacity-100 scale-100' : 'opacity-0 scale-50'}`} />
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                    </div>
+                  </div>
+
+                  {/* Pagination */}
+                  {totalFiltered > casesPerPage && (
+                    <div className="mt-3 flex items-center gap-2 shrink-0">
+                      <span className="text-xs text-[#93A2A7] mr-auto">
+                        Showing {pageStart}–{pageEnd} of {totalFiltered} cases
+                      </span>
+                      <button
+                        type="button"
+                        aria-label="Previous page"
+                        disabled={casesPage === 1}
+                        onClick={() => setCasesPage((p) => Math.max(1, p - 1))}
+                        className="h-[30px] w-[30px] rounded-[9px] border border-[#E5ECEB] bg-white text-[#64757C] flex items-center justify-center transition-colors hover:border-[#3FC8B4] hover:text-[#0E8371] hover:bg-[#E9F9F5] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-[#E5ECEB] disabled:hover:text-[#64757C] disabled:hover:bg-white"
+                      >
+                        <ChevronLeftIcon strokeWidth={2.4} className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Next page"
+                        disabled={casesPage * casesPerPage >= totalFiltered}
+                        onClick={() => setCasesPage((p) => p + 1)}
+                        className="h-[30px] w-[30px] rounded-[9px] border border-[#E5ECEB] bg-white text-[#64757C] flex items-center justify-center transition-colors hover:border-[#3FC8B4] hover:text-[#0E8371] hover:bg-[#E9F9F5] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-[#E5ECEB] disabled:hover:text-[#64757C] disabled:hover:bg-white"
+                      >
+                        <ChevronLeftIcon strokeWidth={2.4} className="h-3.5 w-3.5 rotate-180" />
+                      </button>
+                    </div>
+                  )}
+
                 </div>
               )}
 
-              {/* Fresh-matter toggle: nothing drafted yet — proposed grounds
-                  are built from ALL case documents + the typed objective. */}
-              {inputMode === 'case' && (
-                <label className={`mt-4 flex items-start gap-3 rounded-xl border p-3.5 cursor-pointer transition-colors ${
-                  freshMode ? 'border-[#21C1B6] bg-[#F0FDFA]' : 'border-[#E2E8F0] bg-white hover:border-[#21C1B6]/40'
-                }`}>
-                  <input
-                    type="checkbox"
-                    checked={freshMode}
-                    onChange={(e) => setFreshMode(e.target.checked)}
-                    className="mt-0.5 h-4 w-4 rounded border-[#CBD5E1] accent-[#21C1B6]"
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-sm font-semibold text-[#0F172A]">
-                      Fresh matter — nothing drafted or filed yet
-                    </span>
-                    <span className="block mt-0.5 text-[12px] text-[#64748B] leading-relaxed">
-                      The system reads all of this case's source documents and builds
-                      <span className="font-semibold"> proposed grounds</span> from what you
-                      want to achieve. Describe your objective below — it is required.
-                    </span>
-                  </span>
-                </label>
-              )}
-
-              {/* Upload tab: the document itself is the case material — it is
-                  uploaded and analysed directly; the optional description below
-                  steers which grounds and issues are extracted. */}
+              {/* Upload tab: the documents ARE the case material — analysed
+                  directly; the optional description steers the extraction. */}
               {inputMode === 'text' && (
-                <div className="mt-5">
-                  <label className={`flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-9 cursor-pointer text-center transition-colors ${
-                    files.length ? 'border-[#21C1B6] bg-[#F0FDFA]' : 'border-[#CBD5E1] bg-white hover:border-[#21C1B6]/60 hover:bg-[#F0FDFA]/40'
-                  }`}>
-                    <span className={`h-11 w-11 rounded-xl flex items-center justify-center ${files.length ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
-                      <ArrowUpTrayIcon className={`h-5 w-5 ${files.length ? 'text-[#21C1B6]' : 'text-[#94A3B8]'}`} />
+                <div className="shrink-0">
+                  <label className="block cursor-pointer rounded-[14px] border-[1.5px] border-dashed border-[#BFE9DF] bg-gradient-to-b from-[#F7FCFB] to-white px-6 py-9 text-center transition-colors hover:border-[#3FC8B4]">
+                    <span className="mx-auto mb-[11px] h-11 w-11 rounded-xl bg-white border border-[#BFE9DF] shadow-sm flex items-center justify-center text-[#0E8371]">
+                      <ArrowUpTrayIcon className="h-5 w-5" />
                     </span>
-                    <span className="text-sm font-semibold text-[#0F172A]">
+                    <strong className="block text-sm font-bold text-[#0F1B21]">
                       {files.length
-                        ? `${files.length} document${files.length === 1 ? '' : 's'} ready`
-                        : 'Upload the petition, FIR, plaint or judgment'}
-                    </span>
-                    <span className="text-[12px] text-[#64748B]">
+                        ? `${files.length} document${files.length === 1 ? '' : 's'} ready — click to add more`
+                        : 'Drop a petition, reply or order here'}
+                    </strong>
+                    <span className="block text-[12.5px] text-[#64757C] mt-[3px]">
                       {files.length
-                        ? 'All documents are analysed together as one matter. Click to add more.'
-                        : 'PDF, DOCX or TXT — select one or several; they are analysed directly and their grounds and legal issues are extracted.'}
+                        ? 'All documents are analysed together as one matter.'
+                        : 'or click to browse — PDF, DOCX or TXT · select one or several'}
                     </span>
                     <input
                       type="file"
@@ -1007,15 +1062,15 @@ export default function CitationResearchPanel() {
                   {files.length > 0 && (
                     <div className="mt-3 space-y-1.5">
                       {files.map((f, idx) => (
-                        <div key={`${f.name}|${f.size}`} className="flex items-center gap-2.5 rounded-lg border border-[#E2E8F0] bg-white px-3 py-2">
-                          <DocumentTextIcon className="h-4 w-4 text-[#21C1B6] shrink-0" />
-                          <span className="min-w-0 flex-1 truncate text-[13px] text-[#0F172A]">{f.name}</span>
-                          <span className="text-[11px] text-[#94A3B8] shrink-0">{(f.size / 1024).toFixed(0)} KB</span>
+                        <div key={`${f.name}|${f.size}`} className="flex items-center gap-2.5 rounded-[10px] border border-[#E5ECEB] bg-white px-3 py-2">
+                          <DocumentTextIcon className="h-4 w-4 text-[#0E8371] shrink-0" />
+                          <span className="min-w-0 flex-1 truncate text-[13px] text-[#0F1B21]">{f.name}</span>
+                          <span className="text-[11px] text-[#93A2A7] shrink-0">{(f.size / 1024).toFixed(0)} KB</span>
                           <button
                             type="button"
                             onClick={() => removeFile(idx)}
                             title="Remove this document"
-                            className="shrink-0 h-6 w-6 rounded-md flex items-center justify-center text-[#94A3B8] hover:text-[#DC2626] hover:bg-[#FEF2F2]"
+                            className="shrink-0 h-6 w-6 rounded-md flex items-center justify-center text-[#93A2A7] hover:text-[#C24444] hover:bg-[#FBEDED]"
                           >
                             <XMarkIcon className="h-4 w-4" />
                           </button>
@@ -1032,83 +1087,223 @@ export default function CitationResearchPanel() {
                     placeholder={files.length
                       ? `Research name (optional) — e.g. "${files[0].name.replace(/\.[^.]+$/, '')}"`
                       : 'Research name (optional) — how it appears under Recent research'}
-                    className="mt-3 w-full bg-white border border-[#E2E8F0] text-[#0F172A] text-sm rounded-xl px-4 py-2.5 outline-none focus:border-[#21C1B6]/50 focus:ring-2 focus:ring-[#21C1B6]/10 shadow-sm placeholder:text-[#94A3B8]"
+                    className="mt-3 w-full bg-[#FBFDFC] border-[1.5px] border-[#E5ECEB] text-[#0F1B21] text-[13px] rounded-[11px] px-3.5 py-2.5 outline-none transition-all focus:border-[#3FC8B4] focus:bg-white focus:ring-[3px] focus:ring-[#3FC8B4]/15 placeholder:text-[#93A2A7]"
                   />
+                  <div className="mt-3">
+                    <label className="block text-[11px] font-semibold tracking-[0.06em] uppercase text-[#64757C] mb-[7px]">
+                      Optional description — steers the analysis
+                    </label>
+                    <textarea
+                      ref={caseTextRef}
+                      value={caseText}
+                      onChange={(e) => setCaseText(e.target.value)}
+                      rows={3}
+                      placeholder='e.g. "we act for the accused; seek regular bail" — the grounds and issues extracted from the documents follow this'
+                      className="w-full resize-none overflow-hidden bg-[#FBFDFC] border-[1.5px] border-[#E5ECEB] text-[#0F1B21] rounded-[11px] px-3.5 py-3 text-[13px] leading-relaxed outline-none transition-all focus:border-[#3FC8B4] focus:bg-white focus:ring-[3px] focus:ring-[#3FC8B4]/15 placeholder:text-[#93A2A7]"
+                    />
+                  </div>
                 </div>
               )}
 
-              <textarea
-                ref={caseTextRef}
-                value={caseText}
-                onChange={(e) => setCaseText(e.target.value)}
-                rows={inputMode === 'case' ? (freshMode ? 5 : 3) : 4}
-                placeholder={inputMode === 'case'
-                  ? (freshMode
-                    ? 'Describe what the client wants (required) — e.g. "we act for the accused director; the FIR arises from a supply-contract dispute and we want it quashed" or "we act for the supplier; recover the unpaid invoices with interest"'
-                    : 'Optional instruction, e.g. "we act for the workmen; focus on the wage revision demand"')
-                  : 'Optional description — e.g. "we act for the accused; seek regular bail" — the analysis of the uploaded document (its grounds and issues) is steered by this'}
-                className="mt-4 w-full bg-white border border-[#E2E8F0] text-[#0F172A] text-sm rounded-xl p-4 outline-none focus:border-[#21C1B6]/50 focus:ring-2 focus:ring-[#21C1B6]/10 leading-relaxed shadow-sm placeholder:text-[#94A3B8] resize-none overflow-hidden"
-              />
+              {/* STEP 2 — research options */}
+              <div className="mt-7 shrink-0">
+                <StepLab n="2" title="Research options" note="optional — leave off for a standard run" />
+                <div className="space-y-2.5">
 
-              {/* Advanced search: opt-in Boolean query generation — off by
-                  default, the system uses its standard keyword queries. */}
-              <label className={`mt-4 flex items-start gap-3 rounded-xl border p-3.5 cursor-pointer transition-colors ${
-                advancedSearch ? 'border-[#21C1B6] bg-[#F0FDFA]' : 'border-[#E2E8F0] bg-white hover:border-[#21C1B6]/40'
-              }`}>
-                <input
-                  type="checkbox"
-                  checked={advancedSearch}
-                  onChange={(e) => setAdvancedSearch(e.target.checked)}
-                  className="mt-0.5 h-4 w-4 rounded border-[#CBD5E1] accent-[#21C1B6]"
-                />
-                <span className="min-w-0">
-                  <span className="block text-sm font-semibold text-[#0F172A]">
-                    Advanced search — Boolean queries
-                  </span>
-                  <span className="block mt-0.5 text-[12px] text-[#64748B] leading-relaxed">
-                    Builds precision queries with <span className="font-mono font-semibold">AND</span> / <span className="font-mono font-semibold">OR</span> operators
-                    and grouped synonyms, e.g. <span className="font-mono">"quashing of FIR" AND ("malafide" OR "ulterior motive")</span>.
-                    Leave off to use the standard keyword queries.
-                  </span>
-                </span>
-              </label>
+                  {/* Fresh matter: nothing drafted yet — proposed grounds are
+                      built from ALL case documents + the typed objective. */}
+                  {inputMode === 'case' && (
+                    <div className={`rounded-[14px] border-[1.5px] bg-white overflow-hidden transition-all ${
+                      freshMode ? 'border-[#BFE9DF] shadow-[0_2px_5px_rgba(15,27,33,0.04),0_10px_24px_-12px_rgba(15,27,33,0.12)]' : 'border-[#E5ECEB]'
+                    }`}>
+                      <div className="flex items-start gap-[13px] px-[17px] py-[15px] cursor-pointer" onClick={toggleFresh}>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <strong className="text-[13.5px] font-bold text-[#0F1B21] tracking-[-0.01em]">
+                              Fresh matter — nothing drafted or filed yet
+                            </strong>
+                            <span className="text-[10px] font-bold uppercase tracking-[0.06em] text-[#B97F24] bg-[#FCF5E7] border border-[#F0E1C0] px-[7px] py-0.5 rounded-[5px]">
+                              Objective required
+                            </span>
+                          </div>
+                          <p className="text-[12.5px] text-[#64757C] mt-1 max-w-[66ch]">
+                            The system reads all of this case's source documents and builds{' '}
+                            <b className="font-semibold text-[#25353C]">proposed grounds</b> from what you want to achieve.
+                          </p>
+                        </div>
+                        <Switch on={freshMode} label="Fresh matter" onToggle={toggleFresh} />
+                      </div>
+                      <div className={`grid grid-cols-1 transition-[grid-template-rows] duration-300 ${freshMode ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
+                        <div className="overflow-hidden">
+                          <div className="px-[17px] pb-[17px]">
+                            <label htmlFor="jnx-objective" className="block text-[11px] font-semibold tracking-[0.06em] uppercase text-[#64757C] mb-[7px]">
+                              What are you trying to achieve?
+                            </label>
+                            <textarea
+                              id="jnx-objective"
+                              ref={caseTextRef}
+                              value={caseText}
+                              onChange={(e) => setCaseText(e.target.value)}
+                              rows={3}
+                              placeholder='e.g. "We act for the workmen; focus on the wage revision demand and seek reinstatement with back wages."'
+                              className="w-full min-h-[96px] resize-none overflow-hidden bg-[#FBFDFC] border-[1.5px] border-[#E5ECEB] text-[#0F1B21] rounded-[11px] px-3.5 py-3 text-[13px] leading-relaxed outline-none transition-all focus:border-[#3FC8B4] focus:bg-white focus:ring-[3px] focus:ring-[#3FC8B4]/15 placeholder:text-[#93A2A7]"
+                            />
+                            <div className="mt-2 flex flex-wrap items-center gap-[7px]">
+                              <span className="text-[11.5px] text-[#93A2A7] mr-0.5">Quick start:</span>
+                              {QUICK_FILLS.map((qf) => (
+                                <button
+                                  key={qf.label}
+                                  type="button"
+                                  onClick={() => { setCaseText(qf.text); caseTextRef.current?.focus(); }}
+                                  className="border border-[#E5ECEB] bg-white text-[#64757C] text-[11.5px] font-semibold px-[11px] py-[5px] rounded-full transition-colors hover:border-[#3FC8B4] hover:text-[#0E8371] hover:bg-[#E9F9F5]"
+                                >
+                                  {qf.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
-              {/* One research method: pleaded grounds + spotted issues are
-                  extracted together in a single combined pass. */}
-              <div className="mt-6">
+                  {/* Advanced search: opt-in Boolean query generation — off by
+                      default, the system uses its standard keyword queries. */}
+                  <div className={`rounded-[14px] border-[1.5px] bg-white overflow-hidden transition-all ${
+                    advancedSearch ? 'border-[#BFE9DF] shadow-[0_2px_5px_rgba(15,27,33,0.04),0_10px_24px_-12px_rgba(15,27,33,0.12)]' : 'border-[#E5ECEB]'
+                  }`}>
+                    <div className="flex items-start gap-[13px] px-[17px] py-[15px] cursor-pointer" onClick={() => setAdvancedSearch((v) => !v)}>
+                      <div className="flex-1 min-w-0">
+                        <strong className="text-[13.5px] font-bold text-[#0F1B21] tracking-[-0.01em]">
+                          Advanced search — Boolean queries
+                        </strong>
+                        <p className="text-[12.5px] text-[#64757C] mt-1 max-w-[66ch]">
+                          Builds precision queries with{' '}
+                          <code className="text-[11.5px] font-mono font-semibold text-[#25353C] bg-[#EFF4F3] px-[5px] py-px rounded">AND</code> /{' '}
+                          <code className="text-[11.5px] font-mono font-semibold text-[#25353C] bg-[#EFF4F3] px-[5px] py-px rounded">OR</code>{' '}
+                          operators and grouped synonyms. Leave off to use the standard keyword queries.
+                        </p>
+                      </div>
+                      <Switch on={advancedSearch} label="Advanced search" onToggle={() => setAdvancedSearch((v) => !v)} />
+                    </div>
+                    <div className={`grid grid-cols-1 transition-[grid-template-rows] duration-300 ${advancedSearch ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
+                      <div className="overflow-hidden">
+                        <div className="px-[17px] pb-[17px]">
+                          <div className="block text-[11px] font-semibold tracking-[0.06em] uppercase text-[#64757C] mb-[7px]">
+                            Example of what the system will send
+                          </div>
+                          <div className="bg-[#0F1B21] rounded-[11px] px-[15px] py-3 font-mono text-[11.5px] leading-[1.8] text-[#CBDDDC] overflow-x-auto whitespace-nowrap">
+                            "quashing of FIR" <b className="text-[#5BDCC9] font-bold">AND</b> ("malafide" <b className="text-[#5BDCC9] font-bold">OR</b> "ulterior motive") <b className="text-[#5BDCC9] font-bold">AND</b> <span className="text-[#EFC27E]">section 482</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              </div>
+
+              {/* STEP 3 — analyse (pinned at lg — does not scroll with the column) */}
+              <div className="mt-6 shrink-0">
+                <StepLab n="3" title="Analyse" note={runSub} />
                 <button
+                  type="button"
                   onClick={runAnalyze}
                   disabled={analyzing}
-                  className="w-full flex items-center justify-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold bg-[#21C1B6] hover:bg-[#1AA49B] text-white shadow-sm disabled:opacity-60 transition-colors"
+                  className={`w-full flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-[13px] text-[14.5px] font-bold tracking-[-0.01em] transition-all ${
+                    analyzing
+                      ? 'bg-[#E1E9E8] text-[#93A2A7] cursor-not-allowed'
+                      : 'bg-gradient-to-b from-[#5BDCC9] to-[#3FC8B4] text-[#053B33] shadow-[0_10px_24px_-10px_rgba(63,200,180,0.8)] hover:-translate-y-px hover:shadow-[0_14px_30px_-11px_rgba(63,200,180,0.95)]'
+                  }`}
                 >
-                  {analyzing ? <ArrowPathIcon className="h-4 w-4 animate-spin" /> : <SparklesIcon className="h-4 w-4" />}
+                  {analyzing
+                    ? <ArrowPathIcon className="h-[17px] w-[17px] animate-spin" />
+                    : <SparklesIcon className="h-[17px] w-[17px]" />}
                   {analyzing ? 'Analysing…' : 'Analyse case'}
                 </button>
+                <div className="text-center text-[11.5px] text-[#93A2A7] mt-2">
+                  Runs in under a minute · results are <b className="font-semibold text-[#64757C]">saved to the case</b> so you can leave the page.
+                </div>
+
+                {/* Progress while the analysis runs */}
+                {analyzing && (
+                  <div ref={pipeRef} className="mt-3.5 rounded-[14px] border-[1.5px] border-[#BFE9DF] bg-white px-[19px] py-[17px] shadow-[0_2px_5px_rgba(15,27,33,0.04),0_10px_24px_-12px_rgba(15,27,33,0.12)]">
+                    <div className="flex items-center mb-3">
+                      <strong className="text-[13.5px] font-bold text-[#0F1B21]">Analysing your case</strong>
+                      <span className="ml-auto text-xs font-bold text-[#0E8371]">{pct}%</span>
+                    </div>
+                    <div className="h-[5px] rounded-full bg-[#EFF4F3] overflow-hidden mb-3.5">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-[#0E8371] to-[#5BDCC9] transition-all duration-500"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    {analyzeSteps.map((label, i) => {
+                      const state = i < pipeStep ? 'done' : i === pipeStep ? 'active' : 'todo';
+                      return (
+                        <div
+                          key={label}
+                          className={`flex items-center gap-2.5 py-[5px] text-[12.5px] ${
+                            state === 'active' ? 'text-[#0F1B21] font-semibold' : state === 'done' ? 'text-[#64757C]' : 'text-[#93A2A7]'
+                          }`}
+                        >
+                          <span className={`h-[17px] w-[17px] shrink-0 rounded-full border-[1.5px] flex items-center justify-center ${
+                            state === 'done'
+                              ? 'bg-[#0E8371] border-[#0E8371]'
+                              : state === 'active'
+                                ? 'border-[#3FC8B4] border-r-transparent animate-spin'
+                                : 'border-[#E5ECEB]'
+                          }`}>
+                            {state === 'done' && <CheckIcon strokeWidth={3.6} className="h-[9px] w-[9px] text-white" />}
+                          </span>
+                          <span className="flex-1 min-w-0 truncate">{label}</span>
+                          {state === 'active' && <small className="ml-auto text-[11px] font-normal text-[#93A2A7]">running…</small>}
+                          {state === 'done' && <small className="ml-auto text-[11px] text-[#93A2A7]">done</small>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* Right column: recent research — scoped to the active tab
-                (case-based research on "My cases", uploads on "Upload document") */}
-            <aside className="lg:sticky lg:top-6 min-w-0">
-              <h2 className="text-sm font-bold text-[#0F172A]">Recent research</h2>
-              <p className="text-xs text-[#64748B] mt-1">
-                {inputMode === 'case'
-                  ? 'Past research on your cases — reopen one with all its citations and decisions.'
-                  : 'Past research on uploaded documents — reopen one with all its citations and decisions.'}
-              </p>
-              {historyLoading && (
-                <div className="mt-3 text-xs text-[#94A3B8]">Loading history…</div>
-              )}
-              {!historyLoading && tabHistory.length === 0 && (
-                <div className="mt-3 rounded-xl border border-dashed border-[#CBD5E1] bg-white px-4 py-6 text-center text-xs text-[#94A3B8]">
-                  {inputMode === 'case'
-                    ? 'No research on your cases yet — it will appear here.'
-                    : 'No research on uploaded documents yet — it will appear here.'}
-                </div>
-              )}
-              <div className="mt-3 space-y-2 lg:max-h-[calc(100vh-13rem)] lg:overflow-y-auto lg:pr-1">
-                {tabHistory.map((entry) => <HistoryRow key={entry.sessionId} entry={entry} />)}
+            {/* ── Right rail ── */}
+            <aside className="flex flex-col gap-3.5 min-w-0 lg:min-h-0 lg:overflow-y-auto">
+              {/* Recents — the research history for this tab */}
+              <div className="rounded-[14px] border border-[#E5ECEB] bg-white p-2.5 shrink-0 lg:shrink lg:min-h-0 lg:flex lg:flex-col">
+                <button
+                  type="button"
+                  onClick={() => setRecentsCollapsed((v) => !v)}
+                  className="w-full shrink-0 flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] font-semibold text-[#64757C] transition-colors hover:text-[#0F1B21] hover:bg-[#EFF4F3]"
+                >
+                  Recents
+                  <ChevronRightIcon strokeWidth={2.4} className={`h-3.5 w-3.5 transition-transform ${recentsCollapsed ? '' : 'rotate-90'}`} />
+                  {tabHistory.length > 0 && (
+                    <span className="ml-auto text-[11px] font-medium text-[#93A2A7]">{tabHistory.length}</span>
+                  )}
+                </button>
+                {!recentsCollapsed && (
+                  <>
+                    {historyLoading && (
+                      <div className="px-2 py-2 text-xs text-[#93A2A7]">Loading history…</div>
+                    )}
+                    {!historyLoading && tabHistory.length === 0 && (
+                      <div className="px-2 py-2 text-xs text-[#93A2A7]">
+                        {inputMode === 'case'
+                          ? 'No research on your cases yet — it will appear here.'
+                          : 'No research on uploaded documents yet — it will appear here.'}
+                      </div>
+                    )}
+                    {!historyLoading && tabHistory.length > 0 && (
+                      <div className="mt-0.5 space-y-px min-w-0 lg:min-h-0 lg:overflow-y-auto">
+                        {tabHistory.map((entry) => <HistoryRow key={entry.sessionId} entry={entry} />)}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
+
             </aside>
           </div>
         </div>
@@ -1118,328 +1313,403 @@ export default function CitationResearchPanel() {
 
   // ── Step 2: pick / add issues ───────────────────────────────────────────
   if (step === 'issues') {
-    // Combined mode groups the cards: pleaded grounds first, spotted issues
-    // after — each under its own labelled section when both exist.
+    // Pleaded grounds keep their verbatim label; spotted issues are the
+    // system's own; fresh mode proposes grounds from the objective.
     const pleadedItems = suggested.filter((i) => isGrounds || !!i.ground_label);
     const spottedItems = suggested.filter((i) => !isGrounds && !i.ground_label);
-    const showGroupLabels = pleadedItems.length > 0 && spottedItems.length > 0;
+    const showFilter = pleadedItems.length > 0 && spottedItems.length > 0;
+    const effFilter = showFilter ? issueFilter : 'all';
+    const visibleItems = effFilter === 'pleaded' ? pleadedItems
+      : effFilter === 'spotted' ? spottedItems : suggested;
+    const ctxFull = analysis?.caseContext?.raw_case_summary || analysis?.caseContext?.facts || '';
+    const pleadedWord = isFresh ? 'Proposed' : 'Grounds';
 
-    const groupLabel = (label, count) => (
-      <div className="mt-6 mb-3 flex items-center gap-2.5">
-        <span className="text-[11px] font-bold uppercase tracking-wider text-[#0F766E]">{label}</span>
-        <span className="text-[11px] font-bold text-[#0F766E] bg-[#F0FDFA] border border-[#99F6E4] rounded-full px-2 py-px">{count}</span>
-        <span className="h-px flex-1 bg-[#E2E8F0]" />
-      </div>
+    const BADGES = {
+      high: 'text-[#0E8371] bg-[#E9F9F5] border-[#BFE9DF]',
+      medium: 'text-[#B97F24] bg-[#FCF5E7] border-[#F0E1C0]',
+      low: 'text-[#991B1B] bg-[#FEF2F2] border-[#FECACA]',
+      spotted: 'text-[#3D6FA8] bg-[#EDF3FA] border-[#CDDEF0]',
+    };
+    const warnPill = 'inline-flex items-center gap-1.5 text-[11px] font-semibold text-[#B97F24] bg-[#FCF5E7] border border-[#F0E1C0] px-2.5 py-1 rounded-full';
+
+    const Tick = ({ on, size = 20, onToggle, label }) => (
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={on}
+        aria-label={label}
+        onClick={(e) => { e.stopPropagation(); onToggle(); }}
+        className={`shrink-0 rounded-md border-[1.5px] flex items-center justify-center transition-all duration-150 ${
+          on ? 'bg-[#0E8371] border-[#0E8371]' : 'bg-white border-[#E5ECEB] hover:border-[#3FC8B4]'
+        }`}
+        style={{ height: size, width: size }}
+      >
+        <CheckIcon
+          strokeWidth={3.4}
+          className={`text-white transition-all duration-150 ${on ? 'opacity-100 scale-100' : 'opacity-0 scale-50'}`}
+          style={{ height: Math.round(size * 0.55), width: Math.round(size * 0.55) }}
+        />
+      </button>
     );
 
     const renderIssueCard = (issue) => {
       const active = selectedIds.has(issue.id);
-      // Pleaded grounds keep their verbatim label + title heading; issues
-      // show the plain "Whether …?" question with no extra clutter.
       const isPleaded = isGrounds || !!issue.ground_label;
-      const groundHeading = isPleaded
-        ? `${issue.ground_label || `Ground ${issue.id}`}${issue.title ? `: ${issue.title}` : ''}`
-        : issue.issue;
+      const label = isPleaded
+        ? `${issue.ground_label || `Ground ${issue.id}`} · ${pleadedWord}`
+        : `Legal issue ${issue.id}`;
+      const badgeKey = isPleaded ? (issue.confidence || null) : 'spotted';
+      const badgeText = isPleaded ? issue.confidence : 'Spotted';
+      // Legal issues lead with the full bold "Whether …?" question as
+      // the heading; grounds keep their pleaded title.
+      const heading = isPleaded ? (issue.title || issue.issue) : (issue.issue || issue.title);
+      const desc = issue.explanation || '';
+      const isLong = desc.length > 220;
+      const expanded = !!expandedDesc[issue.id];
+      const picks = picksFor(issue);
       return (
-        <div
+        <article
           key={issue.id}
-          className={`text-left rounded-xl border bg-white p-4 sm:p-5 transition-colors ${
-            active
-              ? 'border-[#21C1B6] ring-1 ring-[#21C1B6]/25 shadow-sm'
-              : 'border-[#E2E8F0]'
+          className={`bg-white border-[1.5px] rounded-[14px] flex flex-col overflow-hidden transition-all duration-200 hover:shadow-[0_2px_5px_rgba(15,27,33,0.04),0_10px_24px_-12px_rgba(15,27,33,0.12)] ${
+            active ? 'border-[#BFE9DF]' : 'border-[#E5ECEB] opacity-55'
           }`}
         >
-          <div className="flex items-start gap-3">
-            {/* Only the checkbox (and heading) toggles selection — the card
-                body holds its own controls and never reacts to clicks. */}
-            <button
-              type="button"
-              onClick={() => toggleIssue(issue.id)}
-              title={active ? 'Exclude from the search' : 'Include in the search'}
-              className={`mt-0.5 h-5 w-5 shrink-0 rounded-md border flex items-center justify-center transition-colors ${
-                active ? 'bg-[#21C1B6] border-[#21C1B6]' : 'border-[#CBD5E1] bg-white hover:border-[#21C1B6]'
-              }`}
-            >
-              {active && <CheckIcon className="h-3.5 w-3.5 text-white" />}
-            </button>
-            <span className="flex-1 min-w-0">
-              <span className="flex items-start justify-between gap-3">
-                <span
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => toggleIssue(issue.id)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') toggleIssue(issue.id); }}
-                  className="text-[15px] font-semibold text-[#0F172A] leading-snug font-serif cursor-pointer"
-                >
-                  {groundHeading}
-                </span>
-                {isPleaded && issue.confidence && (
-                  <span className={`shrink-0 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide ${CONFIDENCE_STYLES[issue.confidence] || CONFIDENCE_STYLES.medium}`}>
-                    {issue.confidence}
+          {/* Head — clicking the label/title (or the tick) toggles selection */}
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => toggleIssue(issue.id)}
+            onKeyDown={(e) => { if (e.key === 'Enter') toggleIssue(issue.id); }}
+            className="flex items-start gap-[11px] px-[15px] pt-[13px] cursor-pointer"
+          >
+            <span className="mt-px">
+              <Tick
+                on={active}
+                onToggle={() => toggleIssue(issue.id)}
+                label={active ? 'Exclude from the search' : 'Include in the search'}
+              />
+            </span>
+            <span className="flex-1 min-w-0 block">
+              <span className="flex flex-wrap items-center gap-[7px] text-[9.5px] font-bold tracking-[0.09em] uppercase text-[#93A2A7] mb-0.5">
+                {label}
+                {badgeKey && (
+                  <span className={`px-[7px] py-px rounded-[5px] border text-[9.5px] font-bold tracking-[0.05em] ${BADGES[badgeKey] || BADGES.medium}`}>
+                    {badgeText}
                   </span>
                 )}
               </span>
-              {isPleaded && issue.explanation && (
-                <span className="mt-1.5 block text-[12.5px] text-[#64748B] leading-relaxed">
-                  {issue.explanation}
-                </span>
-              )}
-              {isPleaded && Array.isArray(issue.legal_framework) && issue.legal_framework.length > 0 && (
-                <span className="mt-2 flex flex-wrap gap-1.5">
-                  {issue.legal_framework.map((law, li) => (
-                    <span key={li} className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0]">
-                      {law}
-                    </span>
-                  ))}
-                </span>
-              )}
-              {isPleaded && Array.isArray(issue.case_law_cited) && issue.case_law_cited.length > 0 && (
-                <span className="mt-1.5 block text-[11px] text-[#64748B]">
-                  <span className="font-semibold">Case law cited:</span>{' '}
-                  <span className="italic">{issue.case_law_cited.join('; ')}</span>
-                </span>
-              )}
-              {Array.isArray(issue.queries) && issue.queries.length > 0 && (
-                <span className="mt-3 block rounded-lg border border-[#EEF2F6] bg-[#F8FAFC] p-2.5">
-                  <span className="flex items-center justify-between gap-2">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">Search queries</span>
-                    <span className="text-[10px] text-[#B6C2D2]">untick to exclude</span>
-                  </span>
-                  <span className="mt-1.5 block space-y-1.5">
-                    {/* System queries — checkbox picks which ones the search uses */}
-                    {issue.queries.map((q, qi) => {
-                      const checked = picksFor(issue).selected.includes(q);
-                      return (
-                        <span key={qi} className="flex items-start gap-2">
-                          <button
-                            type="button"
-                            onClick={(e) => { e.stopPropagation(); toggleQuery(issue, q); }}
-                            title={checked ? 'Exclude this query from the search' : 'Include this query in the search'}
-                            className={`mt-0.5 h-3.5 w-3.5 shrink-0 rounded border flex items-center justify-center transition-colors ${
-                              checked ? 'bg-[#21C1B6] border-[#21C1B6]' : 'border-[#CBD5E1] bg-white hover:border-[#21C1B6]'
-                            }`}
-                          >
-                            {checked && <CheckIcon className="h-2.5 w-2.5 text-white" />}
-                          </button>
-                          <span className={`text-[12px] leading-snug ${checked ? 'text-[#0D9488]' : 'text-[#94A3B8] line-through'}`}>
-                            {q}
-                          </span>
-                        </span>
-                      );
-                    })}
-                    {/* The user's own queries — searched exactly like system anchors */}
-                    {picksFor(issue).custom.map((q) => (
-                      <span key={`own-${q}`} className="flex items-start gap-2">
-                        <span className="mt-0.5 h-3.5 w-3.5 shrink-0 rounded border bg-[#21C1B6] border-[#21C1B6] flex items-center justify-center">
-                          <CheckIcon className="h-2.5 w-2.5 text-white" />
-                        </span>
-                        <span className="flex-1 min-w-0 text-[12px] leading-snug text-[#0D9488] font-medium">{q}</span>
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); removeOwnQuery(issue, q); }}
-                          title="Remove your query"
-                          className="shrink-0 text-[#94A3B8] hover:text-[#DC2626]"
-                        >
-                          <XMarkIcon className="h-3.5 w-3.5" />
-                        </button>
-                      </span>
-                    ))}
-                    {/* + add your own query for THIS issue */}
-                    <span className="flex items-center gap-1.5 pt-0.5" onClick={(e) => e.stopPropagation()}>
-                      <PlusIcon className="h-3.5 w-3.5 shrink-0 text-[#21C1B6]" />
-                      <input
-                        value={queryDrafts[issue.id] || ''}
-                        onChange={(e) => setQueryDrafts((prev) => ({ ...prev, [issue.id]: e.target.value }))}
-                        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addOwnQuery(issue); } }}
-                        placeholder='Add your own query, e.g. "mala fide intention" quash FIR'
-                        className="flex-1 min-w-0 bg-transparent border-b border-dashed border-[#CBD5E1] focus:border-[#21C1B6] text-[12px] text-[#0F172A] outline-none py-0.5 placeholder:text-[#B6C2D2]"
-                      />
-                      <button
-                        type="button"
-                        onClick={(e) => { e.stopPropagation(); addOwnQuery(issue); }}
-                        className="shrink-0 text-[11px] font-semibold text-[#21C1B6] hover:text-[#1AA49B]"
-                      >
-                        Add
-                      </button>
-                    </span>
-                  </span>
-                </span>
-              )}
-              {(issue.source || issue.ground_ref) && (
-                <span className="mt-3 pt-2.5 border-t border-[#F1F5F9] flex items-center gap-1.5 text-[11px] text-[#64748B]">
-                  <DocumentTextIcon className="h-3.5 w-3.5 shrink-0 text-[#94A3B8]" />
-                  <span className="truncate">
-                    {[issue.ground_ref, issue.source].filter(Boolean).join(' · ')}
-                  </span>
-                </span>
-              )}
+              <span className="block text-sm font-bold text-[#0F1B21] tracking-[-0.012em] leading-[1.35]">
+                {heading}
+              </span>
             </span>
           </div>
-        </div>
+
+          {/* Body: clamped description + Read more, statute chips, citations */}
+          <div className="pl-[46px] pr-[15px] pt-2">
+            {desc && (
+              <>
+                <p className={`text-xs text-[#64757C] leading-[1.55] ${expanded ? '' : 'line-clamp-3'}`}>{desc}</p>
+                {isLong && (
+                  <button
+                    type="button"
+                    onClick={() => setExpandedDesc((prev) => ({ ...prev, [issue.id]: !expanded }))}
+                    className="text-[11px] font-bold text-[#0E8371] mt-0.5 rounded-md hover:bg-[#E9F9F5] px-0.5"
+                  >
+                    {expanded ? 'Read less' : 'Read more'}
+                  </button>
+                )}
+              </>
+            )}
+            {Array.isArray(issue.legal_framework) && issue.legal_framework.length > 0 && (
+              <span className="mt-2 flex flex-wrap gap-1.5">
+                {issue.legal_framework.map((law, li) => (
+                  <span key={li} className="text-[10.5px] font-semibold text-[#25353C] bg-[#EFF4F3] border border-[#E5ECEB] px-[9px] py-[2.5px] rounded-full">
+                    {law}
+                  </span>
+                ))}
+              </span>
+            )}
+            {Array.isArray(issue.case_law_cited) && issue.case_law_cited.length > 0 && (
+              <span className="mt-1.5 block text-[11px] text-[#64757C]">
+                <span className="font-semibold">Case law cited:</span>{' '}
+                <span className="italic">{issue.case_law_cited.join('; ')}</span>
+              </span>
+            )}
+            {(issue.source || issue.ground_ref) && (
+              <span className="mt-1.5 block text-[10.5px] text-[#93A2A7] truncate">
+                {[issue.ground_ref, issue.source].filter(Boolean).join(' · ')}
+              </span>
+            )}
+          </div>
+
+          {/* Queries — the checkbox panel is the contract for what runs */}
+          {Array.isArray(issue.queries) && issue.queries.length > 0 && (
+            <div className="mt-[11px] mb-[13px] ml-[46px] mr-[15px] bg-[#FBFDFC] border border-[#EFF4F3] rounded-[11px] overflow-hidden">
+              <div className="flex items-center px-3 pt-2 pb-1.5">
+                <span className="text-[9.5px] font-bold tracking-[0.09em] uppercase text-[#93A2A7]">Search queries</span>
+                <span className="ml-auto text-[10px] text-[#93A2A7]">untick to exclude</span>
+              </div>
+              {issue.queries.map((q, qi) => {
+                const checked = picks.selected.includes(q);
+                return (
+                  <div
+                    key={qi}
+                    role="button"
+                    tabIndex={0}
+                    onClick={(e) => { e.stopPropagation(); toggleQuery(issue, q); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') toggleQuery(issue, q); }}
+                    title={checked ? 'Untick to exclude this query from the search' : 'Tick to include this query in the search'}
+                    className="flex items-center gap-2 px-3 py-[5.5px] cursor-pointer transition-colors hover:bg-[#E9F9F5]"
+                  >
+                    <Tick on={checked} size={16} onToggle={() => toggleQuery(issue, q)} label={checked ? 'Exclude this query' : 'Include this query'} />
+                    <span className={`flex-1 min-w-0 truncate text-[11.5px] ${checked ? 'text-[#25353C]' : 'text-[#93A2A7] line-through'}`}>
+                      {q}
+                    </span>
+                  </div>
+                );
+              })}
+              {/* The user's own queries — searched exactly like system anchors */}
+              {picks.custom.map((q) => (
+                <div key={`own-${q}`} className="flex items-center gap-2 px-3 py-[5.5px]">
+                  <span className="h-4 w-4 shrink-0 rounded-[5px] bg-[#0E8371] flex items-center justify-center">
+                    <CheckIcon strokeWidth={3.4} className="h-[9px] w-[9px] text-white" />
+                  </span>
+                  <span className="flex-1 min-w-0 truncate text-[11.5px] font-semibold text-[#0E8371]">{q}</span>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); removeOwnQuery(issue, q); }}
+                    title="Remove your query"
+                    className="shrink-0 text-[#93A2A7] hover:text-[#C24444]"
+                  >
+                    <XMarkIcon className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+              {/* + add your own query for THIS issue */}
+              <div className="flex items-center gap-2 px-3 py-[7px]" onClick={(e) => e.stopPropagation()}>
+                <PlusIcon className="h-[13px] w-[13px] shrink-0 text-[#93A2A7]" />
+                <input
+                  value={queryDrafts[issue.id] || ''}
+                  onChange={(e) => setQueryDrafts((prev) => ({ ...prev, [issue.id]: e.target.value }))}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addOwnQuery(issue); } }}
+                  placeholder='Add your own query, e.g. "mala fide intention" quash FIR'
+                  className="flex-1 min-w-0 bg-transparent border-0 outline-none text-[11.5px] text-[#0F1B21] placeholder:text-[#93A2A7]"
+                />
+                <button
+                  type="button"
+                  onClick={() => addOwnQuery(issue)}
+                  className="shrink-0 text-[11px] font-bold text-[#0E8371] px-1.5 py-0.5 rounded-md hover:bg-[#3FC8B4]/15"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          )}
+        </article>
       );
     };
 
     return (
-      <div className="min-h-full bg-[#F8FAFC] p-4 sm:p-6 md:p-10">
-        <div className="max-w-5xl mx-auto">
-          <PageHeader
-            title="What should we research?"
-            subtitle={isGrounds
-              ? 'These are the grounds pleaded in the filing — pick the ones you need judgments for, or add your own.'
-              : isCombined
-                ? 'Pleaded grounds and system-spotted issues, combined — pick what you need judgments for, or add your own.'
-                : 'Pick the issues you need authority for, or describe it yourself.'}
-            right={(
-              <button
-                onClick={runAnalyze}
-                disabled={analyzing}
-                className="flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold border border-[#E2E8F0] bg-white text-[#475569] hover:bg-[#F8FAFC] disabled:opacity-60 shrink-0"
-              >
-                <ArrowPathIcon className={`h-4 w-4 ${analyzing ? 'animate-spin' : ''}`} />
-                Re-analyse
-              </button>
-            )}
-          />
+      <div className="min-h-full bg-[#F6F9F8] px-4 pt-5 pb-5 sm:px-6 md:px-7 overflow-x-clip lg:h-full lg:overflow-hidden">
+        <div className="max-w-[1380px] mx-auto w-full min-w-0 flex flex-col gap-3 lg:h-full lg:min-h-0">
 
-          {contextLine && (
-            <div className="mt-6 flex items-start gap-2.5 rounded-xl border border-[#B2EBE8] bg-[#F0FDFA] px-4 py-3">
-              <ScaleIcon className="h-4 w-4 text-[#21C1B6] mt-0.5 shrink-0" />
-              <p className="text-xs text-[#475569] leading-relaxed">
-                <span className="font-semibold text-[#0F172A]">
-                  Context{analysis?.caseTitle ? ` — ${analysis.caseTitle}` : ''}:
-                </span>{' '}
-                {contextLine}
+          {/* Header row */}
+          <header className="flex items-center gap-3 shrink-0 min-w-0">
+            <div className="h-[38px] w-[38px] shrink-0 rounded-[11px] bg-gradient-to-br from-[#E9F9F5] to-[#D9F4EE] border border-[#BFE9DF] flex items-center justify-center text-[#0E8371]">
+              <SparklesIcon className="h-[18px] w-[18px]" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-lg font-extrabold tracking-[-0.02em] text-[#0F1B21] leading-tight">What should we research?</h1>
+              <p className="text-[12.5px] text-[#64757C] mt-px truncate">
+                {isGrounds
+                  ? 'These are the grounds pleaded in the filing — pick the ones you need judgments for, or add your own.'
+                  : isCombined
+                    ? 'Pleaded grounds and system-spotted issues, combined — pick what you need judgments for, or add your own.'
+                    : isFresh
+                      ? 'Proposed grounds built from your objective — pick what you need judgments for, or add your own.'
+                      : 'Pick the issues you need authority for, or describe it yourself.'}
               </p>
+            </div>
+            <button
+              onClick={runAnalyze}
+              disabled={analyzing}
+              className="ml-auto shrink-0 flex items-center gap-1.5 px-3.5 py-2 rounded-[10px] text-xs font-semibold border border-[#E5ECEB] bg-white text-[#64757C] shadow-sm transition-colors hover:border-[#BFE9DF] hover:text-[#0E8371] disabled:opacity-60"
+            >
+              <ArrowPathIcon className={`h-3.5 w-3.5 ${analyzing ? 'animate-spin' : ''}`} />
+              Re-analyse
+            </button>
+          </header>
+
+          {/* Context banner + extraction stats, side by side */}
+          {(ctxFull || ((isGrounds || isCombined || isFresh) && groundsMeta)) && (
+            <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)] gap-3 shrink-0">
+              {ctxFull && (
+                <div className="min-w-0 flex items-start gap-[11px] rounded-[14px] border border-[#BFE9DF] bg-gradient-to-b from-[#F6FDFB] to-white px-[15px] py-[11px]">
+                  <ScaleIcon className="h-4 w-4 mt-0.5 shrink-0 text-[#0E8371]" />
+                  <p className={`min-w-0 flex-1 text-xs text-[#64757C] leading-[1.55] ${ctxExpanded ? '' : 'line-clamp-2'}`}>
+                    {analysis?.caseTitle && (
+                      <>
+                        <b className="font-bold text-[#0F1B21]">{analysis.caseTitle}</b>
+                        {' — '}
+                      </>
+                    )}
+                    {ctxFull}
+                  </p>
+                  {ctxFull.length > 160 && (
+                    <button
+                      type="button"
+                      onClick={() => setCtxExpanded((v) => !v)}
+                      className="shrink-0 self-end text-[11.5px] font-bold text-[#0E8371] px-1.5 py-0.5 rounded-md hover:bg-[#E9F9F5]"
+                    >
+                      {ctxExpanded ? 'Less' : 'More'}
+                    </button>
+                  )}
+                </div>
+              )}
+              {(isGrounds || isCombined || isFresh) && groundsMeta && (
+                <div className="min-w-0 flex items-center rounded-[14px] border border-[#E5ECEB] bg-white px-[15px] py-[11px]">
+                  <div className="flex-1 min-w-0 pr-3">
+                    <div className="text-[9.5px] font-semibold tracking-[0.08em] uppercase text-[#93A2A7] whitespace-nowrap">
+                      {isFresh ? 'Proposed grounds' : 'Grounds'}
+                    </div>
+                    <div className="text-[17px] font-extrabold text-[#0F1B21] leading-tight">{groundsMeta.totalGrounds ?? suggested.length}</div>
+                  </div>
+                  {groundsMeta.spottedIssues != null && (
+                    <div className="flex-1 min-w-0 px-3 border-l border-[#EFF4F3]">
+                      <div className="text-[9.5px] font-semibold tracking-[0.08em] uppercase text-[#93A2A7] whitespace-nowrap">Spotted issues</div>
+                      <div className="text-[17px] font-extrabold text-[#0F1B21] leading-tight">{groundsMeta.spottedIssues}</div>
+                    </div>
+                  )}
+                  {groundsMeta.documentType && (
+                    <div className="flex-1 min-w-0 px-3 border-l border-[#EFF4F3]">
+                      <div className="text-[9.5px] font-semibold tracking-[0.08em] uppercase text-[#93A2A7] whitespace-nowrap">Document</div>
+                      <div className="text-sm font-extrabold text-[#0F1B21] truncate">{groundsMeta.documentType}</div>
+                    </div>
+                  )}
+                  {groundsMeta.party && (
+                    <div className="flex-1 min-w-0 pl-3 border-l border-[#EFF4F3]">
+                      <div className="text-[9.5px] font-semibold tracking-[0.08em] uppercase text-[#93A2A7] whitespace-nowrap">Acting for</div>
+                      <div className="text-sm font-extrabold text-[#0F1B21] truncate">{groundsMeta.party}</div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
           {analysis?.needsClarification && (
-            <div className="mt-3 rounded-xl border border-[#FDE68A] bg-[#FFFBEB] px-4 py-3 text-xs text-[#92400E]">
-              {analysis.clarificationQuestion} — add detail above via Re-analyse, or type your own issues below and run the search anyway.
+            <div className="shrink-0 rounded-[11px] border border-[#F0E1C0] bg-[#FCF5E7] px-3.5 py-2 text-xs text-[#B97F24]">
+              {analysis.clarificationQuestion} — add detail via Re-analyse, or type your own search below and run anyway.
             </div>
           )}
 
-          {/* Extraction summary (grounds + combined + fresh modes) — labelled
-              stat cells so the numbers read at a glance. */}
-          {(isGrounds || isCombined || isFresh) && groundsMeta && (
-            <div className="mt-3 rounded-xl border border-[#E2E8F0] bg-white px-4 py-3 sm:px-5 shadow-sm">
-              <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-                <div>
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">{isFresh ? 'Proposed grounds' : 'Pleaded grounds'}</div>
-                  <div className="text-sm font-bold text-[#0F172A] mt-0.5">{groundsMeta.totalGrounds ?? suggested.length}</div>
-                </div>
-                {groundsMeta.spottedIssues != null && (
-                  <div className="sm:border-l sm:border-[#F1F5F9] sm:pl-6">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">Spotted issues</div>
-                    <div className="text-sm font-bold text-[#0F172A] mt-0.5">{groundsMeta.spottedIssues}</div>
-                  </div>
-                )}
-                {groundsMeta.documentType && (
-                  <div className="sm:border-l sm:border-[#F1F5F9] sm:pl-6 min-w-0">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">Document</div>
-                    <div className="text-sm font-semibold text-[#0F172A] mt-0.5 truncate">{groundsMeta.documentType}</div>
-                  </div>
-                )}
-                {groundsMeta.party && (
-                  <div className="sm:border-l sm:border-[#F1F5F9] sm:pl-6 min-w-0 flex-1">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-[#94A3B8]">Parties</div>
-                    <div className="text-sm font-semibold text-[#0F172A] mt-0.5 truncate">{groundsMeta.party}</div>
-                  </div>
-                )}
-              </div>
-              {(groundsMeta.truncatedGrounds > 0 || (Array.isArray(groundsMeta.notes) && groundsMeta.notes.length > 0)) && (
-                <ul className="mt-2.5 pt-2.5 border-t border-[#F1F5F9] space-y-0.5">
-                  {groundsMeta.truncatedGrounds > 0 && (
-                    <li className="text-[11px] text-[#92400E]">⚠ {groundsMeta.truncatedGrounds} further ground{groundsMeta.truncatedGrounds === 1 ? '' : 's'} beyond the cap not shown</li>
-                  )}
-                  {(groundsMeta.notes || []).map((note, ni) => (
-                    <li key={ni} className="text-[11px] text-[#92400E]">⚠ {note}</li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-
-          <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-sm font-bold text-[#0F172A]">
-              {isGrounds ? 'Grounds of the case' : isCombined ? 'Grounds & issues' : isFresh ? 'Proposed grounds for this matter' : 'Legal issues'}
-              <span className="ml-2 font-medium text-[#94A3B8]">{selectedIds.size} of {suggested.length} selected</span>
+          {/* Toolbar: heading + counts + kind filter + cap warnings + clear */}
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0 min-w-0">
+            <h2 className="text-sm font-bold text-[#0F1B21] tracking-[-0.01em]">
+              {isGrounds ? 'Grounds of the case' : isCombined ? 'Grounds & issues' : isFresh ? 'Proposed grounds' : 'Legal issues'}
             </h2>
-            <div className="flex items-center gap-4">
-              {selectedIds.size < suggested.length && (
-                <button
-                  onClick={selectAllIssues}
-                  className="text-xs font-semibold text-[#21C1B6] hover:text-[#1AA49B]"
-                >
-                  Select all
-                </button>
-              )}
-              {selectedIds.size > 0 && (
-                <button onClick={clearAllIssues} className="text-xs font-semibold text-[#64748B] hover:text-[#0F172A]">
-                  Clear all
-                </button>
-              )}
-            </div>
-          </div>
-
-          {suggested.length === 0 && (
-            <div className="mt-3 rounded-xl border border-dashed border-[#CBD5E1] bg-white px-4 py-8 text-center text-xs text-[#94A3B8]">
-              {isGrounds ? 'No pleaded grounds were found — add your own below.'
-                : isCombined ? 'No grounds or issues were found — add your own below.'
-                  : isFresh ? 'No grounds could be proposed — describe your objective more precisely and re-analyse.'
-                    : 'No issues were suggested — add your own below.'}
-            </div>
-          )}
-
-          {pleadedItems.length > 0 && (
-            <>
-              {showGroupLabels && groupLabel(isFresh ? 'Proposed grounds' : 'Pleaded grounds', pleadedItems.length)}
-              <div className={`grid grid-cols-1 md:grid-cols-2 gap-3.5 ${showGroupLabels ? '' : 'mt-3'}`}>
-                {pleadedItems.map(renderIssueCard)}
-              </div>
-            </>
-          )}
-
-          {spottedItems.length > 0 && (
-            <>
-              {showGroupLabels && groupLabel('Spotted issues', spottedItems.length)}
-              <div className={`grid grid-cols-1 md:grid-cols-2 gap-3.5 ${showGroupLabels ? '' : 'mt-3'}`}>
-                {spottedItems.map(renderIssueCard)}
-              </div>
-            </>
-          )}
-
-          {/* Searches the user typed themselves — the composer for adding
-              them lives in the sticky bar below, chat-input style. */}
-          {customIssues.length > 0 && (
-            <div className="mt-8">
-              <h2 className="text-sm font-bold text-[#0F172A]">Your own searches ({customIssues.length})</h2>
-              <div className="mt-3 grid gap-2">
-                {customIssues.map((text, idx) => (
-                  <div key={idx} className="flex items-start justify-between gap-3 rounded-xl border border-[#21C1B6] bg-[#F0FDFA] px-4 py-3">
-                    <span className="text-sm font-medium text-[#0F172A] leading-snug font-serif">{text}</span>
-                    <button
-                      onClick={() => setCustomIssues((prev) => prev.filter((_, i) => i !== idx))}
-                      title="Remove this search"
-                      className="text-[#94A3B8] hover:text-[#DC2626] shrink-0"
-                    >
-                      <XMarkIcon className="h-4 w-4" />
-                    </button>
-                  </div>
+            <span className="text-xs font-medium text-[#93A2A7]">
+              <b className="font-bold text-[#0E8371]">{selectedIds.size}</b> of {suggested.length} selected
+            </span>
+            {showFilter && (
+              <div role="tablist" className="inline-flex items-center gap-0.5 rounded-[10px] border border-[#E5ECEB] bg-white p-[3px] shadow-sm ml-1.5">
+                {[
+                  { key: 'all', label: 'All', count: suggested.length },
+                  { key: 'pleaded', label: pleadedWord, count: pleadedItems.length },
+                  { key: 'spotted', label: 'Legal issues', count: spottedItems.length },
+                ].map(({ key, label, count }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    role="tab"
+                    aria-selected={effFilter === key}
+                    onClick={() => setIssueFilter(key)}
+                    className={`flex items-center gap-1.5 px-3 py-[5.5px] rounded-[7px] text-xs font-semibold transition-colors ${
+                      effFilter === key ? 'bg-[#0F1B21] text-white' : 'text-[#64757C] hover:bg-[#EFF4F3]'
+                    }`}
+                  >
+                    {label}
+                    <em className={`not-italic text-[10px] font-bold px-1.5 py-px rounded-full ${
+                      effFilter === key ? 'bg-white/20 text-white' : 'bg-[#EFF4F3] text-[#64757C]'
+                    }`}>{count}</em>
+                  </button>
                 ))}
               </div>
-            </div>
-          )}
+            )}
+            {groundsMeta?.truncatedGrounds > 0 && (
+              <span className={warnPill}>
+                ⚠ {groundsMeta.truncatedGrounds} further ground{groundsMeta.truncatedGrounds === 1 ? '' : 's'} beyond the cap not shown
+              </span>
+            )}
+            {(groundsMeta?.notes || []).map((note, ni) => (
+              <span key={ni} className={warnPill}>⚠ {note}</span>
+            ))}
+            <span className="flex-1" />
+            {selectedIds.size > 0 ? (
+              <button onClick={clearAllIssues} className="shrink-0 text-xs font-semibold text-[#64757C] px-2 py-1 rounded-lg transition-colors hover:text-[#C24444] hover:bg-[#FBEDED]">
+                Clear all
+              </button>
+            ) : (
+              <button onClick={selectAllIssues} className="shrink-0 text-xs font-semibold text-[#0E8371] px-2 py-1 rounded-lg transition-colors hover:bg-[#E9F9F5]">
+                Select all
+              </button>
+            )}
+          </div>
 
-          {/* Action bar: sticky INSIDE the page flow — it reserves its own
-              space at the end of the content, so it can never hide anything.
+          {/* Board — the only scrolling region at lg */}
+          <div className="grid grid-cols-1 md:grid-cols-2 auto-rows-max gap-3 content-start min-w-0 lg:flex-1 lg:min-h-0 lg:overflow-y-auto p-1 -m-1">
+            {suggested.length === 0 && customIssues.length === 0 && (
+              <div className="md:col-span-2 rounded-[14px] border-[1.5px] border-dashed border-[#E5ECEB] bg-white px-4 py-8 text-center text-xs text-[#93A2A7]">
+                {isGrounds ? 'No pleaded grounds were found — add your own below.'
+                  : isCombined ? 'No grounds or issues were found — add your own below.'
+                    : isFresh ? 'No grounds could be proposed — describe your objective more precisely and re-analyse.'
+                      : 'No issues were suggested — add your own below.'}
+              </div>
+            )}
+            {visibleItems.map(renderIssueCard)}
+            {/* Searches the user typed that fell back to the legacy path —
+                analysed live when the search runs. */}
+            {customIssues.map((text, idx) => (
+              <article key={`custom-${idx}`} className="bg-white border-[1.5px] border-[#BFE9DF] rounded-[14px] px-[15px] py-[13px]">
+                <div className="flex items-start gap-[11px]">
+                  <span className="mt-px h-5 w-5 shrink-0 rounded-md bg-[#0E8371] flex items-center justify-center">
+                    <CheckIcon strokeWidth={3.4} className="h-[11px] w-[11px] text-white" />
+                  </span>
+                  <span className="flex-1 min-w-0">
+                    <span className="flex items-center gap-[7px] text-[9.5px] font-bold tracking-[0.09em] uppercase text-[#93A2A7] mb-0.5">
+                      Custom · Added by you
+                      <span className={`px-[7px] py-px rounded-[5px] border text-[9.5px] font-bold tracking-[0.05em] ${BADGES.spotted}`}>Custom</span>
+                    </span>
+                    <span className="block text-sm font-bold text-[#0F1B21] tracking-[-0.012em] leading-[1.35]">{text}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCustomIssues((prev) => prev.filter((_, i) => i !== idx))}
+                    title="Remove this search"
+                    className="shrink-0 h-6 w-6 rounded-md flex items-center justify-center text-[#93A2A7] hover:text-[#C24444] hover:bg-[#FBEDED]"
+                  >
+                    <XMarkIcon className="h-4 w-4" />
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+
+          {/* Pinned action bar: composer + Start over + Run search.
               (The AI Help pill lifts above action bars via .jnx-assistant-fab
               in index.css.) */}
-          <div data-jnx-actionbar className="sticky bottom-0 z-30 mt-10 -mx-4 sm:-mx-6 md:mx-0 md:bottom-4">
-            <div className="border-t border-[#E2E8F0] bg-white/95 backdrop-blur px-4 py-3 sm:px-6 md:rounded-2xl md:border md:shadow-[0_10px_35px_rgba(15,23,42,0.14)]">
-              {/* Chat-style composer: search in your own words. One line tall,
-                  grows to ~3 lines, then scrolls internally like a chat input. */}
-              <div className="flex items-end gap-2 pb-3 mb-3 border-b border-[#F1F5F9]">
+          <div data-jnx-actionbar className="shrink-0 sticky bottom-0 lg:static z-30 -mx-4 sm:-mx-6 md:mx-0">
+            <div className="flex flex-wrap items-center gap-2.5 border-t border-[#E5ECEB] bg-white/95 backdrop-blur px-3.5 py-3 sm:px-4 md:rounded-2xl md:border md:bg-white md:shadow-[0_2px_5px_rgba(15,27,33,0.04),0_10px_24px_-12px_rgba(15,27,33,0.12)]">
+              <button
+                onClick={resetAll}
+                className="shrink-0 flex items-center gap-1.5 px-2.5 py-2 rounded-[10px] text-[12.5px] font-semibold text-[#64757C] transition-colors hover:bg-[#EFF4F3] hover:text-[#25353C]"
+              >
+                <ChevronLeftIcon className="h-3.5 w-3.5" /> Start over
+              </button>
+              {/* Chat-style composer: one line tall, grows to ~3 lines, then
+                  scrolls internally. */}
+              <div className="flex-1 min-w-[200px] flex items-end gap-2 bg-[#FBFDFC] border-[1.5px] border-[#E5ECEB] rounded-[11px] px-3 transition-all focus-within:border-[#3FC8B4] focus-within:bg-white focus-within:ring-[3px] focus-within:ring-[#3FC8B4]/15">
+                <MagnifyingGlassIcon className="h-[15px] w-[15px] shrink-0 text-[#93A2A7] mb-[11px]" />
                 <textarea
                   ref={customDraftRef}
                   value={customDraft}
@@ -1448,38 +1718,28 @@ export default function CitationResearchPanel() {
                     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addCustomIssue(); }
                   }}
                   rows={1}
-                  placeholder='Search in your own words — e.g. Whether bail may be granted pending appeal under Article 136'
-                  className="flex-1 min-w-0 bg-[#F8FAFC] border border-[#E2E8F0] rounded-xl px-3.5 py-2 text-sm text-[#0F172A] outline-none resize-none overflow-y-auto leading-relaxed placeholder:text-[#94A3B8] focus:border-[#21C1B6]/50 focus:ring-2 focus:ring-[#21C1B6]/10"
+                  placeholder="Search in your own words — e.g. Whether bail may be granted pending appeal under Article 136"
+                  className="flex-1 min-w-0 bg-transparent border-0 outline-none resize-none overflow-y-auto py-[9px] text-[12.5px] leading-relaxed text-[#0F1B21] placeholder:text-[#93A2A7]"
                 />
-                <button
-                  onClick={addCustomIssue}
-                  disabled={!customDraft.trim() || addingIssue}
-                  title="Add this search — it gets its own card and queries, like the suggested ones"
-                  className="shrink-0 flex items-center gap-1 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white hover:bg-[#F8FAFC] text-[#475569] border border-[#E2E8F0] disabled:opacity-50"
-                >
-                  {addingIssue
-                    ? (<><ArrowPathIcon className="h-3.5 w-3.5 animate-spin" /> Analysing…</>)
-                    : (<><PlusIcon className="h-3.5 w-3.5" /> Add</>)}
-                </button>
               </div>
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <button onClick={resetAll} className="flex items-center gap-1 text-xs font-medium text-[#64748B] hover:text-[#0F172A]">
-                  <ChevronLeftIcon className="h-4 w-4" /> Start over
-                </button>
-                <div className="flex items-center gap-4 ml-auto">
-                  <span className="text-xs text-[#64748B] hidden sm:inline">
-                    Searching {totalSelected} {isGrounds ? 'ground' : 'issue'}{totalSelected === 1 ? '' : 's'}
-                  </span>
-                  <button
-                    onClick={runSearch}
-                    disabled={searching || totalSelected === 0}
-                    className="flex items-center gap-2 px-7 py-2.5 rounded-lg text-sm font-semibold bg-[#21C1B6] hover:bg-[#1AA49B] text-white shadow-sm disabled:opacity-60 transition-colors"
-                  >
-                    {searching ? <ArrowPathIcon className="h-4 w-4 animate-spin" /> : <MagnifyingGlassIcon className="h-4 w-4" />}
-                    {searching ? 'Searching…' : `Run search${totalSelected > 0 ? ` (${totalSelected})` : ''}`}
-                  </button>
-                </div>
-              </div>
+              <button
+                onClick={addCustomIssue}
+                disabled={!customDraft.trim() || addingIssue}
+                title="Add this search — it gets its own card and queries, like the suggested ones"
+                className="shrink-0 flex items-center gap-1.5 px-3.5 py-[9px] rounded-[11px] text-[12.5px] font-bold border border-[#E5ECEB] bg-white text-[#25353C] transition-colors hover:border-[#3FC8B4] hover:text-[#0E8371] hover:bg-[#E9F9F5] disabled:opacity-50"
+              >
+                {addingIssue
+                  ? (<><ArrowPathIcon className="h-3.5 w-3.5 animate-spin" /> Analysing…</>)
+                  : (<><PlusIcon className="h-3.5 w-3.5" /> Add</>)}
+              </button>
+              <button
+                onClick={runSearch}
+                disabled={searching || totalSelected === 0}
+                className="shrink-0 flex items-center gap-2 px-[22px] py-[10px] rounded-xl text-[13.5px] font-bold tracking-[-0.01em] transition-all bg-gradient-to-b from-[#5BDCC9] to-[#3FC8B4] text-[#053B33] shadow-[0_8px_18px_-8px_rgba(63,200,180,0.8)] hover:-translate-y-px disabled:bg-none disabled:bg-[#E1E9E8] disabled:text-[#93A2A7] disabled:shadow-none disabled:cursor-not-allowed disabled:hover:translate-y-0"
+              >
+                {searching ? <ArrowPathIcon className="h-[15px] w-[15px] animate-spin" /> : <MagnifyingGlassIcon className="h-[15px] w-[15px]" />}
+                {searching ? 'Searching…' : `Run search (${totalSelected})`}
+              </button>
             </div>
           </div>
         </div>

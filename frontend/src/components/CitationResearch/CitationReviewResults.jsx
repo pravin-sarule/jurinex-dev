@@ -80,95 +80,107 @@ function Bullets({ items }) {
 // ─── Citation card in the review list ────────────────────────────────────────
 
 function CitationCard({ item, status, onView }) {
+  // Judge-verified "% on point" (or embedding similarity for unverified
+  // legacy rows) — shown as a meter in the chip row, top-right.
+  const onPoint = item.signals?.aiRelevance != null;
+  const pct = Math.round(((onPoint ? item.signals.aiRelevance : item.signals?.semantic) || 0) * 100);
+  // Side-coloured accent: supporting/neutral teal, contra red, interim amber.
+  const accent = item.side === 'contra' ? '#E25C4F' : item.side === 'interim' ? '#E3A73C' : TEAL;
   return (
-    <div className="relative rounded-xl border border-[#E2E8F0] bg-white shadow-sm overflow-hidden flex">
-      <div className="w-1 shrink-0" style={{ background: TEAL }} />
-      <div className="flex-1 min-w-0 p-4">
+    <div className="group relative rounded-[14px] border-[1.5px] border-[#E5ECEB] bg-white overflow-hidden flex transition-all duration-200 hover:border-[#BFE9DF] hover:shadow-[0_2px_5px_rgba(15,27,33,0.04),0_10px_24px_-12px_rgba(15,27,33,0.12)]">
+      <div className="w-[3px] shrink-0" style={{ background: accent }} />
+      <div className="flex-1 min-w-0 p-5">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wider text-[#475569] bg-[#F8FAFC] border border-[#E2E8F0]">
+          <span className="px-2.5 py-[3px] rounded-full text-[10px] font-bold tracking-[0.07em] text-[#64757C] bg-[#F6F9F8] border border-[#E5ECEB]">
             {courtTag(item.court, item.title)}
           </span>
           {item.side && (
-            <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wider border ${
+            <span className={`px-2.5 py-[3px] rounded-full text-[10px] font-bold tracking-[0.07em] border ${
               item.side === 'support'
-                ? 'text-[#15803D] bg-[#F0FDF4] border-[#BBF7D0]'
+                ? 'text-[#0E8371] bg-[#E9F9F5] border-[#BFE9DF]'
                 : item.side === 'contra'
                   ? 'text-[#B91C1C] bg-[#FEF2F2] border-[#FECACA]'
-                  : 'text-[#92400E] bg-[#FFFBEB] border-[#FDE68A]'
+                  : 'text-[#B97F24] bg-[#FCF5E7] border-[#F0E1C0]'
             }`}>
               {item.side === 'support' ? 'SUPPORTS YOUR CASE'
                 : item.side === 'contra' ? 'CONTRA — AGAINST YOU' : 'INTERIM ONLY'}
             </span>
           )}
           <StatusPill status={status} />
+          <span className="ml-auto flex items-center gap-2 whitespace-nowrap" title={onPoint ? 'How squarely the verifier found this judgment answers your issue' : 'Embedding similarity only — this row was never judge-verified'}>
+            <span className="h-1.5 w-24 rounded-full bg-[#EFF4F3] overflow-hidden">
+              <span
+                className="block h-full rounded-full transition-all"
+                style={{ width: `${Math.min(100, Math.max(0, pct))}%`, background: onPoint ? TEAL : '#93A2A7' }}
+              />
+            </span>
+            <span className="text-[11px] font-bold text-[#25353C]">
+              {onPoint ? `${pct}% on point` : `similarity ${pct}% — unverified`}
+            </span>
+          </span>
         </div>
-        <h4 className="mt-2 text-[15px] font-bold text-[#0F172A] leading-snug font-serif">
+        <h4 className="mt-2.5 text-base font-bold text-[#0F1B21] leading-snug tracking-[-0.012em]">
           {item.title || item.docId}
         </h4>
         {(item.headline || item.pinpoint) && (
-          <p className="mt-1.5 text-xs text-[#64748B] leading-relaxed line-clamp-2">
+          <p className="mt-1.5 text-[12.5px] text-[#64757C] leading-relaxed line-clamp-2">
             {item.headline || item.pinpoint}
           </p>
         )}
         {item.doctrineLink && (
-          <p className="mt-1.5 text-[11px] text-[#475569] leading-relaxed">
+          <p className="mt-2 text-[11.5px] text-[#25353C] leading-relaxed">
             <span className="font-bold" style={{ color: TEAL_DARK }}>Doctrine: </span>
             {item.doctrineLink}
           </p>
         )}
         {(item.opponentArgument || item.counterStrategy) && (
-          <div className="mt-2.5 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] px-3 py-2 space-y-1.5">
+          <div className="mt-3 rounded-[11px] bg-[#FBFDFC] border border-[#EFF4F3] px-3.5 py-2.5 space-y-1.5">
             {item.opponentArgument && (
-              <p className="text-[11px] leading-relaxed text-[#334155]">
-                <span className="font-bold text-[#B45309]">Opponent may argue: </span>
+              <p className="text-[11.5px] leading-relaxed text-[#25353C]">
+                <span className="font-bold text-[#B97F24]">Opponent may argue: </span>
                 {item.opponentArgument}
               </p>
             )}
             {item.counterStrategy && (
-              <p className="text-[11px] leading-relaxed text-[#334155]">
+              <p className="text-[11.5px] leading-relaxed text-[#25353C]">
                 <span className="font-bold" style={{ color: TEAL_DARK }}>Your counter: </span>
                 {item.counterStrategy}
               </p>
             )}
           </div>
         )}
-        <div className="mt-3 flex flex-wrap items-start gap-x-8 gap-y-1.5">
-          <span className="flex items-start gap-1.5 text-[11px] text-[#64748B] min-w-[180px]">
-            <HomeIcon className="h-3.5 w-3.5 text-[#94A3B8] mt-0.5" />
-            <span><span className="uppercase text-[9px] font-semibold text-[#94A3B8] block leading-none mb-1">Source</span>
-              <span className="font-semibold text-[#334155]">{item.court || '—'}</span></span>
+        <div className="mt-3.5 flex flex-wrap items-start gap-x-8 gap-y-1.5">
+          <span className="flex items-start gap-1.5 text-[11px] text-[#64757C] min-w-[180px]">
+            <HomeIcon className="h-3.5 w-3.5 text-[#93A2A7] mt-0.5" />
+            <span><span className="uppercase text-[9px] font-semibold tracking-[0.08em] text-[#93A2A7] block leading-none mb-1">Source</span>
+              <span className="font-semibold text-[#25353C]">{item.court || '—'}</span></span>
           </span>
-          <span className="flex items-start gap-1.5 text-[11px] text-[#64748B] min-w-[100px]">
-            <CalendarIcon className="h-3.5 w-3.5 text-[#94A3B8] mt-0.5" />
-            <span><span className="uppercase text-[9px] font-semibold text-[#94A3B8] block leading-none mb-1">Published</span>
-              <span className="font-semibold text-[#334155]">{item.year || '—'}</span></span>
-          </span>
-          <span className="ml-auto self-center text-[11px] font-semibold text-[#475569] whitespace-nowrap">
-            {item.signals?.aiRelevance != null
-              ? `${Math.round(item.signals.aiRelevance * 100)}% on point`
-              : `similarity ${Math.round((item.signals?.semantic || 0) * 100)}% — unverified`}
+          <span className="flex items-start gap-1.5 text-[11px] text-[#64757C] min-w-[100px]">
+            <CalendarIcon className="h-3.5 w-3.5 text-[#93A2A7] mt-0.5" />
+            <span><span className="uppercase text-[9px] font-semibold tracking-[0.08em] text-[#93A2A7] block leading-none mb-1">Published</span>
+              <span className="font-semibold text-[#25353C]">{item.year || '—'}</span></span>
           </span>
         </div>
         {Array.isArray(item.matchedTerms) && item.matchedTerms.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-1.5">
             {item.matchedTerms.slice(0, 3).map((term, idx) => (
-              <span key={idx} className="px-2 py-0.5 rounded-full text-[10px] text-[#0D9488] bg-[#F0FDFA] border border-[#99F6E4] truncate max-w-[340px]">
+              <span key={idx} className="px-2.5 py-[3px] rounded-full text-[10px] font-medium text-[#0E8371] bg-[#E9F9F5] border border-[#BFE9DF] truncate max-w-[340px]">
                 {term}
               </span>
             ))}
             {item.matchedTerms.length > 3 && (
-              <span className="text-[10px] text-[#94A3B8] self-center">+{item.matchedTerms.length - 3} more</span>
+              <span className="text-[10px] text-[#93A2A7] self-center">+{item.matchedTerms.length - 3} more</span>
             )}
           </div>
         )}
       </div>
       <button
         onClick={onView}
-        className="w-20 shrink-0 flex flex-col items-center justify-center gap-1 border-l border-[#F1F5F9] text-[11px] font-bold tracking-wider hover:bg-[#F0FDFA] transition-colors"
+        className="w-[88px] shrink-0 flex flex-col items-center justify-center gap-1.5 border-l border-[#EFF4F3] text-[10.5px] font-bold tracking-[0.09em] transition-colors hover:bg-[#E9F9F5]"
         style={{ color: TEAL_DARK }}
       >
         VIEW
-        <ArrowRightIcon className="h-3.5 w-3.5" />
+        <ArrowRightIcon className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
       </button>
     </div>
   );
@@ -666,7 +678,13 @@ export default function CitationReviewResults({
   return (
     // Fills the bounded layout height; ONLY the citation list / report
     // pane scrolls — the left rail and toolbar stay put.
-    <div className="flex-1 min-h-0 bg-white flex flex-col">
+    // Inter (loaded in index.html) is the page's reading face — every child
+    // inherits it; the report tabs' Crimson Text serif still overrides where
+    // designed, and the Settings font picker still wins site-wide.
+    <div
+      className="flex-1 min-h-0 bg-white flex flex-col"
+      style={{ fontFamily: "'Inter', 'DM Sans', 'Segoe UI', system-ui, -apple-system, sans-serif" }}
+    >
       <div className="flex-1 flex min-h-0 items-stretch">
         {/* Left rail — This search (fixed, scrolls its own issue list) */}
         <aside className="w-72 shrink-0 border-r border-[#E2E8F0] bg-white flex flex-col min-h-0">
@@ -751,7 +769,7 @@ export default function CitationReviewResults({
           />
         ) : (
           <div className="flex-1 min-w-0 min-h-0 overflow-y-auto bg-white">
-            <div className="max-w-5xl px-6 lg:px-10 py-5">
+            <div className="max-w-[1380px] px-5 lg:px-8 py-5">
               <div className="flex items-center gap-3">
                 <button
                   onClick={onEditIssues}
@@ -813,7 +831,7 @@ export default function CitationReviewResults({
                       <div className="flex items-start gap-2">
                         <span className="mt-1.5 h-2 w-2 rounded-full shrink-0" style={{ background: TEAL }} />
                         <div className="min-w-0">
-                          <h3 className="text-[15px] font-bold text-[#0F172A] font-serif leading-snug">
+                          <h3 className="text-[15px] font-bold text-[#0F172A] leading-snug tracking-[-0.01em]">
                             {unitHeading(issue)}
                           </h3>
                           {issue.title && (

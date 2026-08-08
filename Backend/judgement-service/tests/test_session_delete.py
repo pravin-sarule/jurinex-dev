@@ -5,6 +5,7 @@ one: owned sessions can only be deleted by their owner."""
 import pytest
 from fastapi.testclient import TestClient
 
+import auth
 from api import app
 from stores import postgres, sessions
 
@@ -18,6 +19,14 @@ def _fake_db(monkeypatch):
     monkeypatch.setattr(postgres, "session_upsert", lambda sid, payload: True)
     monkeypatch.setattr(postgres, "session_select", lambda sid: None)
     monkeypatch.setattr(postgres, "session_delete", lambda sid: True)
+
+
+@pytest.fixture(autouse=True)
+def _legacy_header_auth(monkeypatch):
+    """These tests exercise legacy X-User-Id scoping. With JWT_SECRET in the
+    local .env, verification would treat every tokenless caller as anonymous
+    — disable it so the header path stays testable offline."""
+    monkeypatch.setattr(auth, "_jwt_secret", lambda: None)
 
 
 def _seed(session_id: str, user_id: str | None = None) -> None:

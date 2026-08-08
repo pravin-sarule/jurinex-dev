@@ -152,6 +152,19 @@ class SessionStore:
         # never waits on the remote database.
         self._writer.submit(_session_db_upsert, session_id, payload)
 
+    def save_sync(self, session_id: str, payload: dict[str, Any]) -> None:
+        """Durable-FIRST save for pipeline milestones (analyze end, run end,
+        issue added, ownership tag). The cache is per-process memory, so with
+        several Cloud Run instances — or a restart killing the background
+        writer — an async write loses the session for every other process:
+        the user's next request 404s "Unknown or expired sessionId" at
+        random. Milestone responses must not return before the DB row
+        exists; report-caching saves stay async (a lost one only costs a
+        regeneration, never a 404)."""
+        ttl = get_settings().session_ttl_seconds
+        self._cache.set_json(f"jsession:{session_id}", payload, ttl)
+        _session_db_upsert(session_id, payload)
+
     def load(self, session_id: str) -> dict[str, Any] | None:
         payload = self._cache.get_json(f"jsession:{session_id}")
         if payload is not None:
@@ -459,7 +472,7 @@ class PostgresStore:
 
         return self._run("session upsert", _op, False)
 
-    def session_list(self, user_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    def session_list(self, user_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """Research history: lightweight summaries of stored sessions,
         newest first, strictly scoped to one user. Unowned (NULL user_id)
         rows are never listed — history is private per user."""
