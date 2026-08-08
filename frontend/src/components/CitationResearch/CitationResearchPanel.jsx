@@ -434,43 +434,14 @@ export default function CitationResearchPanel() {
   const isFresh = (analysis?.researchMode || researchMode) === 'fresh';
   const groundsMeta = analysis?.groundsMeta || null;
 
-  // Persist the whole research flow (analysis, selections, fetched
-  // citations) so navigating away and coming back restores everything.
+  // The tab always opens FRESH (user preference): no state rehydration when
+  // navigating here from another tab — every mount starts at the input step.
+  // Past research is never lost: analysed/searched sessions live in the DB
+  // and reopen from Recents. Any pre-existing persisted blob is cleared.
   const STORAGE_KEY = 'jurinex.citationResearch.v1';
-  const [hydrated, setHydrated] = useState(false);
   useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const saved = JSON.parse(raw);
-        if (saved.inputMode) setInputMode(saved.inputMode);
-        // researchMode is NOT restored — new analyses always run combined;
-        // reopened sessions render from analysis.researchMode instead.
-        if (saved.selectedCaseId) setSelectedCaseId(saved.selectedCaseId);
-        if (typeof saved.advancedSearch === 'boolean') setAdvancedSearch(saved.advancedSearch);
-        if (typeof saved.caseText === 'string') setCaseText(saved.caseText);
-        if (saved.analysis) setAnalysis(saved.analysis);
-        if (Array.isArray(saved.selectedIds)) setSelectedIds(new Set(saved.selectedIds));
-        if (saved.queryPicks) setQueryPicks(saved.queryPicks);
-        if (Array.isArray(saved.customIssues)) setCustomIssues(saved.customIssues);
-        if (saved.searchResponse) setSearchResponse(saved.searchResponse);
-        const step_ = saved.step === 'results' && !saved.searchResponse
-          ? (saved.analysis ? 'issues' : 'input')
-          : (saved.step === 'issues' && !saved.analysis ? 'input' : saved.step);
-        if (step_) setStep(step_);
-      }
-    } catch { /* corrupt storage — start fresh */ }
-    setHydrated(true);
+    try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* non-fatal */ }
   }, []);
-  useEffect(() => {
-    if (!hydrated) return;
-    try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
-        step, inputMode, researchMode, selectedCaseId, caseText, advancedSearch,
-        analysis, selectedIds: [...selectedIds], customIssues, queryPicks, searchResponse,
-      }));
-    } catch { /* storage full — non-fatal */ }
-  }, [hydrated, step, inputMode, researchMode, selectedCaseId, caseText, advancedSearch, analysis, selectedIds, customIssues, queryPicks, searchResponse]);
 
   // The user's existing cases, from the agentic document service.
   useEffect(() => {
@@ -500,8 +471,8 @@ export default function CitationResearchPanel() {
   // Coming back to the input step (after a search, or via "New research")
   // must show research finished this visit — the mount-time list is stale.
   useEffect(() => {
-    if (hydrated && step === 'input') refreshHistory();
-  }, [hydrated, step, refreshHistory]);
+    if (step === 'input') refreshHistory();
+  }, [step, refreshHistory]);
 
   const openHistory = async (sessionId) => {
     try {
