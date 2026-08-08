@@ -99,6 +99,7 @@ async def health() -> dict[str, Any]:
         "service": "judgement-service",
         "port": settings.port,
         "ikTokenConfigured": bool(settings.ik_token),
+        "ikTokenRejected": ik_client.auth_failed,
         "geminiConfigured": bool(settings.google_api_key),
         "scoringPhase": settings.scoring_phase,
         "phaseWeights": settings.phase_weights,
@@ -414,8 +415,18 @@ async def search_run(session_id: str, request: RunSearchRequest,
     context.needs_clarification = False
     context.clarification_question = None
 
+    logger.info("[run] session %s issueIds=%s custom=%d overrides=%s",
+                session_id, request.issueIds, len(request.customIssues),
+                {k: len(v) for k, v in (request.queryOverrides or {}).items()} or "none")
     response = await run_issue_search(session_id, context, chosen,
                                       query_overrides=request.queryOverrides or None)
+    if ik_client.auth_failed and not any(i.results for i in response.issues):
+        # An auth failure must never masquerade as an honest empty result.
+        raise HTTPException(status_code=502, detail=(
+            "Indian Kanoon rejected the API token (HTTP 403) — the prepaid "
+            "account is out of balance or the token expired. Recharge at "
+            "api.indiankanoon.org (or set a new INDIAN_KANOON_TOKEN and "
+            "restart), then run the search again."))
     _tag_session(session_id, http_request.headers.get("x-user-id"))
     background.add_task(_vault_write, response)
     return response

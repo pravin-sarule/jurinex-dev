@@ -113,6 +113,7 @@ def _parse_once(system: str, user: str, output_model: type[TModel],
             response = client.messages.parse(
                 model=model_id,
                 max_tokens=max_tokens,
+                temperature=0.0,  # determinism: same case → same output
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 output_format=output_model,
@@ -134,6 +135,7 @@ def _parse_once(system: str, user: str, output_model: type[TModel],
             response = client.messages.create(
                 model=model_id,
                 max_tokens=max_tokens,
+                temperature=0.0,  # determinism: same case → same output
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 extra_body={"output_config": {"format": {
@@ -160,6 +162,7 @@ def _parse_once(system: str, user: str, output_model: type[TModel],
     response = client.messages.create(
         model=model_id,
         max_tokens=max_tokens,
+        temperature=0.0,  # determinism: same case → same output
         system=system + schema_note,
         messages=[{"role": "user", "content": user}],
     )
@@ -302,6 +305,7 @@ QUERY_GEN_SYSTEM_ADVANCED = """Act as a legal technology specialist expert in qu
 INDIAN KANOON QUERY SYNTAX (use it in EVERY query):
 - "double-quoted phrases" match verbatim; bare words must all appear somewhere in the document.
 - Boolean operators MUST be capitalized: AND requires all terms, OR broadens to either, NOT excludes. Group OR-alternatives in parentheses so precedence is explicit: ("malafide" OR "ulterior motive").
+- Always write AND / OR / NOT exactly like that — the system converts them to Indian Kanoon's wire operators (ANDD / ORR / NOTT) at fetch time; never write the doubled forms yourself.
 - Court filtering is appended by the system — NEVER write doctypes: yourself.
 
 RULES:

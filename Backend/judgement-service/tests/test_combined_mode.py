@@ -28,8 +28,9 @@ def _patch(monkeypatch, grounds, meta, spotted):
     async def _g(raw, ctx):
         return grounds, meta
 
-    async def _s(raw, ctx):
-        return spotted
+    async def _s(raw, ctx, covered=None):
+        # Gap-filler pass (covered != None) returns nothing new by default.
+        return [] if covered is not None else spotted
 
     monkeypatch.setattr(agents, "extract_grounds", _g)
     monkeypatch.setattr(agents, "spot_issues", _s)
@@ -64,14 +65,32 @@ def test_shelf_dedup_drops_same_doctrine_and_hook(monkeypatch):
     assert merged[0].ground_label == "Ground A"
 
 
+def test_fallback_spotted_issues_never_carry_ground_labels(monkeypatch):
+    """A thorough fallback model fills the Issue schema's optional ground
+    fields ('Question I' …) — spotted issues must have them force-blanked,
+    else they masquerade as pleaded grounds (16/0 counts, cap truncation)."""
+    async def _fake_run(agent, message, keys):
+        return {"issues": {"issues": [
+            {"id": 1, "issue": "Whether the penalty is imposable?",
+             "ground_label": "Question I", "ground_ref": "Para 11"},
+        ]}}
+
+    monkeypatch.setattr(agents, "claude_available", lambda: False)
+    monkeypatch.setattr(agents, "run_agent_once", _fake_run)
+    issues = asyncio.run(agents.spot_issues("text", CaseContext(document_type="note")))
+    assert len(issues) == 1
+    assert issues[0].ground_label is None
+    assert issues[0].ground_ref is None
+
+
 def test_no_grounds_still_returns_spotted_without_clarification(monkeypatch):
     async def _g(raw, ctx):
         ctx.needs_clarification = True  # grounds extractor found nothing
         ctx.clarification_question = "no grounds"
         return [], {}
 
-    async def _s(raw, ctx):
-        return [_issue(1, "civil_colour")]
+    async def _s(raw, ctx, covered=None):
+        return [] if covered is not None else [_issue(1, "civil_colour")]
 
     monkeypatch.setattr(agents, "extract_grounds", _g)
     monkeypatch.setattr(agents, "spot_issues", _s)

@@ -13,6 +13,23 @@ import { AuthContext } from './authContext';
 import { invalidateLlmChatLimitsCache } from '../services/llmChatLimitsService';
 const ACTIVITY_PING_INTERVAL_MS = 15 * 1000;
 
+// Every key any API client may read an identity from. getUserIdForDrafting /
+// getAuthHeader fall back through these — a stale one left behind on account
+// switch makes the NEW login send the OLD user's X-User-Id (seen live:
+// a fresh account listing another user's cases).
+const LEGACY_AUTH_KEYS = ['userInfo', 'authToken', 'access_token', 'jwt', 'auth_token'];
+
+const purgeStaleIdentity = () => {
+  LEGACY_AUTH_KEYS.forEach((k) => localStorage.removeItem(k));
+  try {
+    // Per-tab research state is account-specific — never carry it across.
+    sessionStorage.removeItem('jurinex.citationResearch.v1');
+    Object.keys(sessionStorage)
+      .filter((k) => k.startsWith('jurinex.reviewStatuses.'))
+      .forEach((k) => sessionStorage.removeItem(k));
+  } catch { /* non-fatal */ }
+};
+
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
@@ -254,13 +271,14 @@ export const AuthProvider = ({ children }) => {
       }
       
       if (response.token) {
+        purgeStaleIdentity();
         clearScopedPlanInfo();
         setPlanInfo(null);
         setToken(response.token);
         persistUser(response.user);
-        
+
         localStorage.setItem('token', response.token);
-        
+
         console.log('AuthContext: Login successful, token stored:', response.token);
 
         await hydratePermissions(response.token, response.user);
@@ -301,6 +319,7 @@ export const AuthProvider = ({ children }) => {
       const response = await api.verifyOtp(email, otp, newPassword);
       
       if (response.success && response.token) {
+        purgeStaleIdentity();
         clearScopedPlanInfo();
         setPlanInfo(null);
         setToken(response.token);
@@ -346,6 +365,7 @@ export const AuthProvider = ({ children }) => {
   const setAuthState = (authToken, userData) => {
     console.log('AuthContext: Manually setting auth state for user:', userData.email);
 
+    purgeStaleIdentity();
     clearScopedPlanInfo();
     setPlanInfo(null);
     setToken(authToken);
@@ -369,6 +389,7 @@ export const AuthProvider = ({ children }) => {
     setToken(null);
     setPlanInfo(null);
     clearScopedPlanInfo();
+    purgeStaleIdentity();
 
     localStorage.removeItem('token');
     

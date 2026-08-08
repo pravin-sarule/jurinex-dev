@@ -47,8 +47,22 @@ class Settings(BaseSettings):
     # --- Gemini / Google AI ---
     google_api_key: str | None = None
     gemini_model: str = "gemini-2.5-flash"
+    # Models for the CLAUDE-FALLBACK analysis jobs when the Anthropic API is
+    # exhausted or unavailable. Extraction (issue spotting, grounds, fresh)
+    # runs on the Pro tier so grounds + spotted issues keep their quality;
+    # query generation runs ~12×/analyze, so it stays on a strong flash.
+    # Primary Gemini jobs (classify/extract/verifier/summaries) keep
+    # gemini_model.
+    gemini_fallback_model: str = "gemini-3.1-pro-preview"  # = gemini-pro-latest today, pinned
+    gemini_keyword_fallback_model: str = "gemini-3.6-flash"
     gemini_embedding_model: str = "models/gemini-embedding-001"
     embedding_dim: int = 768
+
+    # Case material budget for the analysis stages (chars). The old hardcoded
+    # 28–30k fed the issue spotter barely a dozen pages — multi-hundred-page
+    # cases lost most of their documents. ~120k chars ≈ 30k tokens: trivial
+    # for Gemini flash; ~$0.45/call on Claude Opus when credits allow.
+    max_llm_input_chars: int = 120_000
 
     # --- Claude API (issue spotting + query generation + verification) ---
     anthropic_api_key: str | None = None
@@ -101,7 +115,10 @@ class Settings(BaseSettings):
 
     # --- IK fetch behaviour ---
     ik_candidate_cap: int = 30
-    ik_max_concurrency: int = 6
+    # Global window for ALL IK calls across every concurrent issue — the
+    # pipeline runs issues in parallel, so this is the real wall-time knob
+    # (13 issues × ~8 searches + 12 doc fetches ≈ 250 calls share it).
+    ik_max_concurrency: int = 24
     ik_timeout_seconds: float = 60.0
     ik_max_retries: int = 3
     ik_full_doc_top_n: int = 10

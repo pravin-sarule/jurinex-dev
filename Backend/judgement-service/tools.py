@@ -291,10 +291,92 @@ def verify_context_against_source(draft: CaseContextDraft, source_text: str,
     )
 
 
+def verify_issues_against_source(issues: list, source_text: str) -> list[str]:
+    """Anti-invention guard for the ISSUES/GROUNDS stage — same philosophy as
+    verify_context_against_source, one stage later: no extractor may attach a
+    provision or authority the case material does not contain.
+
+    High-precision, one-way: a reference is struck ONLY when a parseable
+    section/act in it is POSITIVELY absent from the source (roman-numeral or
+    unparseable references are kept — false strikes would delete real law).
+    - statutory_hook: blanked when unsupported (the legal question survives;
+      only the unverifiable citation goes).
+    - legal_framework: unsupported entries dropped.
+    - case_law_cited: authorities whose lead party name never appears in the
+      material are dropped — extractors must not introduce case law the
+      papers do not cite.
+    Mutates issues in place; returns human-readable notes for the UI."""
+    norm_source = normalize_ws(source_text or "")
+    notes: list[str] = []
+    if not norm_source:
+        return notes
+    # OCR-tolerant view: '260 A (2)(a)' and '260A(2)(a)' must compare equal —
+    # section presence is checked against an alphanumeric-squashed source too.
+    squashed_source = re.sub(r"[^a-z0-9]+", "", norm_source)
+
+    def _positively_absent(ref: str) -> bool:
+        sections = list(_SECTION_RE.finditer(ref or ""))
+        if sections:
+            # The SECTION NUMBER is the primary key: drafts abbreviate act
+            # names ('B.N.S.S.', 'Cr.P.C.') and spellings vary ('Nagarik' /
+            # 'Nagrik'), so an unmatchable act name must never strike a ref
+            # whose section number the material plainly contains.
+            for m in sections:
+                num_squashed = re.sub(r"[^a-z0-9]+", "", m.group(1).lower())
+                if (normalize_ws(f"section {m.group(1)}") in norm_source
+                        or normalize_ws(m.group(1)) in norm_source
+                        or (num_squashed and num_squashed in squashed_source)):
+                    return False
+            return True  # every section number in the ref is absent
+        absent = False
+        for m in _ACT_RE.finditer(ref or ""):
+            act = normalize_ws(m.group(1))
+            head = " ".join(act.split()[-4:])
+            # Acronym tolerance: 'Bharatiya Nagarik Suraksha Sanhita' matches
+            # a source that only ever writes 'BNSS' / 'B.N.S.S.'.
+            acronym = "".join(w[0] for w in re.findall(r"[a-z]+", act)
+                              if w not in ("of", "the", "and"))
+            if (act in norm_source or head in norm_source
+                    or re.sub(r"[^a-z0-9]+", "", act) in squashed_source
+                    or (len(acronym) >= 3 and acronym in squashed_source)):
+                continue
+            absent = True
+        return absent
+
+    for issue in issues:
+        label = issue.title or (issue.issue or "")[:60]
+        if issue.statutory_hook and _positively_absent(issue.statutory_hook):
+            notes.append(f"Removed unverifiable provision '{issue.statutory_hook}' "
+                         f"from '{label}' — it does not appear in the case material.")
+            issue.statutory_hook = None
+        if getattr(issue, "legal_framework", None):
+            kept = [ref for ref in issue.legal_framework if not _positively_absent(ref)]
+            for ref in set(issue.legal_framework) - set(kept):
+                note = f"Removed unverifiable provision '{ref}' from '{label}'."
+                # One note per provision per issue — the hook strike above may
+                # already have reported the same reference.
+                if not any(f"'{ref}'" in n and f"'{label}'" in n for n in notes):
+                    notes.append(note)
+            issue.legal_framework = kept
+        if getattr(issue, "case_law_cited", None):
+            kept_cases = []
+            for case_name in issue.case_law_cited:
+                lead = normalize_ws(re.split(r"\s+v(?:s|ersus)?\.?\s+", case_name, 1)[0])
+                lead = " ".join(lead.split()[:4])
+                if lead and lead in norm_source:
+                    kept_cases.append(case_name)
+                else:
+                    notes.append(f"Removed case law '{case_name}' from '{label}' — "
+                                 f"not cited in the case material.")
+            issue.case_law_cited = kept_cases
+    if notes:
+        logger.warning("[anti-invention] issues/grounds guard: %d reference(s) struck", len(notes))
+    return notes
+
+
 # ─── Case fetcher (agentic document service) ─────────────────────────────────
 
 _MAX_FILE_TEXT = 120_000       # per-file cap for the anti-invention source text
-_MAX_LLM_BUDGET = 28_000       # spread across files for the LLM-facing digest
 
 
 async def fetch_case_pages(case_id: str, auth_header: str | None = None,
@@ -382,7 +464,10 @@ async def fetch_case_pages(case_id: str, auth_header: str | None = None,
         raise LookupError(f"case {case_id} documents have no extracted text yet")
 
     full_text = "\n\n".join(text for _, text in file_texts)
-    per_file_budget = max(2000, _MAX_LLM_BUDGET // len(file_texts))
+    # Spread the configurable LLM budget across files so EVERY document
+    # contributes to issue spotting (the old fixed 28k gave an 18-file case
+    # half a page per document).
+    per_file_budget = max(2000, get_settings().max_llm_input_chars // len(file_texts))
     llm_text = "\n\n".join(
         f"[FILE: {name}]\n{text[:per_file_budget]}" for name, text in file_texts
     )
@@ -391,9 +476,37 @@ async def fetch_case_pages(case_id: str, auth_header: str | None = None,
 
 # ─── Indian Kanoon client (Section 7) ────────────────────────────────────────
 
+_QUOTED_SEG_RE = re.compile(r'("[^"]*")')
+_IK_OP_MAP = {"AND": "ANDD", "OR": "ORR", "NOT": "NOTT"}
+
+
+def to_ik_operators(query: str) -> str:
+    """Indian Kanoon's Boolean operators are ANDD / ORR / NOTT — case
+    sensitive, space delimited (official API docs; AND/OR/NOT are treated as
+    ordinary words). Queries are authored and DISPLAYED in the readable
+    AND / OR / NOT form; this translates them to the wire format at fetch
+    time. Quoted phrases are never touched (a phrase may legitimately
+    contain 'AND'), lowercase words stay words, and parentheses — which the
+    IK docs do not document — are dropped so they never reach the engine as
+    junk tokens (ANDD is implicit between terms, so precedence degrades
+    gracefully)."""
+    parts = _QUOTED_SEG_RE.split(query or "")
+    out: list[str] = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1:  # quoted phrase — verbatim
+            out.append(part)
+            continue
+        part = part.replace("(", " ").replace(")", " ")
+        part = re.sub(r"\b(AND|OR|NOT)\b", lambda m: _IK_OP_MAP[m.group(1)], part)
+        out.append(part)
+    return re.sub(r"\s+", " ", "".join(out)).strip()
+
+
 def build_ik_query(term: str, exact: bool = False, doctypes: str | None = None) -> str:
     """Decorate one search term into a precise IK query.
 
+    - Boolean operators are translated to IK's wire format (AND→ANDD,
+      OR→ORR, NOT→NOTT) — display keeps the readable form.
     - exact=True wraps a multi-word term in double quotes so IK matches the
       phrase verbatim instead of ANDing the words anywhere in the document
       (terms that already carry their own quotes are left alone).
@@ -401,7 +514,7 @@ def build_ik_query(term: str, exact: bool = False, doctypes: str | None = None) 
       law-commission reports and district-court noise never enter the
       candidate pool. Empty IK_DOCTYPES disables the filter.
     """
-    query = term.strip()
+    query = to_ik_operators(term.strip())
     if exact and " " in query and '"' not in query:
         query = f'"{query}"'
     dt = get_settings().ik_doctypes if doctypes is None else doctypes
@@ -420,6 +533,10 @@ class IndianKanoonClient:
         settings = get_settings()
         self._semaphore = asyncio.Semaphore(settings.ik_max_concurrency)
         self._http: httpx.AsyncClient | None = None
+        # Set on HTTP 401/403 — the token was REJECTED (prepaid balance out /
+        # token expired). Surfaced to the UI so an auth failure never
+        # masquerades as an honest "0 citations". Cleared by the next 200.
+        self.auth_failed = False
 
     @property
     def _token(self) -> str | None:
@@ -461,9 +578,30 @@ class IndianKanoonClient:
             try:
                 async with self._semaphore:
                     resp = await self._client().post(url, params=params or {}, headers=headers)
+                if resp.status_code in (401, 403):
+                    self.auth_failed = True
+                    logger.error("[IK] token REJECTED (HTTP %s) for %s — the Indian "
+                                 "Kanoon prepaid account is likely out of balance or "
+                                 "the token expired; every search returns empty until "
+                                 "it is recharged", resp.status_code, path)
+                    return None
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    # Throttling / transient server errors are RETRIED with
+                    # backoff — at a 24-wide burst, dropping the call would
+                    # silently lose candidates.
+                    if attempt < settings.ik_max_retries:
+                        delay = 0.5 * (2 ** (attempt - 1))
+                        logger.warning("[IK] HTTP %s for %s — retry in %.1fs",
+                                       resp.status_code, path, delay)
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.error("[IK] HTTP %s for %s after %d attempts",
+                                 resp.status_code, path, attempt)
+                    return None
                 if resp.status_code >= 400:
                     logger.warning("[IK] HTTP %s for %s: %s", resp.status_code, path, resp.text[:200])
                     return None
+                self.auth_failed = False
                 return resp.json()
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 if attempt < settings.ik_max_retries:

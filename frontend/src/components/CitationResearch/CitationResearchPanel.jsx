@@ -698,6 +698,9 @@ export default function CitationResearchPanel() {
     }
     if (inputMode === 'case' && freshMode && !caseText.trim()) {
       toast.info('Describe what the client wants — the objective drives a fresh matter\'s grounds');
+      // Make the blocker impossible to miss: jump to the empty objective box.
+      caseTextRef.current?.focus();
+      caseTextRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
     }
     if (inputMode === 'text' && files.length === 0) {
@@ -759,10 +762,41 @@ export default function CitationResearchPanel() {
     });
   };
 
+  // Ground/issue selection drives its query ticks: deselecting unticks every
+  // query on that card; reselecting ticks the full default set again (the
+  // user's own typed queries are kept either way).
   const toggleIssue = (id) => {
+    const selecting = !selectedIds.has(id);
+    const defaults = (suggested.find((i) => i.id === id) || {}).queries || [];
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (selecting) next.add(id); else next.delete(id);
+      return next;
+    });
+    setQueryPicks((prev) => ({
+      ...prev,
+      [id]: { selected: selecting ? [...defaults] : [], custom: prev[id]?.custom || [] },
+    }));
+  };
+
+  const selectAllIssues = () => {
+    setSelectedIds(new Set(suggested.map((i) => i.id)));
+    setQueryPicks((prev) => {
+      const next = { ...prev };
+      suggested.forEach((i) => {
+        next[i.id] = { selected: [...(i.queries || [])], custom: prev[i.id]?.custom || [] };
+      });
+      return next;
+    });
+  };
+
+  const clearAllIssues = () => {
+    setSelectedIds(new Set());
+    setQueryPicks((prev) => {
+      const next = { ...prev };
+      suggested.forEach((i) => {
+        next[i.id] = { selected: [], custom: prev[i.id]?.custom || [] };
+      });
       return next;
     });
   };
@@ -808,15 +842,18 @@ export default function CitationResearchPanel() {
       // the rest keep their full generated set server-side.
       const queryOverrides = {};
       [...selectedIds].forEach((id) => {
-        const issue = suggested.find((i) => i.id === id);
         const p = queryPicks[id];
-        if (!issue || !p) return;
-        const chosen = [...(p.selected || []), ...(p.custom || [])].filter(Boolean);
-        const defaults = issue.queries || [];
-        const untouched = (p.custom || []).length === 0
-          && chosen.length === defaults.length
-          && defaults.every((q) => chosen.includes(q));
-        if (!untouched) queryOverrides[String(id)] = chosen;
+        const defaults = (suggested.find((i) => i.id === id) || {}).queries || [];
+        // THE CHECKBOX PANEL IS THE CONTRACT: exactly the queries shown
+        // ticked (plus any the user typed) are what runs — never the
+        // system's hidden contra/axis fetch queries. This holds even when
+        // the user leaves the default set untouched. An issue with no
+        // displayed queries (rare legacy) keeps the server-generated set.
+        const chosen = p
+          ? [...(p.selected || []), ...(p.custom || [])].filter(Boolean)
+          : [...defaults];
+        if (!p && defaults.length === 0) return;
+        queryOverrides[String(id)] = chosen;
       });
       const data = await judgementApi.runSearch(analysis.sessionId, {
         issueIds: [...selectedIds],
@@ -1331,14 +1368,14 @@ export default function CitationResearchPanel() {
             <div className="flex items-center gap-4">
               {selectedIds.size < suggested.length && (
                 <button
-                  onClick={() => setSelectedIds(new Set(suggested.map((i) => i.id)))}
+                  onClick={selectAllIssues}
                   className="text-xs font-semibold text-[#21C1B6] hover:text-[#1AA49B]"
                 >
                   Select all
                 </button>
               )}
               {selectedIds.size > 0 && (
-                <button onClick={() => setSelectedIds(new Set())} className="text-xs font-semibold text-[#64748B] hover:text-[#0F172A]">
+                <button onClick={clearAllIssues} className="text-xs font-semibold text-[#64748B] hover:text-[#0F172A]">
                   Clear all
                 </button>
               )}

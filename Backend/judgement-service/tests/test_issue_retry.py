@@ -51,6 +51,30 @@ async def test_empty_issue_triggers_reformulated_retry(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_curated_issue_never_reformulates(monkeypatch):
+    """User-curated queries are FINAL: an empty round returns an honest
+    empty — the system must never substitute a generated query set."""
+    issue = Issue(id=3, issue="Whether the FIR is liable to be quashed?")
+    kw = KeywordSet(statutory=["Section 482 CrPC"], anchor_queries=['"my only query"'])
+    rounds = {"n": 0}
+
+    async def fake_generate(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("curated issues must never regenerate queries")
+
+    async def fake_round(issue_arg, ctx_arg, kw_arg, exclude=None, anchors_only=False):
+        rounds["n"] += 1
+        assert anchors_only is True  # only the user's queries fetch
+        return {"candidates": {"d1": "cand1"}, "scored": []}
+
+    monkeypatch.setattr(agents, "generate_queries", fake_generate)
+    monkeypatch.setattr(agents, "_issue_round", fake_round)
+
+    out = await agents._process_issue(issue, _ctx(), pre_keywords=kw, curated=True)
+    assert out["scored"] == [] and rounds["n"] == 1
+    assert out["keywords"] is kw
+
+
+@pytest.mark.asyncio
 async def test_no_retry_when_first_round_has_results(monkeypatch):
     issue = Issue(id=2, issue="Whether bail should be granted?")
     kw = KeywordSet(statutory=["Section 439 CrPC"], anchor_queries=["a1"])
