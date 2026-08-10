@@ -72,10 +72,11 @@ class Settings(BaseSettings):
     judgement_claude_model: str | None = None  # wins over claude_model when set
     claude_model: str = "claude-opus-4-8"
     use_claude_for_analysis: bool = True
-    # Per-judgment relevance verification runs on Claude too (stronger
-    # judgment than flash on shelf/field-of-law distinctions); Sonnet keeps
-    # the ~12-calls-per-issue cost sane. false → Gemini verifier.
-    verifier_use_claude: bool = True
+    # Per-judgment relevance verification runs on GEMINI by default (user
+    # decision: flash is fast and the deterministic rule enforcement in
+    # tools.enforce_verifier_rules is the real precision guard; Claude at
+    # ~12 calls/issue was slow and burned credits). Set true to opt back in.
+    verifier_use_claude: bool = False
     judgement_verifier_claude_model: str = "claude-sonnet-5"
     # Concurrent verifier calls PER ISSUE. Sized so the full-doc top-N
     # verifies in ONE wave (two sequential waves used to dominate search
