@@ -402,6 +402,25 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GEMMA_NON_STREAM_TIMEOUT_S"),
     )
     anthropic_api_key: str = Field(default="", validation_alias=AliasChoices("ANTHROPIC_API_KEY"))
+    # ── Z.AI Translation Agent ────────────────────────────────────────────────
+    # Key for https://api.z.ai (z.ai/manage-apikey/apikey-list). Empty = translation disabled.
+    zai_api_key: str = Field(default="", validation_alias=AliasChoices("ZAI_API_KEY", "Z_AI_API_KEY"))
+    zai_api_base_url: str = Field(
+        default="https://api.z.ai/api/v1",
+        validation_alias=AliasChoices("ZAI_API_BASE_URL"),
+    )
+    # Reflection / COT strategies run multi-pass server-side, so allow long calls.
+    zai_translation_timeout_s: float = Field(
+        default=180.0,
+        validation_alias=AliasChoices("ZAI_TRANSLATION_TIMEOUT_S"),
+    )
+    # Concurrent Z.AI calls per document-translation job (mirrors
+    # OCR_PARALLEL_WORKERS for the Document AI batch pool). Raise only if the
+    # Z.AI account's rate limit allows it — 429s are retried but waste time.
+    zai_translation_concurrency: int = Field(
+        default=12,
+        validation_alias=AliasChoices("ZAI_TRANSLATION_CONCURRENCY"),
+    )
     deepseek_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("DEEPSEEK_API_KEY", "Deepseek_API_KEY"),

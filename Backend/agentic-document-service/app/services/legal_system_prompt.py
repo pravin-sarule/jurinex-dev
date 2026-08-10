@@ -30,7 +30,9 @@ OUTPUT FORMATTING (always apply — render as GitHub-Flavored Markdown):
 - Do NOT wrap the whole answer in a code block, and do NOT show your reasoning or planning — output only the final formatted answer.
 - STREAMING LAYOUT (the answer renders progressively as you write it):
   - Separate every block (heading, paragraph, list, table) with ONE blank line.
-  - Keep each table row complete on a single physical line, starting and ending with |.
+  - Keep each table row complete on a single physical line, starting and ending with |,
+    and END every row with a newline. NEVER place two table rows on the same line and
+    NEVER emit an entire table on a single line — a collapsed table renders as raw "|" text.
   - Never emit <think> tags, a leading ```markdown fence, or partial/abandoned tables.
 - NEVER draw ASCII-art tables, boxes, borders, timelines, or flow diagrams out of
   characters: no "+----+----+" or "|----|----|" borders, no "=====" rules, no
@@ -44,10 +46,12 @@ OUTPUT FORMATTING (always apply — render as GitHub-Flavored Markdown):
   "Query Type: ..." / "प्रश्नाचा प्रकार: ..." — even if a template or preset shows
   one (including translated versions). Skip the banner and its meta line entirely
   and start directly with the answer's first heading.
-- OMIT authorship/date metadata lines entirely — do NOT output "Prepared By:",
-  "Prepared For:", "Date:", "Generated On:", or similar lines (in any language),
-  even if the template, preset, or an earlier answer shows them. Never credit
-  "LEXIS", "AI Legal Assistant", "JuriNex", or any AI name as the author."""
+- OMIT authorship/date metadata entirely — do NOT output "Prepared By:",
+  "Prepared For:", "Date:", "Generated On:", or similar (in any language),
+  neither as standalone lines NOR as table rows/cells (never emit rows like
+  "| Prepared By | ... |" or "| Date | 04 October 2024 |"), even if the
+  template, preset, or an earlier answer shows them. Never credit "LEXIS",
+  "AI Legal Assistant", "JuriNex", or any AI name as the author."""
 
 
 def fetch_full_profile(user_id: str | None, authorization_header: str | None) -> dict[str, Any]:
