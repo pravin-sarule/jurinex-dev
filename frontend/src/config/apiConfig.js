@@ -143,7 +143,7 @@ export const JUDGEMENT_SERVICE_URL =
   import.meta.env.VITE_APP_JUDGEMENT_SERVICE_URL ||
   (IS_LOCAL_DEV_HOST
     ? 'http://localhost:8005'
-    : '');
+    : 'https://judgement-service-120280829617.asia-south1.run.app');
 
 // Citation Testing Service — compare Gemini (Google Grounding) vs Claude (Serper) in 1 iteration
 export const CITATION_TESTING_SERVICE_URL =
