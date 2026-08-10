@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowsRightLeftIcon,
   CheckCircleIcon,
@@ -40,25 +40,6 @@ const LANGUAGES = [
   { code: 'id', label: 'Indonesian' },
 ];
 
-const STRATEGY_LABELS = {
-  general: 'General',
-  paraphrase: 'Paraphrase',
-  two_step: 'Two-Step',
-  three_step: 'Three-Stage',
-  reflection: 'Reflection',
-  cot: 'Chain of Thought',
-};
-
-// Shown under the dropdown; the live list from the API overrides these.
-const STRATEGY_DESCRIPTIONS = {
-  general: 'Literal translation preserving format; fastest and best default for most content.',
-  paraphrase: "Meaning-first rewrite in the target language's natural phrasing.",
-  two_step: 'Literal pass then free-expression pass; literary content.',
-  three_step: 'Faithfulness / expressiveness / elegance passes; classical & poetic styles.',
-  reflection: 'Draft, expert self-review, then refined output; formal documents (slower).',
-  cot: 'Chain-of-thought analysis before translating; expert domains (slower).',
-};
-
 const JOB_POLL_MS = 2500;
 
 const JOB_PHASE_LABELS = {
@@ -71,7 +52,7 @@ const JOB_PHASE_LABELS = {
 };
 
 const SELECT_CLASS =
-  'w-full appearance-none rounded-xl border border-gray-200 bg-white px-3.5 py-2.5 pr-9 text-sm font-medium text-gray-800 shadow-sm transition-colors hover:border-gray-300 focus:border-[#21C1B6] focus:outline-none focus:ring-2 focus:ring-[#21C1B6]/25';
+  'w-full appearance-none rounded-xl border border-gray-200 bg-white px-4 py-3 pr-9 text-sm font-medium text-gray-800 shadow-sm transition-colors hover:border-gray-300 focus:border-[#21C1B6] focus:outline-none focus:ring-2 focus:ring-[#21C1B6]/25';
 
 const PRIMARY_BTN =
   'rounded-xl bg-gradient-to-r from-[#21C1B6] to-[#12a095] px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-[#21C1B6]/25 transition-all hover:shadow-[#21C1B6]/40 hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none';
@@ -91,14 +72,11 @@ const FieldSelect = ({ label, value, onChange, children, className = '' }) => (
 );
 
 const TranslationPage = () => {
-  const [strategies, setStrategies] = useState([]);
   const [languages, setLanguages] = useState(LANGUAGES);
   const [configured, setConfigured] = useState(true);
   const [sourceLang, setSourceLang] = useState('auto');
   const [targetLang, setTargetLang] = useState('en');
-  const [strategy, setStrategy] = useState('general');
-  const [suggestion, setSuggestion] = useState('');
-  const [showSuggestion, setShowSuggestion] = useState(false);
+  const strategy = 'general';
   const [docFile, setDocFile] = useState(null);
   const [outputFormat, setOutputFormat] = useState('pdf');
   const [docJob, setDocJob] = useState(null);
@@ -154,7 +132,7 @@ const TranslationPage = () => {
         sourceLang,
         strategy,
         outputFormat: isDocx(docFile.name) ? 'docx' : outputFormat,
-        suggestion: suggestion.trim(),
+        suggestion: '',
       });
       setDocJob(job);
     } catch (err) {
@@ -171,9 +149,6 @@ const TranslationPage = () => {
       .then((data) => {
         if (!mounted) return;
         setConfigured(data?.configured !== false);
-        if (Array.isArray(data?.strategies) && data.strategies.length) {
-          setStrategies(data.strategies);
-        }
         if (Array.isArray(data?.languages) && data.languages.length) {
           setLanguages(data.languages.map((l) => ({ code: l.code, label: l.label })));
         }
@@ -186,22 +161,6 @@ const TranslationPage = () => {
     };
   }, []);
 
-  const strategyOptions = useMemo(() => {
-    if (strategies.length) return strategies;
-    return Object.keys(STRATEGY_LABELS).map((id) => ({
-      id,
-      description: STRATEGY_DESCRIPTIONS[id] || '',
-    }));
-  }, [strategies]);
-
-  const activeStrategyDescription = useMemo(
-    () =>
-      strategyOptions.find((s) => s.id === strategy)?.description ||
-      STRATEGY_DESCRIPTIONS[strategy] ||
-      '',
-    [strategyOptions, strategy]
-  );
-
   const handleSwap = () => {
     if (sourceLang === 'auto') return;
     setSourceLang(targetLang);
@@ -209,7 +168,7 @@ const TranslationPage = () => {
   };
 
   return (
-    <div className="mx-auto max-w-5xl p-4 sm:p-8">
+    <div className="mx-auto max-w-7xl p-4 sm:p-8">
       {/* Header */}
       <div className="mb-8 flex items-center gap-4">
         <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-[#21C1B6] to-[#0e8f86] shadow-lg shadow-[#21C1B6]/30">
@@ -236,13 +195,13 @@ const TranslationPage = () => {
       {/* Workspace */}
       <div className="overflow-hidden rounded-3xl border border-gray-100 bg-white shadow-xl shadow-gray-200/60">
         {/* Toolbar */}
-        <div className="border-b border-gray-100 bg-gray-50/70 px-5 pb-5 pt-4 sm:px-7">
-          <div className="flex flex-wrap items-end gap-3">
+        <div className="border-b border-gray-100 bg-gray-50/70 px-6 pb-6 pt-5 sm:px-10 sm:pb-7 sm:pt-6">
+          <div className="flex flex-wrap items-end gap-4">
             <FieldSelect
               label="From"
               value={sourceLang}
               onChange={(e) => setSourceLang(e.target.value)}
-              className="w-44 grow sm:grow-0"
+              className="w-56 grow sm:grow-0"
             >
               <option value="auto">Auto detect</option>
               {languages.map((l) => (
@@ -257,7 +216,7 @@ const TranslationPage = () => {
               onClick={handleSwap}
               disabled={sourceLang === 'auto'}
               title={sourceLang === 'auto' ? 'Pick a source language to swap' : 'Swap languages'}
-              className="flex h-[42px] w-[42px] items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 shadow-sm transition-all hover:border-[#21C1B6]/50 hover:text-[#21C1B6] disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex h-[46px] w-[46px] items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 shadow-sm transition-all hover:border-[#21C1B6]/50 hover:text-[#21C1B6] disabled:cursor-not-allowed disabled:opacity-40"
             >
               <ArrowsRightLeftIcon className="h-5 w-5" />
             </button>
@@ -266,7 +225,7 @@ const TranslationPage = () => {
               label="To"
               value={targetLang}
               onChange={(e) => setTargetLang(e.target.value)}
-              className="w-44 grow sm:grow-0"
+              className="w-56 grow sm:grow-0"
             >
               {languages.map((l) => (
                 <option key={l.code} value={l.code}>
@@ -274,46 +233,11 @@ const TranslationPage = () => {
                 </option>
               ))}
             </FieldSelect>
-
-            <FieldSelect
-              label="Strategy"
-              value={strategy}
-              onChange={(e) => setStrategy(e.target.value)}
-              className="w-44 grow sm:grow-0"
-            >
-              {strategyOptions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {STRATEGY_LABELS[s.id] || s.id}
-                </option>
-              ))}
-            </FieldSelect>
-
-            <button
-              type="button"
-              onClick={() => setShowSuggestion((v) => !v)}
-              className="ml-auto self-end pb-2.5 text-sm font-semibold text-[#21C1B6] transition-colors hover:text-[#0e8f86]"
-            >
-              {showSuggestion ? 'Hide style guidance' : '+ Style guidance'}
-            </button>
           </div>
-
-          {activeStrategyDescription && (
-            <p className="mt-2.5 text-xs text-gray-400">{activeStrategyDescription}</p>
-          )}
-
-          {showSuggestion && (
-            <input
-              type="text"
-              value={suggestion}
-              onChange={(e) => setSuggestion(e.target.value)}
-              placeholder="e.g. Formal legal register; keep statute names in English"
-              className="mt-3 w-full rounded-xl border border-gray-200 bg-white px-3.5 py-2.5 text-sm shadow-sm transition-colors focus:border-[#21C1B6] focus:outline-none focus:ring-2 focus:ring-[#21C1B6]/25"
-            />
-          )}
         </div>
 
         {/* Body */}
-        <div className="p-5 sm:p-7">
+        <div className="p-6 sm:p-10">
           <>
               {/* File picker */}
               <div
@@ -323,7 +247,7 @@ const TranslationPage = () => {
                   e.preventDefault();
                   handleFilePicked(e.dataTransfer.files?.[0]);
                 }}
-                className={`group flex cursor-pointer flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed px-6 py-12 text-center transition-all ${
+                className={`group flex min-h-[22rem] cursor-pointer flex-col items-center justify-center gap-4 rounded-2xl border-2 border-dashed px-8 py-16 text-center transition-all ${
                   docFile
                     ? 'border-[#21C1B6]/50 bg-[#21C1B6]/[0.04]'
                     : 'border-gray-200 bg-gray-50/50 hover:border-[#21C1B6]/60 hover:bg-[#21C1B6]/[0.04]'
@@ -480,10 +404,10 @@ const TranslationPage = () => {
                 {docJob?.status === 'completed' && docJob?.download_ready && (
                   <a
                     href={documentTranslationDownloadUrl(docJob.job_id)}
-                    className={`flex items-center gap-2 ${PRIMARY_BTN}`}
+                    className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#21C1B6] to-[#12a095] px-4 py-1.5 text-xs font-semibold text-white shadow-md shadow-[#21C1B6]/25 transition-all hover:shadow-[#21C1B6]/40 hover:brightness-105"
                   >
-                    <ArrowDownTrayIcon className="h-4 w-4" />
-                    Download {docJob.result_filename || 'translated document'}
+                    <ArrowDownTrayIcon className="h-3.5 w-3.5" />
+                    Download
                   </a>
                 )}
                 <button
