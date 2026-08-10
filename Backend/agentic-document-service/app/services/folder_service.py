@@ -1805,10 +1805,25 @@ class FolderWorkflowService:
         is_uuid_like = bool(_UUID_DASHED.match(raw) or _UUID_HEX32.match(raw))
         if is_db_available() and is_uuid_like:
             try:
+                norm = normalize_folder_chat_session_uuid(raw)
                 with get_db_connection() as conn, conn.cursor() as cur:
+                    # The UI may pass either a session_id OR a folder_chats row id
+                    # (older rows / some surfaces). Accept both: a row id deletes
+                    # its whole session; a sessionless row is deleted directly.
                     cur.execute(
-                        "DELETE FROM folder_chats WHERE folder_name = %s AND session_id = %s::uuid",
-                        [folder_name, normalize_folder_chat_session_uuid(raw)],
+                        """
+                        DELETE FROM folder_chats
+                         WHERE folder_name = %s
+                           AND (
+                                session_id = %s::uuid
+                                OR id = %s::uuid
+                                OR session_id = (
+                                    SELECT session_id FROM folder_chats
+                                     WHERE folder_name = %s AND id = %s::uuid
+                                )
+                           )
+                        """,
+                        [folder_name, norm, norm, folder_name, norm],
                     )
                     db_deleted = cur.rowcount or 0
                     conn.commit()

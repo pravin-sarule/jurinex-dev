@@ -494,6 +494,7 @@ import GetHelpPage from './pages/GetHelpPage';
 import CitationReportPage from './pages/CitationReportPage';
 import CitationTestingPage from './pages/CitationTestingPage';
 import CitationResearchPage from './pages/CitationResearchPage';
+import TranslationPage from './pages/TranslationPage';
 import EnterpriseAnalyticsPage from './pages/EnterpriseAnalyticsPage';
 import BrandingProfilesPage from './pages/BrandingProfilesPage';
 import BrandingProfileEditorPage from './pages/BrandingProfileEditorPage';
@@ -661,6 +662,16 @@ function App() {
                 <AuthChecker>
                   <MainLayout useNoPadding={true}>
                     <CitationResearchPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+            <Route
+              path="/translation"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <TranslationPage />
                   </MainLayout>
                 </AuthChecker>
               }

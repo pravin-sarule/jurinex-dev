@@ -534,6 +534,36 @@ export function normalizeMarkdownFormatting(text, options = {}) {
     .replace(/<\s*(em|i)\s*>([\s\S]*?)<\s*\/\s*\1\s*>/gi, '*$2*')
     .replace(/&nbsp;/gi, ' ');
 
+  // Repair tables the model collapsed onto ONE physical line (rows joined with
+  // "| |" and the |:---| separator inline) — they'd otherwise render as raw
+  // pipe text. Split leading prose from the table, then break rows apart.
+  t = t.split('\n').map((line) => {
+    if (!(/\|\s*:?-{2,}:?\s*\|/.test(line) && /\|\s+\|/.test(line))) return line;
+    const firstPipe = line.indexOf('|');
+    const prose = line.slice(0, firstPipe).trim();
+    const table = line.slice(firstPipe).replace(/\|\s+\|\s*/g, '|\n|');
+    return (prose ? `${prose}\n\n` : '') + table;
+  }).join('\n');
+
+  // Drop authorship/date metadata table rows the model copies from preset
+  // templates ("| **Prepared By** | JuriNex … |", "| **Date** | 04 October 2024 |").
+  // A chronology HEADER row ("| Date | Event |") has no digits, so it survives.
+  t = t
+    .replace(/^\|\s*\*{0,2}\s*(prepared\s+(by|for)|generated\s+on)\b[^\n]*$/gim, '')
+    .replace(/^\|\s*\*{0,2}\s*date\s*\*{0,2}\s*\|[^|\n]*\d{4}[^|\n]*\|?\s*$/gim, '')
+    // Removing rows can leave blank lines inside a table — rejoin the rows.
+    .replace(/(\|[ \t]*)\n[ \t]*\n+([ \t]*\|)/g, '$1\n$2');
+
+  // Inline prose form: "**Prepared By:** LEXIS — … **Date:** 09 October 2024"
+  // (also plain, un-bolded). Strip the authorship segment up to the next
+  // metadata label / bold marker / line end, then any long-form date that
+  // follows a "Date:" label (template metadata style — legal facts use
+  // dd.mm.yyyy, which is untouched).
+  t = t
+    .replace(/\*{0,2}\s*Prepared\s+(?:By|For)\s*:?\s*\*{0,2}\s*(?:(?!\*\*|\n|\||Date\s*:)[^\n|])*/gi, '')
+    .replace(/\*{0,2}\s*Date\s*:?\s*\*{0,2}\s*\d{1,2}\s+[A-Z][a-z]+,?\s+\d{4}\.?/g, '')
+    .replace(/\*{0,2}\s*Date\s*:?\s*\*{0,2}\s*[A-Z][a-z]+\s+\d{1,2},\s*\d{4}\.?/g, '');
+
   // 0a. Collapse degenerate single-column "fragment tables" (one syllable per
   //     row) back into prose BEFORE the chronology/table converters run — they
   //     bail out when a pipe table is present, so this must come first.

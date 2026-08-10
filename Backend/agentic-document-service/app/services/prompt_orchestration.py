@@ -329,10 +329,14 @@ MARKDOWN RULES (GitHub-Flavored Markdown ONLY)
   This rule OVERRIDES any template, preset, or example that shows such a
   banner — skip the banner and its case/query-type meta line entirely and
   start directly with the first real heading of the answer.
-- OMIT authorship/date metadata lines entirely — never output "Prepared By:",
-  "Prepared For:", "Date:", "Generated On:", or similar lines (in any language),
-  even if the template or preset shows them. Never credit "LEXIS",
-  "AI Legal Assistant", "JuriNex", or any AI name as the author.
+- OMIT authorship/date metadata entirely — never output "Prepared By:",
+  "Prepared For:", "Date:", "Generated On:", or similar (in any language),
+  neither as standalone lines NOR as table rows/cells (never emit rows like
+  "| Prepared By | ... |" or "| Date | 04 October 2024 |"), even if the
+  template or preset shows them. Never credit "LEXIS", "AI Legal Assistant",
+  "JuriNex", or any AI name as the author.
+- Every table row must end with a newline. NEVER place two rows on one physical
+  line and NEVER emit an entire table on a single line.
 
 TABLES
 - USER OVERRIDE (highest priority): if the user EXPLICITLY asks for a table /
