@@ -66,12 +66,19 @@ class Settings(BaseSettings):
     # cases lost most of their documents. ~120k chars ≈ 30k tokens: trivial
     # for Gemini flash; ~$0.45/call on Claude Opus when credits allow.
     max_llm_input_chars: int = 120_000
+    # Context extraction reads a smaller head+tail slice: parties/forum live
+    # in the cause title and opening paras, the prayer at the end. Stage 1
+    # (issues/grounds) still gets the full max_llm_input_chars budget.
+    context_llm_input_chars: int = 60_000
 
     # --- Claude API (issue spotting + query generation + verification) ---
     anthropic_api_key: str | None = None
     judgement_claude_model: str | None = None  # wins over claude_model when set
     claude_model: str = "claude-opus-4-8"
-    use_claude_for_analysis: bool = True
+    # Analysis stages (issues/grounds/queries) run on GEMINI 3.1 PRO with
+    # low thinking (user directive 2026-08-10 — replaces Claude Opus 4.8,
+    # which was slow and credit-hungry). Set true to opt Claude back in.
+    use_claude_for_analysis: bool = False
     # Per-judgment relevance verification runs on GEMINI by default (user
     # decision: flash is fast and the deterministic rule enforcement in
     # tools.enforce_verifier_rules is the real precision guard; Claude at
