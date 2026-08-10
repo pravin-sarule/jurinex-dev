@@ -5511,9 +5511,20 @@ async def intelligent_chat_stream(
                 "outputTokens": output_tokens,
                 "totalTokens": input_tokens + output_tokens,
             }
+            # Bill the model that ACTUALLY answered. When an admin-selected model is
+            # unavailable (e.g. gemini-3-pro → 404) the adapter retries with the agent
+            # default, and logging the requested name charged the user for a model that
+            # never ran. Fall back to the requested name only if nothing was recorded.
+            _billed_model = str(usage_totals.get("primaryModel") or "").strip() or actual_model_name
+            if _billed_model != actual_model_name:
+                logger.info(
+                    "[Route:intelligent_chat_stream] billing model=%s (requested=%s was unavailable)",
+                    _billed_model,
+                    actual_model_name,
+                )
             log_llm_usage(
                 user_id=uid_int,
-                model_name=actual_model_name,
+                model_name=_billed_model,
                 input_tokens=usage_totals.get("inputTokens") or 0,
                 output_tokens=usage_totals.get("outputTokens") or 0,
                 endpoint="/api/files/{folder}/intelligent-chat/stream",
