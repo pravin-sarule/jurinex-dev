@@ -456,26 +456,22 @@ class Settings(BaseSettings):
     # control that cost and are read from .env on every call — they OVERRIDE the
     # agent_prompts `thinking_mode` flag, which is what switched thinking on before.
     kimi_thinking_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("KIMI_THINKING_ENABLED"),
     )
-    # Reasoning-token budget when thinking IS enabled. Moonshot treats this as a HINT,
-    # NOT a hard cap: measured on a real ~350-word legal question, reasoning ran
-    # 860-2,065 tokens whether the budget was 500 or 2,000, and one run consumed the
-    # entire max_tokens ceiling on reasoning alone (finish_reason=length, empty answer).
-    # Lower it to nudge the model, but do NOT rely on it to bound cost — the only hard
-    # controls are kimi_thinking_enabled=False and max_output_tokens.
+    # Reasoning-token budget when thinking IS enabled (kimi-k2.6 thinking.budget_tokens).
+    # Moonshot treats this as a HINT, not a hard cap. kimi-k3 ignores this and uses
+    # kimi_reasoning_effort instead.
     kimi_thinking_budget_tokens: int = Field(
-        default=500,
+        default=1000,
         validation_alias=AliasChoices("KIMI_THINKING_BUDGET_TOKENS"),
     )
-    # Coarse reasoning control: "low" | "high" | "max". This is the lever that ACTUALLY
-    # reduces reasoning cost on models that cannot switch thinking off (measured on
-    # kimi-k3: 1,427 reasoning tokens at the "max" default vs 14 at "low").
+    # Coarse reasoning control for kimi-k3: "low" | "high" | "max" (API has no "medium";
+    # "medium" is accepted as an alias for "high"). Default "high" ≈ medium effort.
     # Blank = auto: the adapter sends "low" for K3 / K2.7-Code when
-    # kimi_thinking_enabled is False, and sends nothing at all when it is True.
+    # kimi_thinking_enabled is False, and uses "high" when it is True.
     kimi_reasoning_effort: str = Field(
-        default="",
+        default="high",
         validation_alias=AliasChoices("KIMI_REASONING_EFFORT"),
     )
     # Stream table/chronology answers token-by-token like every other answer.
@@ -486,6 +482,13 @@ class Settings(BaseSettings):
     kimi_stream_tabular: bool = Field(
         default=True,
         validation_alias=AliasChoices("KIMI_STREAM_TABULAR"),
+    )
+    # Stream Moonshot reasoning_content live as SSE type=thinking so the UI updates
+    # during long CoT instead of freezing on a static "Thinking..." label.
+    # Set false to hide CoT (old behaviour).
+    kimi_stream_reasoning: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("KIMI_STREAM_REASONING"),
     )
     # ── Free-tier DeepSeek routing ────────────────────────────────────────────
     # When enabled, users on the named free plan have their text LLM model forced

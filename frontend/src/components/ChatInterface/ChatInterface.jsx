@@ -1024,6 +1024,17 @@ const _draftLineAlign = (t0) => {
  * addressable from the first token. The backend already honours a supplied id —
  * folder_service._get_or_create_session() uses `id=key or uuid4()`.
  */
+/** Live CoT preview for the spinner row — last ~2 lines / 220 chars so Kimi/Gemini
+ *  reasoning streams feel alive instead of a frozen "Thinking..." label. */
+const formatThinkingPreview = (raw) => {
+  const text = String(raw || "").trim();
+  if (!text) return "Thinking...";
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const tail = (lines.length ? lines.slice(-2).join("\n") : text).trim();
+  if (tail.length <= 220) return tail;
+  return `…${tail.slice(-220)}`;
+};
+
 const mintSessionId = () => {
   try {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -3015,7 +3026,8 @@ const ChatInterface = () => {
                   } : {}),
                 });
                 console.log('Status:', parsed.status, parsed.message);
-              } else if (parsed.type === 'thinking' && activeStreamIsDeepRef.current) {
+              } else if (parsed.type === 'thinking') {
+                // Live CoT / progress for all models (Kimi, Gemini, Gemma), not only Deep Research.
                 const thinkingText = parsed.text || '';
                 if (thinkingText) {
                   streamThinkingRef.current += thinkingText;
@@ -4296,7 +4308,7 @@ const ChatInterface = () => {
                                 {(loadingChat || isGenerating) && idx === currentChatHistory.length - 1 && !resolvedPayload && !pendingQuestion ? (
                                   <div className="flex items-center gap-2 text-gray-500 text-sm">
                                     <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
-                                    <span style={{ whiteSpace: 'pre-wrap' }}>{(thinkingContent && thinkingContent.trim().split('\n').filter(Boolean).slice(-1)[0]) || 'Thinking...'}</span>
+                                    <span style={{ whiteSpace: 'pre-wrap' }}>{formatThinkingPreview(thinkingContent)}</span>
                                   </div>
                                 ) : resolvedPayload ? (
                                   <LearningChatBubble
@@ -4317,7 +4329,7 @@ const ChatInterface = () => {
                               {!chat.response ? (
                                 <div className="flex items-center gap-2 text-gray-500 text-sm py-4 px-5">
                                   <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
-                                  <span style={{ whiteSpace: 'pre-wrap' }}>{(thinkingContent && thinkingContent.trim().split('\n').filter(Boolean).slice(-1)[0]) || 'Thinking...'}</span>
+                                  <span style={{ whiteSpace: 'pre-wrap' }}>{formatThinkingPreview(thinkingContent)}</span>
                                 </div>
                               ) : (
                                 <>
@@ -4495,7 +4507,7 @@ const ChatInterface = () => {
                                 return (
                                   <div className="flex items-center gap-2 text-gray-500 text-sm">
                                     <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
-                                    <span style={{ whiteSpace: 'pre-wrap' }}>{(thinkingContent && thinkingContent.trim().split('\n').filter(Boolean).slice(-1)[0]) || 'Thinking...'}</span>
+                                    <span style={{ whiteSpace: 'pre-wrap' }}>{formatThinkingPreview(thinkingContent)}</span>
                                   </div>
                                 );
                               }
@@ -4507,7 +4519,7 @@ const ChatInterface = () => {
                               return (
                                 <div className="flex items-center gap-2 text-gray-500 text-sm">
                                   <Loader2 className="h-4 w-4 animate-spin text-[#21C1B6]" />
-                                  <span style={{ whiteSpace: 'pre-wrap' }}>{(thinkingContent && thinkingContent.trim().split('\n').filter(Boolean).slice(-1)[0]) || 'Thinking...'}</span>
+                                  <span style={{ whiteSpace: 'pre-wrap' }}>{formatThinkingPreview(thinkingContent)}</span>
                                 </div>
                               );
                             })()}
@@ -4522,7 +4534,7 @@ const ChatInterface = () => {
                                 <span style={{ whiteSpace: 'pre-wrap' }}>
                                   {animatedResponseContent
                                     ? 'Preparing a quick question for you...'
-                                    : (thinkingContent && thinkingContent.trim().split('\n').filter(Boolean).slice(-1)[0]) || 'Thinking...'}
+                                    : formatThinkingPreview(thinkingContent)}
                                 </span>
                               </div>
                             )}

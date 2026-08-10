@@ -4730,13 +4730,13 @@ async def intelligent_chat_stream(
                             # Same reasoning as _draft_run_blocking above.
                             bind_token_usage_session(usage_session_key)
                             try:
-                                for chunk_text in kimi_stream_generator(
+                                for event in kimi_stream_generator(
                                     prompt,
                                     model_name=resolved_model_name,
                                     gen_kwargs=kimi_gen_kwargs,
                                     llm_params=kimi_llm_params,
                                 ):
-                                    loop.call_soon_threadsafe(km_chunk_queue.put_nowait, chunk_text)
+                                    loop.call_soon_threadsafe(km_chunk_queue.put_nowait, event)
                             except Exception as exc:
                                 kimi_stream_error.append(str(exc))
                             finally:
@@ -4745,9 +4745,24 @@ async def intelligent_chat_stream(
 
                         km_stream_future = loop.run_in_executor(None, _run_kimi_stream)
                         while True:
-                            chunk_text = await km_chunk_queue.get()
-                            if chunk_text is _SENTINEL_KM:
+                            event = await km_chunk_queue.get()
+                            if event is _SENTINEL_KM:
                                 break
+                            # New shape: {"type": "thinking"|"chunk", "text": "..."}.
+                            # Plain strings are treated as answer chunks for safety.
+                            if isinstance(event, dict):
+                                ev_type = str(event.get("type") or "chunk")
+                                text = event.get("text") or ""
+                                if not text:
+                                    continue
+                                if ev_type == "thinking":
+                                    # Live CoT — keep the UI moving; do NOT add to answer_parts.
+                                    streamed = True
+                                    yield _sse({"type": "thinking", "text": text})
+                                    continue
+                                chunk_text = text
+                            else:
+                                chunk_text = event
                             if not chunk_text:
                                 continue
                             streamed = True
