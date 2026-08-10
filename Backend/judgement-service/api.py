@@ -29,6 +29,7 @@ from agents import (
     run_issue_search,
     run_search_pipeline,
 )
+from auth import jwt_verification_enabled, resolve_user_id
 from config import get_settings
 from schemas import (
     AddIssueRequest,
@@ -101,6 +102,7 @@ async def health() -> dict[str, Any]:
         "ikTokenConfigured": bool(settings.ik_token),
         "ikTokenRejected": ik_client.auth_failed,
         "geminiConfigured": bool(settings.google_api_key),
+        "jwtVerification": jwt_verification_enabled(),
         "scoringPhase": settings.scoring_phase,
         "phaseWeights": settings.phase_weights,
         "relevanceJudge": {
@@ -150,14 +152,16 @@ def _tag_session(session_id: str, user_id: str | None, case_title: str | None = 
             session[key] = value
             changed = True
     if changed:
-        sessions.save(session_id, session)
+        # Ownership/title tag is a milestone: the history list and the
+        # ownership check read it immediately — write durably.
+        sessions.save_sync(session_id, session)
 
 
 @app.get("/api/v1/sessions")
 async def list_sessions(http_request: Request) -> dict[str, Any]:
-    """Research history, newest first. Strictly scoped to the X-User-Id
-    caller — no header means no history, never everyone's."""
-    user_id = http_request.headers.get("x-user-id")
+    """Research history, newest first. Strictly scoped to the verified
+    caller — anonymous callers get no history, never everyone's."""
+    user_id = resolve_user_id(http_request)
     if not user_id:
         return {"sessions": []}
     rows = await asyncio.to_thread(postgres.session_list, user_id)
@@ -172,7 +176,7 @@ async def get_session(session_id: str, http_request: Request) -> dict[str, Any]:
     if session is None:
         raise HTTPException(status_code=404, detail="Unknown or expired sessionId")
     owner = session.get("userId")
-    caller = http_request.headers.get("x-user-id")
+    caller = resolve_user_id(http_request)
     # Owned sessions open only for their owner; legacy unowned sessions
     # stay reachable by direct id (they no longer appear in any list).
     if owner and str(owner) != str(caller or ""):
@@ -211,7 +215,7 @@ async def delete_session(session_id: str, http_request: Request) -> dict[str, An
     if session is None:
         raise HTTPException(status_code=404, detail="Unknown or expired sessionId")
     owner = session.get("userId")
-    caller = http_request.headers.get("x-user-id")
+    caller = resolve_user_id(http_request)
     if owner and str(owner) != str(caller or ""):
         raise HTTPException(status_code=404, detail="Unknown or expired sessionId")
     db_deleted = await asyncio.to_thread(sessions.delete, session_id)
@@ -251,7 +255,7 @@ async def analyze(request: SearchRequest, http_request: Request) -> AnalyzeRespo
                                        request.caseInput.fileRef)
     session_id, context, issues, grounds_meta = await analyze_case(
         raw_text, mode=request.mode, query_style=request.queryStyle)
-    _tag_session(session_id, http_request.headers.get("x-user-id"))
+    _tag_session(session_id, resolve_user_id(http_request))
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
         needsClarification=context.needs_clarification,
@@ -266,7 +270,7 @@ async def analyze_from_case(request: AnalyzeCaseRequest, http_request: Request) 
     chunks are pulled from the agentic document service, so suggested
     issues carry 'file, page N' source references."""
     auth_header = http_request.headers.get("authorization")
-    user_id = http_request.headers.get("x-user-id") or request.userId
+    user_id = resolve_user_id(http_request, request.userId)
     try:
         case_title, pages, llm_text, full_text = await fetch_case_pages(
             request.caseId, auth_header, user_id)
@@ -307,7 +311,7 @@ async def analyze_fresh_case(request: AnalyzeCaseFreshRequest,
         raise HTTPException(status_code=400,
                             detail="objective is required — describe what the client wants to achieve")
     auth_header = http_request.headers.get("authorization")
-    user_id = http_request.headers.get("x-user-id") or request.userId
+    user_id = resolve_user_id(http_request, request.userId)
     try:
         case_title, pages, llm_text, full_text = await fetch_case_pages(
             request.caseId, auth_header, user_id)
@@ -371,7 +375,7 @@ async def analyze_upload(http_request: Request,
         "\n\n---\n\n".join(parts), pages=pages, mode=mode, query_style=query_style)
     stem = (uploads[0].filename or "").rsplit(".", 1)[0] or None
     fallback = f"{stem} (+{len(uploads) - 1} more)" if stem and len(uploads) > 1 else stem
-    _tag_session(session_id, http_request.headers.get("x-user-id"),
+    _tag_session(session_id, resolve_user_id(http_request),
                  title.strip()[:200] or fallback)
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
@@ -427,7 +431,7 @@ async def search_run(session_id: str, request: RunSearchRequest,
             "account is out of balance or the token expired. Recharge at "
             "api.indiankanoon.org (or set a new INDIAN_KANOON_TOKEN and "
             "restart), then run the search again."))
-    _tag_session(session_id, http_request.headers.get("x-user-id"))
+    _tag_session(session_id, resolve_user_id(http_request))
     background.add_task(_vault_write, response)
     return response
 
@@ -444,7 +448,7 @@ async def add_session_issue(session_id: str, request: AddIssueRequest,
     if session is None:
         raise HTTPException(status_code=404, detail="Unknown or expired sessionId — analyze first")
     owner = session.get("userId")
-    caller = http_request.headers.get("x-user-id")
+    caller = resolve_user_id(http_request)
     if owner and str(owner) != str(caller or ""):
         raise HTTPException(status_code=404, detail="Unknown or expired sessionId")
     text = (request.text or "").strip()
@@ -460,7 +464,9 @@ async def add_session_issue(session_id: str, request: AddIssueRequest,
     issue.queries = list(kw.anchor_queries)
     session["suggestedIssues"] = [i.model_dump() for i in suggested] + [issue.model_dump()]
     session.setdefault("issueKeywords", {})[str(next_id)] = kw.model_dump()
-    sessions.save(session_id, session)
+    # Milestone: the user's very next action is Run search — possibly on
+    # another process. Durable before responding.
+    await asyncio.to_thread(sessions.save_sync, session_id, session)
     return {"sessionId": session_id, "issue": issue.model_dump()}
 
 

@@ -40,6 +40,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # --- Auth (shared secret with authservice; verifies caller JWTs) ---
+    jwt_secret: str | None = None
+
     # --- Indian Kanoon ---
     indian_kanoon_api_token: str | None = None
     indian_kanoon_token: str | None = None  # legacy alias, second priority

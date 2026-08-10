@@ -749,12 +749,15 @@ const CaseCreationFlow = ({ onComplete, onCancel, userId = null }) => {
             )}
             
             {currentStep === 5 && (
-              <ReviewStep 
-                caseData={caseData} 
+              <ReviewStep
+                caseData={caseData}
                 onBack={handleBack}
                 onResetToFirstStep={handleResetToFirstStep}
                 onEditStep={handleEditFromReview}
                 creationMode={creationMode}
+                // The case now exists — wipe the refresh-resume state so the
+                // wizard can never resurrect an already-created case.
+                onComplete={clearPersistedFlow}
               />
             )}
           </div>

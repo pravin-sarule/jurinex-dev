@@ -1536,7 +1536,21 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
     # Fetch full text for the top N only (each /doc call is billed) —
     # needed for the relevance judge, party perspective, good-law markers,
     # pinpoints, and pinpoint verification by the guardian.
-    top = pool[:settings.ik_full_doc_top_n]
+    # Cost + coverage: IK indexes one judgment under several doc-ids
+    # ('…'-truncated titles, order copies). Deduping by normalized title
+    # BEFORE the billed download keeps the best-ranked copy and lets a
+    # genuinely different candidate use the freed slot — the display-level
+    # dedupe alone still paid for (and verified) both copies.
+    seen_top_titles: set[str] = set()
+    top: list[Candidate] = []
+    for cand in pool:
+        key = re.sub(r"[^a-z0-9]+", "", (cand.title or "").lower()) or cand.doc_id
+        if key in seen_top_titles:
+            continue
+        seen_top_titles.add(key)
+        top.append(cand)
+        if len(top) >= settings.ik_full_doc_top_n:
+            break
     texts = await asyncio.gather(*(ik_client.fetch_doc_text(c.doc_id) for c in top))
     for cand, text in zip(top, texts):
         cand.doc_text = text
@@ -1863,7 +1877,9 @@ def assemble_response(
         "issues": session_issues,
         "forumCourt": (forum_profile or {}).get("label"),
     })
-    sessions.save(session_id, existing)
+    # Run-end milestone: the user's next click (report/reopen) may hit
+    # another process — the results must be durable BEFORE we respond.
+    sessions.save_sync(session_id, existing)
     return response
 
 
@@ -1949,7 +1965,9 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
                         _t_stage1 - _t_ctx, time.perf_counter() - _t_stage1,
                         len(issues))
 
-    sessions.save(session_id, {
+    # Analyze-end milestone: /run may arrive on another process seconds
+    # later — write durably before returning the sessionId to the client.
+    await asyncio.to_thread(sessions.save_sync, session_id, {
         "caseContext": context.model_dump(),
         "suggestedIssues": [i.model_dump() for i in issues],
         "issueKeywords": issue_keywords,
