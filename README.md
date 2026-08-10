@@ -314,15 +314,166 @@ These `.env` knobs control that cost and are re-read on **every request** — th
 | `KIMI_MODEL`                  | `kimi-k2.6`                  | Used only when the UI sends the bare label `kimi`        |
 | `KIMI_BASE_URL`               | `https://api.moonshot.ai/v1` | Use `api.moonshot.cn` only with a mainland-China key      |
 | `KIMI_THINKING_ENABLED`       | `false`                      | Master switch for the reasoning pass                      |
-| `KIMI_THINKING_BUDGET_TOKENS` | `500`                        | Caps reasoning tokens whenever thinking is on             |
+| `KIMI_THINKING_BUDGET_TOKENS` | `500`                        | Reasoning budget hint when thinking is on (**not** a hard cap — see below) |
 | `KIMI_REASONING_EFFORT`       | *(blank)*                    | `low` / `high` / `max` for `kimi-k3`; blank = not sent    |
 | `KIMI_STREAM_TABULAR`         | `true`                       | Stream tables live; `false` withholds them until complete |
 
 Measured impact of thinking on a one-line answer: **32 output tokens / 2.5s** with thinking off,
 versus **2,660 tokens / 71s** with it on and uncapped.
 
-`kimi-k2.7-code` refuses `thinking: disabled` outright; the adapter detects that specific error
-and transparently retries with `budget_tokens` instead, so it stays cheap without special-casing.
+> ⚠️ **`KIMI_THINKING_BUDGET_TOKENS` is a hint, not a hard cap.** On a real ~350-word legal
+> question, reasoning ran **860–2,065 tokens whether the budget was set to 500 or 2,000**, and
+> one benchmark run spent the *entire* `max_tokens` ceiling on reasoning — returning a truncated
+> answer. `reasoning_effort` is the lever that actually bites.
+
+### How thinking is switched off — it differs per model
+
+Only **K2.6** can turn thinking off outright. K3 always reasons (you can only lower the effort),
+and the K2.7 Code models always reason and always preserve their reasoning. The adapter picks the
+right lever automatically from the model id, so `KIMI_THINKING_ENABLED=false` is cheap on all of
+them. Reasoning tokens measured on the same ~200-word question:
+
+| Model                      | Can disable thinking? | What the adapter sends            | Reasoning tokens |
+| -------------------------- | --------------------- | --------------------------------- | ---------------- |
+| `kimi-k2.6`                | ✅ yes                | `thinking:{"type":"disabled"}`, temp **0.6** | **1**   |
+| `kimi-k3`                  | ❌ no                 | `reasoning_effort:"low"`, temp **1.0**       | **15** (vs 1,427 at the `max` default) |
+| `kimi-k2.7-code`           | ❌ no (always thinks) | `reasoning_effort:"low"`, temp **1.0**       | **210** |
+| `kimi-k2.7-code-highspeed` | ❌ no (always thinks) | `reasoning_effort:"low"`, temp **1.0**       | **225** |
+
+Note the temperature follows the mode, not the model: **0.6 only with `thinking:disabled`**, and
+**1.0 whenever thinking is on** — including K3/K2.7 in their minimal-effort mode. Moonshot also
+fixes `top_p` (0.95), `n` (1) and both penalties (0.0); the adapter never sends them.
+
+If a model unexpectedly rejects `thinking:disabled`, the adapter catches that specific 400 and
+retries with `reasoning_effort:"low"` instead, so a new model id can never hard-fail the chat.
+
+### Prompt caching
+
+Moonshot caches prompts automatically — there is no parameter to enable it, no cache id to
+manage and no TTL to set — and bills cached input at roughly **80–90% off**. The console logs
+report the outcome on every Kimi call:
+
+```
+⚡ Kimi cache HIT   kimi-k2.6  cached=1,830/1,830 input tokens (100%)  billed_full=0  saved≈$0.0014
+○ Kimi cache MISS  kimi-k2.6  cached=0/4,070 input tokens (0%)  (cold prompt, or the tail differs from anything cached)
+```
+
+> **There is no measured minimum prompt size.** Moonshot's docs mention a 256-token floor;
+> live testing on this account cached a **26-token** prompt at 100% on the second identical
+> call. Size is not the constraint — *exactness* is (see the caveat below).
+
+A **cold** call omits the `cached_tokens` field entirely; a **warm** one reports it in *both*
+`usage.cached_tokens` and `usage.prompt_tokens_details.cached_tokens` (verified live, streaming
+and non-streaming). `_cached_input_tokens()` reads either, plus Anthropic's
+`cache_read_input_tokens` spelling, so the same helper works for Claude.
+
+The `saved≈$` figure uses published **input** rates (USD per 1M tokens, miss → hit). Output rates
+are deliberately not guessed, so the number is an input-side estimate only — a model with no
+entry here simply logs the hit without a dollar figure:
+
+| Model prefix | Cache miss | Cache hit | Discount |
+| ------------ | ---------- | --------- | -------- |
+| `kimi-k3`    | $3.00      | $0.30     | 90%      |
+| `kimi-k2.7`  | $0.95      | $0.19     | 80%      |
+| `kimi-k2.6`  | $0.95      | $0.16     | 83%      |
+| `kimi-k2.5`  | $0.60      | $0.10     | 83%      |
+
+Cache reporting is wrapped in a `try/except` that can never break a response — if anything goes
+wrong it degrades to a `debug` line and returns 0.
+
+The `Cached Input (cache hit)` row also appears in the per-call and final aggregated token
+tables — see [Token accounting in the console](#token-accounting-in-the-console).
+
+> ⚠️ **Measured caveat — a shared prefix is NOT enough.** Moonshot's docs advise keeping a stable
+> prefix and varying only the tail. Live testing against this account did **not** reproduce that:
+>
+> | Request pattern | Cached |
+> | --- | --- |
+> | Byte-identical request, repeated | **100%** |
+> | Same 1,800-token prefix, different final question | **0%** |
+> | Same ~4,100-token prefix, different final question | **0%** |
+>
+> So in normal chat use — same case documents, a different question each time — **the cache will
+> usually miss**, because only the tail differs. Hits mainly occur on retries or repeated
+> identical requests. Watch the log line rather than assuming a discount.
+
+### Measured throughput
+
+Live against `api.moonshot.ai`, ~350-word generation, repeated runs. Treat as indicative — the
+endpoint returns `429` / `engine_overloaded_error` under load, so real-world figures vary.
+
+| Model                      | Thinking | Time to first token | Tokens/sec | Tokens/min |
+| -------------------------- | -------- | ------------------- | ---------- | ---------- |
+| `kimi-k2.7-code-highspeed` | on       | ~1.0s               | **216–240** | ~13,000–14,400 |
+| `kimi-k2.6`                | off      | ~0.8s               | 38.5       | ~2,300     |
+| `kimi-k2.6`                | on       | ~1.0s               | 34–43      | ~2,000–2,600 |
+| `kimi-k2.7-code`           | on       | ~0.8s               | 34.6       | ~2,100     |
+| `kimi-k3`                  | off      | ~3.2s               | 31.5       | ~1,900     |
+| `kimi-k3`                  | on       | ~2.8s               | 45.0       | ~2,700     |
+
+`kimi-k2.7-code-highspeed` is roughly **6× faster** than every other model on this key and is the
+clear choice when latency matters. `kimi-k3` has the slowest time-to-first-token (~3s).
+
+Moonshot returns **no rate-limit headers**, so per-account TPM/RPM quotas cannot be read from the
+API — check the Moonshot console for your tier. Rate limiting is real regardless: `429` responses
+were observed during normal use (the client auto-retries).
+
+### Token accounting in the console
+
+Every chat request prints token usage to the document service's console, from
+[`app/services/token_usage_log.py`](Backend/agentic-document-service/app/services/token_usage_log.py).
+There are **two** tables and they answer different questions:
+
+| Table | Title | Emitted by | Scope |
+| ----- | ----- | ---------- | ----- |
+| Per-call | `TOKEN USAGE - <context> (response complete)` | `log_token_usage_table()`, called inside each provider adapter | **one** LLM call |
+| Aggregated | `FINAL AGGREGATED TOKEN USAGE (response complete)` | `flush_aggregated_token_usage_table()`, called by the route once the answer is finished | **every** call made while answering one question |
+
+The aggregated table is the one to trust for cost. A single chat answer routinely makes several
+LLM calls (query rewriting, retrieval scoring, the answer itself) plus embedding calls, and only
+the aggregate sums them.
+
+Rows shown, when the data is available:
+
+```
+Endpoint · Routing · User ID · Session ID · Request ID
+Primary Model / Model / Models · Providers
+Input Tokens (total) · Output Tokens (total) · Total Tokens (total) · LLM Calls
+Cached Input (cache hit) · Billed at full price
+Answer Length · Retrieved Chunks (RAG)
+```
+
+Two things worth knowing when reading it:
+
+- **`Cached Input` is a subset of `Input Tokens`, not an extra.** `Billed at full price`
+  (`input − cached`) is what you actually pay the miss rate on, and it only appears when
+  something was cached. On a miss the row reads `0 (cache MISS)`.
+- **`Routing` reflects the provider that actually ran**, derived from the resolved stream
+  provider (`kimi_direct`, `claude_direct`, `deepseek_direct`, `gemini_direct`). It used to be
+  hardcoded to `gemini_direct` regardless of the model.
+
+#### Gotcha: usage is accumulated in a *thread-local*
+
+`record_token_usage()` appends to a per-session accumulator keyed off a **thread-local** session
+key. Gemini runs on the request's own event-loop thread, so it picks that key up for free — but
+Claude, DeepSeek and Kimi are driven through `loop.run_in_executor(...)`, which puts them on a
+**worker thread that has no session key bound**. Their usage was recorded against no session, so
+their rows landed in the per-call table but the aggregated table showed blank `Session ID`,
+`User ID`, `LLM Calls` and `Retrieved Chunks`.
+
+The fix is that each executor-backed stream helper binds and unbinds explicitly:
+
+```python
+bind_token_usage_session(usage_session_key)
+try:
+    ...                       # the blocking provider SDK call
+finally:
+    unbind_token_usage_session()
+```
+
+**If you add a new provider that runs in a thread or a `run_in_executor` block, you must do the
+same** — otherwise its tokens silently vanish from the aggregated total and the answer looks
+cheaper than it was.
 
 ### Free-tier override
 

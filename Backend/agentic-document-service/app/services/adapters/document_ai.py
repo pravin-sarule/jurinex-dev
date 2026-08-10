@@ -226,8 +226,118 @@ def _kimi_temperature(*, thinking_on: bool) -> float:
     Anything else is a hard 400 ("invalid temperature: only X is allowed for this
     model"), so a caller's temperature — including the admin panel's — is ignored
     here by design rather than passed through and failing the request.
+
+    Moonshot likewise fixes top_p (0.95), n (1) and both penalties (0.0); this
+    adapter simply never sends them, which is why they need no special handling.
     """
     return _KIMI_THINKING_TEMPERATURE if thinking_on else _KIMI_NON_THINKING_TEMPERATURE
+
+
+# Per Moonshot's docs, only K2.6 can switch thinking OFF outright. K3 "always reasons"
+# and is tuned with reasoning_effort instead; the K2.7 Code models always think and
+# always preserve their reasoning. Measured minimum reasoning tokens on the same
+# ~200-word question confirms which lever actually works for each family:
+#   k2.6  thinking=disabled  ->     1     (effort=low alone gives 487 — much worse)
+#   k3    reasoning_effort=low ->  14     (vs 1,427 at the "max" default)
+#   k2.7-code            low ->  242
+#   k2.7-code-highspeed  low ->  435
+_KIMI_NO_THINKING_OFF_PREFIXES = ('kimi-k3', 'kimi-k2.7', 'moonshot-k3', 'moonshot-k2.7')
+# Used when the caller wants minimal thinking on a model that cannot turn it off.
+_KIMI_MIN_EFFORT = 'low'
+
+
+def _kimi_supports_thinking_off(api_model: str) -> bool:
+    """True when `thinking: {"type": "disabled"}` is a valid request for this model."""
+    tail = _model_tail_lower(api_model)
+    return not tail.startswith(_KIMI_NO_THINKING_OFF_PREFIXES)
+
+
+# ── Prompt-cache reporting ────────────────────────────────────────────────────
+# Moonshot caches prompts automatically — there is no parameter to enable it and no
+# cache id to manage. The docs claim a 256-token minimum prefix; measured on this
+# account a 26-token prompt cached at 100% on an identical repeat, so size is not the
+# real constraint — a byte-identical request is. A cold call omits the
+# `cached_tokens` field entirely; a warm one reports it BOTH at usage.cached_tokens
+# and usage.prompt_tokens_details.cached_tokens (verified live, stream + non-stream).
+#
+# USD per 1M INPUT tokens as (cache miss, cache hit). Used only to show what caching
+# saved on input — output rates are deliberately not guessed here.
+_KIMI_INPUT_RATES: dict[str, tuple[float, float]] = {
+    "kimi-k3":     (3.00, 0.30),
+    "kimi-k2.7":   (0.95, 0.19),
+    "kimi-k2.6":   (0.95, 0.16),
+    "kimi-k2.5":   (0.60, 0.10),
+}
+
+
+def _cached_input_tokens(usage: Any) -> int:
+    """Cached (discounted) input tokens from an OpenAI-compatible usage object/dict."""
+    if usage is None:
+        return 0
+
+    def _get(obj: Any, key: str) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None)
+
+    details = _get(usage, "prompt_tokens_details")
+    for candidate in (_get(details, "cached_tokens") if details is not None else None,
+                      _get(usage, "cached_tokens"),
+                      _get(usage, "cache_read_input_tokens")):  # Anthropic spelling
+        try:
+            n = int(candidate or 0)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    return 0
+
+
+def _kimi_cache_saving_usd(api_model: str, cached_tokens: int) -> float | None:
+    """USD saved on input by the cache hit, or None when the model has no known rate."""
+    if cached_tokens <= 0:
+        return None
+    tail = _model_tail_lower(api_model)
+    best: tuple[float, float] | None = None
+    best_len = -1
+    for prefix, rates in _KIMI_INPUT_RATES.items():
+        if tail.startswith(prefix) and len(prefix) > best_len:
+            best, best_len = rates, len(prefix)
+    if best is None:
+        return None
+    miss_rate, hit_rate = best
+    return cached_tokens * (miss_rate - hit_rate) / 1_000_000.0
+
+
+def _log_kimi_cache(api_model: str, usage: Any, *, phase: str) -> int:
+    """Emit one console line showing whether Moonshot's prompt cache hit, and return cached tokens."""
+    try:
+        cached = _cached_input_tokens(usage)
+        prompt_tokens = 0
+        if usage is not None:
+            raw = usage.get("prompt_tokens") if isinstance(usage, dict) else getattr(usage, "prompt_tokens", 0)
+            prompt_tokens = int(raw or 0)
+        if prompt_tokens <= 0:
+            return cached
+        pct = (cached / prompt_tokens * 100.0) if prompt_tokens else 0.0
+        saved = _kimi_cache_saving_usd(api_model, cached)
+        saved_txt = f"  saved≈${saved:.4f}" if saved else ""
+        if cached > 0:
+            logger.info(
+                "[DocumentAI] ⚡ Kimi cache HIT   %s  cached=%s/%s input tokens (%.0f%%)  billed_full=%s%s",
+                api_model, f"{cached:,}", f"{prompt_tokens:,}", pct,
+                f"{prompt_tokens - cached:,}", saved_txt,
+            )
+        else:
+            logger.info(
+                "[DocumentAI] ○ Kimi cache MISS  %s  cached=0/%s input tokens (0%%)  "
+                "(cold prompt, or the tail differs from anything cached)",
+                api_model, f"{prompt_tokens:,}",
+            )
+        return cached
+    except Exception as exc:  # never let cache reporting break a response
+        logger.debug("[DocumentAI] kimi cache log skipped (%s): %s", phase, exc)
+        return 0
 
 
 # ── API clients ───────────────────────────────────────────────────────────────
@@ -2399,20 +2509,50 @@ def _kimi_thinking_settings() -> tuple[bool, int, str]:
     return enabled, budget, effort
 
 
-def _kimi_apply_thinking(create_kwargs: dict, *, thinking_on: bool, budget: int, effort: str) -> dict:
-    """Set the thinking block + the one temperature Moonshot allows for that mode."""
-    create_kwargs["temperature"] = _kimi_temperature(thinking_on=thinking_on)
-    if thinking_on:
-        thinking: dict[str, Any] = {"type": "enabled"}
-        if budget > 0:
-            thinking["budget_tokens"] = budget
-        create_kwargs["extra_body"] = {"thinking": thinking}
-        if effort:
-            create_kwargs["reasoning_effort"] = effort
-    else:
+def _kimi_apply_thinking(
+    create_kwargs: dict,
+    *,
+    thinking_on: bool,
+    budget: int,
+    effort: str,
+    api_model: str,
+    force_thinking: bool = False,
+) -> dict:
+    """
+    Apply the right thinking lever for THIS model, plus the one temperature that mode allows.
+
+    Three cases:
+      • thinking wanted            -> thinking:enabled (+budget, +effort if set), temp 1.0
+      • thinking off, model allows -> thinking:disabled, temp 0.6          (K2.6)
+      • thinking off, model won't  -> reasoning_effort:"low", temp 1.0     (K3, K2.7 Code)
+
+    `force_thinking` is the retry path for a model that rejected thinking:disabled.
+    """
+    wants_minimal = not thinking_on
+    can_disable = _kimi_supports_thinking_off(api_model) and not force_thinking
+
+    if wants_minimal and can_disable:
         # Moonshot only allows temperature 0.6 alongside an explicit thinking:disabled,
         # so these two MUST be sent together — see `_kimi_temperature`.
+        create_kwargs["temperature"] = _kimi_temperature(thinking_on=False)
         create_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        create_kwargs.pop("reasoning_effort", None)
+        return create_kwargs
+
+    # Thinking is on — either by request, or because this model cannot switch it off.
+    create_kwargs["temperature"] = _kimi_temperature(thinking_on=True)
+    thinking: dict[str, Any] = {"type": "enabled"}
+    if budget > 0:
+        # NOTE: Moonshot treats budget_tokens as a HINT, not a hard cap (measured:
+        # 860-2,065 reasoning tokens whether set to 500 or 2,000). reasoning_effort
+        # is the lever that actually bites.
+        thinking["budget_tokens"] = budget
+    create_kwargs["extra_body"] = {"thinking": thinking}
+
+    resolved_effort = effort or (_KIMI_MIN_EFFORT if wants_minimal else '')
+    if resolved_effort:
+        create_kwargs["reasoning_effort"] = resolved_effort
+    else:
         create_kwargs.pop("reasoning_effort", None)
     return create_kwargs
 
@@ -2454,7 +2594,13 @@ def _kimi_create_kwargs(
     }
     if _deepseek_expects_json(prompt, llm_params):
         create_kwargs["response_format"] = {"type": "json_object"}
-    _kimi_apply_thinking(create_kwargs, thinking_on=thinking_on, budget=budget, effort=effort)
+    _kimi_apply_thinking(
+        create_kwargs,
+        thinking_on=thinking_on,
+        budget=budget,
+        effort=effort,
+        api_model=api_model,
+    )
     return create_kwargs, api_model, thinking_on, float(create_kwargs["temperature"])
 
 
@@ -2497,7 +2643,14 @@ def _generate_text_kimi(
                 "[DocumentAI] %s refuses thinking:disabled — retrying with budget_tokens=%s",
                 api_model, _budget or "—",
             )
-            _kimi_apply_thinking(create_kwargs, thinking_on=True, budget=_budget, effort=_effort)
+            _kimi_apply_thinking(
+                create_kwargs,
+                thinking_on=True,
+                budget=_budget,
+                effort=_effort or _KIMI_MIN_EFFORT,
+                api_model=api_model,
+                force_thinking=True,
+            )
             response = client.chat.completions.create(**create_kwargs)
         else:
             logger.exception("[DocumentAI] Kimi generate failed model=%s error=%s", api_model, exc)
@@ -2507,6 +2660,7 @@ def _generate_text_kimi(
     input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
     output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
     total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or (input_tokens + output_tokens)
+    cached_tokens = _log_kimi_cache(api_model, usage, phase="generate")
     log_token_usage_table(
         context="kimi_generate",
         usage={
@@ -2515,6 +2669,7 @@ def _generate_text_kimi(
             "inputTokens": input_tokens,
             "outputTokens": output_tokens,
             "totalTokens": total_tokens,
+            "cachedTokens": cached_tokens,
         },
         provider="kimi",
         model_name=api_model,
@@ -2575,13 +2730,21 @@ def kimi_stream_generator(
                 "[DocumentAI] %s refuses thinking:disabled — retrying with budget_tokens=%s",
                 api_model, _budget or "—",
             )
-            _kimi_apply_thinking(create_kwargs, thinking_on=True, budget=_budget, effort=_effort)
+            _kimi_apply_thinking(
+                create_kwargs,
+                thinking_on=True,
+                budget=_budget,
+                effort=_effort or _KIMI_MIN_EFFORT,
+                api_model=api_model,
+                force_thinking=True,
+            )
             stream = client.chat.completions.create(**create_kwargs)
         else:
             logger.exception("[DocumentAI] Kimi stream failed model=%s error=%s", api_model, exc)
             raise
 
     final_usage: dict[str, int] | None = None
+    final_usage_raw: Any = None
     buffer_parts: list[str] = []
     full_response = ""
 
@@ -2593,10 +2756,12 @@ def kimi_stream_generator(
             total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
             if not total_tokens and (prompt_tokens or completion_tokens):
                 total_tokens = prompt_tokens + completion_tokens
+            final_usage_raw = usage
             final_usage = {
                 "inputTokens": prompt_tokens,
                 "outputTokens": completion_tokens,
                 "totalTokens": total_tokens,
+                "cachedTokens": _cached_input_tokens(usage),
             }
 
         if not chunk.choices:
@@ -2640,6 +2805,7 @@ def kimi_stream_generator(
         yield normalize_markdown_render_output("".join(buffer_parts))
 
     if final_usage:
+        _log_kimi_cache(api_model, final_usage_raw, phase="stream")
         log_token_usage_table(
             context="kimi_stream",
             usage={"provider": "kimi", "model": api_model, **final_usage},

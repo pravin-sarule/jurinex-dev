@@ -355,6 +355,30 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
   const updateTimeoutRef = useRef(null);
   const chunkDisplayTimeoutRef = useRef(null);
 
+  // Mint a conversation id on the CLIENT, before the request goes out.
+  //
+  // Previously `sessionId` stayed null for a brand-new chat and was only learned from
+  // the server's `metadata` SSE event — which arrives at the very END of the stream. So
+  // if the user opened another chat while the answer was still streaming, the client had
+  // no id for the conversation it just abandoned: it vanished from the UI, and there was
+  // nothing to navigate back to. Generating the id up-front (the same thing ChatGPT and
+  // Claude do) makes the conversation addressable from the first token, so switching away
+  // and back lands in the same session. The backend already honours a supplied id —
+  // `_get_or_create_session` uses `id=key or uuid4()`.
+  const newSessionId = () => {
+    try {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+      }
+    } catch { /* fall through to the manual builder below */ }
+    // RFC-4122 v4 fallback for older browsers / non-secure origins where randomUUID is absent.
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      const v = c === 'x' ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  };
+
   const formatAssistantText = (raw) => {
     if (!raw) return '';
     try {
@@ -395,8 +419,13 @@ export function useIntelligentFolderChat(folderName, authToken = null) {
       const token = authToken || getAuthToken();
       const endpoint = `${API_BASE}/${encodeURIComponent(folderName)}/intelligent-chat/stream`;
 
+      // Reuse the active conversation's id, else mint one NOW so this chat is
+      // addressable from the first token rather than only after the stream ends.
+      const effectiveSessionId = sessionId || newSessionId();
+      if (effectiveSessionId !== sessionId) setSessionId(effectiveSessionId);
+
       const requestBody = {
-        session_id: sessionId,
+        session_id: effectiveSessionId,
         llm_name: 'gemini',
       };
       if (streamOpts && typeof streamOpts === 'object') {

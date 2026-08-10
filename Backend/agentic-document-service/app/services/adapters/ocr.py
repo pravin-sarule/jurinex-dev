@@ -430,7 +430,13 @@ def _tables_to_dicts(page: Any, document_text: str, page_width: float | None, pa
     return tables
 
 
-def _document_to_structured_json(doc: Any, *, page_offset: int = 0, processor_name: str = "") -> dict[str, Any]:
+def _document_to_structured_json(
+    doc: Any,
+    *,
+    page_offset: int = 0,
+    processor_name: str = "",
+    include_tokens: bool = False,
+) -> dict[str, Any]:
     document_text = str(getattr(doc, "text", "") or "")
     pages: list[dict[str, Any]] = []
     for index, page in enumerate(getattr(doc, "pages", None) or []):
@@ -444,17 +450,24 @@ def _document_to_structured_json(doc: Any, *, page_offset: int = 0, processor_na
         if not page_text:
             preferred = lines or paragraphs or blocks
             page_text = "\n".join(item.get("text", "") for item in preferred if item.get("text")).strip()
-        pages.append(
-            {
-                "pageNumber": page_offset + index + 1,
-                "dimension": dimension,
-                "text": page_text,
-                "blocks": blocks,
-                "paragraphs": paragraphs,
-                "lines": lines,
-                "tables": _tables_to_dicts(page, document_text, page_width, page_height),
-            }
-        )
+        page_json = {
+            "pageNumber": page_offset + index + 1,
+            "dimension": dimension,
+            "text": page_text,
+            "blocks": blocks,
+            "paragraphs": paragraphs,
+            "lines": lines,
+            "tables": _tables_to_dicts(page, document_text, page_width, page_height),
+        }
+        if include_tokens:
+            # Word-level boxes: too bulky to persist for every ingest, but needed
+            # by consumers that reconstruct table cells from geometry (the OCR
+            # processor merges lines ACROSS column gaps, so lines alone can't
+            # split cells). Opt-in only — DB-stored extractions never carry them.
+            page_json["tokens"] = _layout_items(
+                page, "tokens", document_text, page_width=page_width, page_height=page_height
+            )
+        pages.append(page_json)
 
     return {
         "schemaVersion": 1,
@@ -546,6 +559,7 @@ def _call_document_ai(
     processor_name: str,
     page_offset: int = 0,
     process_options=None,
+    include_tokens: bool = False,
 ) -> OcrResult:
     """Send a single batch to Document AI and return OcrResult."""
     from google.cloud import documentai  # type: ignore
@@ -581,6 +595,7 @@ def _call_document_ai(
         doc,
         page_offset=page_offset,
         processor_name=processor_name,
+        include_tokens=include_tokens,
     )
     return OcrResult(
         text=text,
@@ -685,6 +700,7 @@ def _parallel_ocr_bytes(
     progress_callback: Callable[[float], None] | None = None,
     progress_start: float = 22.0,
     progress_end: float = 63.0,
+    include_tokens: bool = False,
 ) -> OcrResult:
     """
     Run Document AI OCR with parallel page batching and real-time progress reporting.
@@ -731,6 +747,7 @@ def _parallel_ocr_bytes(
             processor_name,
             page_offset=0,
             process_options=process_options,
+            include_tokens=include_tokens,
         )
         elapsed = time.monotonic() - t0
         logger.info(
@@ -768,6 +785,7 @@ def _parallel_ocr_bytes(
                 processor_name,
                 page_offset=idx * page_limit,
                 process_options=process_options,
+                include_tokens=include_tokens,
             ): idx
             for idx, batch in enumerate(batches)
         }
@@ -986,6 +1004,7 @@ def extract_text_from_bytes(
     progress_callback: Callable[[float], None] | None = None,
     progress_start: float = 22.0,
     progress_end: float = 63.0,
+    include_tokens: bool = False,
 ) -> OcrResult:
     """
     Run Document AI OCR on raw bytes (without requiring a GCS URI).
@@ -1017,6 +1036,7 @@ def extract_text_from_bytes(
                 progress_callback=progress_callback,
                 progress_start=progress_start,
                 progress_end=progress_end,
+                include_tokens=include_tokens,
             )
             logger.info(
                 "[DocumentAI OCR] bytes extracted pages=%d chars=%d quality=%.2f",

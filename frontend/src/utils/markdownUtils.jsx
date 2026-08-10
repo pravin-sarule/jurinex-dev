@@ -287,6 +287,61 @@ export function preprocessLaTeX(text) {
 }
 
 /**
+ * Structure that never appears inside a real display-math span: a blank line, a
+ * table row or delimiter, an HTML tag, a markdown heading, or a bold marker.
+ * Any of these means the `$$` pair fences prose the model mis-delimited.
+ */
+const NOT_MATH_STRUCTURE =
+  /\n\s*\n|\n\s*\||\|\s*:?-{2,}|<\/?[a-zA-Z][^>]*>|\*\*|(?:^|\n)\s{0,3}#{1,6}\s/;
+
+/**
+ * Signals that genuinely indicate LaTeX. `\_` and `\\` are markdown escapes, so
+ * a backslash only counts when followed by two or more letters (`\frac`, `\pi`).
+ *
+ * A bare `_` is deliberately NOT a signal. That was the old rule, and it broke
+ * every drafted legal document: signature rules ("Signature: ______") and
+ * escaped underscores made `$$ Society Seal $$` look like math, so KaTeX tried
+ * to parse a whole table and failed on the first `&` ("TENANT'S EMPLOYMENT &
+ * INCOME VERIFICATION"), rendering the answer as red unstructured text.
+ */
+const LATEX_SIGNAL = /\\(?![_\\])[a-zA-Z]{2,}|[\^_]\{|[A-Za-z0-9)\]}]\^[A-Za-z0-9(]/;
+
+const spanIsRealMath = (inner) =>
+  !NOT_MATH_STRUCTURE.test(inner) && LATEX_SIGNAL.test(inner);
+
+/**
+ * Models wrap seals, placeholders and emphasis in `$$ … $$` ("$$ Society Seal")
+ * despite prompt rules forbidding it. remark-math reads `$$` as display math and
+ * swallows everything up to the next `$$` — tables, headings and all — into one
+ * broken KaTeX span, which renders red with literal `|` and `<strong>` showing.
+ *
+ * Spans that actually look like LaTeX are left alone so equations from
+ * `preprocessLaTeX` still render. Everything else is unwrapped: a short span
+ * becomes bold (the emphasis the model meant), a multi-block one just loses the
+ * delimiters, because bolding it would swallow the tables inside.
+ */
+export function neutralizeNonMathDollarSpans(text) {
+  const source = String(text || '');
+  if (!source.includes('$$')) return source;
+
+  const preserved = [];
+  let out = source.replace(/\$\$([\s\S]*?)\$\$/g, (match, inner) => {
+    if (spanIsRealMath(inner)) {
+      preserved.push(match);
+      return `\uE000MATH${preserved.length - 1}\uE000`;
+    }
+    const body = inner.trim();
+    if (!body) return '';
+    return NOT_MATH_STRUCTURE.test(inner) || body.length > 200 ? body : `**${body}**`;
+  });
+
+  // An odd count leaves one `$$` dangling, and remark-math would open a math
+  // span that swallows the rest of the chunk. Escape it to render literally.
+  out = out.replace(/\$\$/g, '\\$\\$');
+  return out.replace(/\uE000MATH(\d+)\uE000/g, (_, index) => preserved[Number(index)]);
+}
+
+/**
  * Tightens bold and italic markers by removing internal spaces and converts them
  * to HTML tags as a safety net for non-standard markdown output.
  */
@@ -533,6 +588,36 @@ export function normalizeMarkdownFormatting(text, options = {}) {
     .replace(/<\s*(strong|b)\s*>([\s\S]*?)<\s*\/\s*\1\s*>/gi, '**$2**')
     .replace(/<\s*(em|i)\s*>([\s\S]*?)<\s*\/\s*\1\s*>/gi, '*$2*')
     .replace(/&nbsp;/gi, ' ');
+
+  // Repair tables the model collapsed onto ONE physical line (rows joined with
+  // "| |" and the |:---| separator inline) — they'd otherwise render as raw
+  // pipe text. Split leading prose from the table, then break rows apart.
+  t = t.split('\n').map((line) => {
+    if (!(/\|\s*:?-{2,}:?\s*\|/.test(line) && /\|\s+\|/.test(line))) return line;
+    const firstPipe = line.indexOf('|');
+    const prose = line.slice(0, firstPipe).trim();
+    const table = line.slice(firstPipe).replace(/\|\s+\|\s*/g, '|\n|');
+    return (prose ? `${prose}\n\n` : '') + table;
+  }).join('\n');
+
+  // Drop authorship/date metadata table rows the model copies from preset
+  // templates ("| **Prepared By** | JuriNex … |", "| **Date** | 04 October 2024 |").
+  // A chronology HEADER row ("| Date | Event |") has no digits, so it survives.
+  t = t
+    .replace(/^\|\s*\*{0,2}\s*(prepared\s+(by|for)|generated\s+on)\b[^\n]*$/gim, '')
+    .replace(/^\|\s*\*{0,2}\s*date\s*\*{0,2}\s*\|[^|\n]*\d{4}[^|\n]*\|?\s*$/gim, '')
+    // Removing rows can leave blank lines inside a table — rejoin the rows.
+    .replace(/(\|[ \t]*)\n[ \t]*\n+([ \t]*\|)/g, '$1\n$2');
+
+  // Inline prose form: "**Prepared By:** LEXIS — … **Date:** 09 October 2024"
+  // (also plain, un-bolded). Strip the authorship segment up to the next
+  // metadata label / bold marker / line end, then any long-form date that
+  // follows a "Date:" label (template metadata style — legal facts use
+  // dd.mm.yyyy, which is untouched).
+  t = t
+    .replace(/\*{0,2}\s*Prepared\s+(?:By|For)\s*:?\s*\*{0,2}\s*(?:(?!\*\*|\n|\||Date\s*:)[^\n|])*/gi, '')
+    .replace(/\*{0,2}\s*Date\s*:?\s*\*{0,2}\s*\d{1,2}\s+[A-Z][a-z]+,?\s+\d{4}\.?/g, '')
+    .replace(/\*{0,2}\s*Date\s*:?\s*\*{0,2}\s*[A-Z][a-z]+\s+\d{1,2},\s*\d{4}\.?/g, '');
 
   // 0a. Collapse degenerate single-column "fragment tables" (one syllable per
   //     row) back into prose BEFORE the chronology/table converters run — they

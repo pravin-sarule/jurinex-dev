@@ -563,6 +563,7 @@ import {
   BellIcon,
   QuestionMarkCircleIcon,
   ChatBubbleLeftRightIcon,
+  GlobeAltIcon,
 } from '@heroicons/react/24/outline';
 import {
   FolderPlus,
@@ -809,6 +810,7 @@ const Sidebar = () => {
     { name: 'Citation Research', path: '/citation-research', icon: ScaleIcon },
     { name: 'ChatModel', path: '/chatmodel', icon: ChatBubbleLeftRightIcon },
     { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },
+    { name: 'Translation', path: '/translation', icon: GlobeAltIcon },
     // Temporarily hidden — restore by uncommenting:
     // { name: 'DeepSeek AI', icon: null, isDeepSeek: true },
     // { name: 'Document Drafting', path: '/draft-selection', icon: PencilSquareIcon },

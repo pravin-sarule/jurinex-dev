@@ -37,9 +37,33 @@ _NUMBERED_RE = re.compile(r"^\s*\d+[.)]\s+(.*)$")
 _HR_RE = re.compile(r"^\s*([-*_]\s*){3,}$")
 
 
+_COLLAPSED_TABLE_SEP_RE = re.compile(r"\|\s*:?-{2,}:?\s*\|")
+_META_ROW_RE = re.compile(r"^\|\s*\*{0,2}\s*(prepared\s+(by|for)|generated\s+on)\b[^\n]*$", re.I | re.M)
+_META_DATE_ROW_RE = re.compile(r"^\|\s*\*{0,2}\s*date\s*\*{0,2}\s*\|[^|\n]*\d{4}[^|\n]*\|?\s*$", re.I | re.M)
+
+
+def _repair_collapsed_tables(text: str) -> str:
+    """Split tables the model emitted on ONE physical line back into rows."""
+    out = []
+    for line in text.splitlines():
+        if _COLLAPSED_TABLE_SEP_RE.search(line) and re.search(r"\|\s+\|", line):
+            first_pipe = line.index("|")
+            prose = line[:first_pipe].strip()
+            table = re.sub(r"\|\s+\|\s*", "|\n|", line[first_pipe:])
+            out.append((prose + "\n\n" if prose else "") + table)
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _clean_answer_markdown(text: str) -> str:
     """Strip UI-only artifacts (ASCII banners, raw HTML tags) from an answer."""
     text = _BOX_BLOCK_RE.sub("", str(text or ""))
+    text = _repair_collapsed_tables(text)
+    text = _META_ROW_RE.sub("", text)
+    text = _META_DATE_ROW_RE.sub("", text)
+    # Removing metadata rows can leave blank lines inside a table — rejoin rows.
+    text = re.sub(r"(\|[ \t]*)\n[ \t]*\n+([ \t]*\|)", r"\1\n\2", text)
     lines = []
     for line in str(text or "").splitlines():
         stripped = _BOX_CHARS_RE.sub(" ", line) if _BOX_CHARS_RE.search(line) else line

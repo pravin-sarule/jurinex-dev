@@ -402,6 +402,25 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GEMMA_NON_STREAM_TIMEOUT_S"),
     )
     anthropic_api_key: str = Field(default="", validation_alias=AliasChoices("ANTHROPIC_API_KEY"))
+    # ── Z.AI Translation Agent ────────────────────────────────────────────────
+    # Key for https://api.z.ai (z.ai/manage-apikey/apikey-list). Empty = translation disabled.
+    zai_api_key: str = Field(default="", validation_alias=AliasChoices("ZAI_API_KEY", "Z_AI_API_KEY"))
+    zai_api_base_url: str = Field(
+        default="https://api.z.ai/api/v1",
+        validation_alias=AliasChoices("ZAI_API_BASE_URL"),
+    )
+    # Reflection / COT strategies run multi-pass server-side, so allow long calls.
+    zai_translation_timeout_s: float = Field(
+        default=180.0,
+        validation_alias=AliasChoices("ZAI_TRANSLATION_TIMEOUT_S"),
+    )
+    # Concurrent Z.AI calls per document-translation job (mirrors
+    # OCR_PARALLEL_WORKERS for the Document AI batch pool). Raise only if the
+    # Z.AI account's rate limit allows it — 429s are retried but waste time.
+    zai_translation_concurrency: int = Field(
+        default=12,
+        validation_alias=AliasChoices("ZAI_TRANSLATION_CONCURRENCY"),
+    )
     deepseek_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("DEEPSEEK_API_KEY", "Deepseek_API_KEY"),
@@ -440,14 +459,21 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("KIMI_THINKING_ENABLED"),
     )
-    # Cap on reasoning tokens when thinking IS enabled. Moonshot honours this
-    # (budget 500 → 264-334 reasoning tokens measured, vs ~490 uncapped).
+    # Reasoning-token budget when thinking IS enabled. Moonshot treats this as a HINT,
+    # NOT a hard cap: measured on a real ~350-word legal question, reasoning ran
+    # 860-2,065 tokens whether the budget was 500 or 2,000, and one run consumed the
+    # entire max_tokens ceiling on reasoning alone (finish_reason=length, empty answer).
+    # Lower it to nudge the model, but do NOT rely on it to bound cost — the only hard
+    # controls are kimi_thinking_enabled=False and max_output_tokens.
     kimi_thinking_budget_tokens: int = Field(
         default=500,
         validation_alias=AliasChoices("KIMI_THINKING_BUDGET_TOKENS"),
     )
-    # Optional coarse control: "low" | "high" | "max" (kimi-k3 advertises these).
-    # Blank = don't send the field at all.
+    # Coarse reasoning control: "low" | "high" | "max". This is the lever that ACTUALLY
+    # reduces reasoning cost on models that cannot switch thinking off (measured on
+    # kimi-k3: 1,427 reasoning tokens at the "max" default vs 14 at "low").
+    # Blank = auto: the adapter sends "low" for K3 / K2.7-Code when
+    # kimi_thinking_enabled is False, and sends nothing at all when it is True.
     kimi_reasoning_effort: str = Field(
         default="",
         validation_alias=AliasChoices("KIMI_REASONING_EFFORT"),

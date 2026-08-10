@@ -1011,6 +1011,33 @@ const _draftLineAlign = (t0) => {
   return null;
 };
 
+/**
+ * Mint a chat-session id on the CLIENT, before the streaming request goes out.
+ *
+ * A brand-new chat used to send `session_id: undefined`, letting the server invent the
+ * id and hand it back in the `metadata` SSE event — which only arrives at the END of the
+ * stream. So while an answer was still streaming, the conversation had no id the UI could
+ * hold on to: opening another chat abandoned it, and there was nothing to navigate back
+ * to, so it vanished from history.
+ *
+ * Generating the id up-front (what ChatGPT and Claude do) makes the conversation
+ * addressable from the first token. The backend already honours a supplied id —
+ * folder_service._get_or_create_session() uses `id=key or uuid4()`.
+ */
+const mintSessionId = () => {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch { /* fall through to the manual builder below */ }
+  // RFC-4122 v4 fallback for browsers / non-secure origins without randomUUID.
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+};
+
 const ChatInterface = () => {
   const {
     selectedFolder,
@@ -1243,6 +1270,13 @@ const ChatInterface = () => {
   const streamThinkingRef = useRef('');
   const streamUpdateTimeoutRef = useRef(null);
   const streamReaderRef = useRef(null);
+  // Which chat session the in-flight stream belongs to. Lets us tell "user re-opened the
+  // chat that is currently answering" (keep showing live tokens) apart from "user moved
+  // to a different chat" (detach, so the answer stops bleeding into the wrong session).
+  const activeStreamSessionIdRef = useRef(null);
+  // Session ids this client generated that the server has not persisted yet. Fetching
+  // history for one 404s, so those fetches are skipped until the answer is saved.
+  const locallyMintedSessionsRef = useRef(new Set());
   // Monotonic token guarding fetchChatHistory against stale async resolutions. Each fetch
   // captures the current value before awaiting; if the token has since moved on (a newer
   // fetch started, or handleNewChat/handleSelectChatSession bumped it), the resolved fetch
@@ -1658,6 +1692,14 @@ const ChatInterface = () => {
       setForceSidebarCollapsed(false);
       return;
     }
+    // A session id minted on the CLIENT does not exist server-side until the answer
+    // finishes and is persisted. Asking for its history in the meantime 404s, which
+    // surfaced as a spurious "Failed to fetch chat history." on every new chat. The live
+    // stream already owns what's on screen, so there is simply nothing to fetch yet.
+    if (locallyMintedSessionsRef.current.has(sessionId)) {
+      console.log('[ChatInterface] fetchChatHistory: session not persisted yet, skipping fetch for', sessionId);
+      return;
+    }
     console.log('[ChatInterface] fetchChatHistory: Starting fetch for folder:', folderToFetch, 'sessionId:', sessionId);
     // Claim this fetch. If a newer fetch starts (or New Chat is clicked) before the await
     // below resolves, reqId will no longer match and we abort without touching state.
@@ -1736,6 +1778,18 @@ const ChatInterface = () => {
       }
     } catch (err) {
       if (reqId !== fetchHistoryReqRef.current) return;
+      const status = err?.response?.status ?? err?.status;
+      if (status === 404) {
+        // The session simply isn't on the server (yet): its answer is still generating,
+        // or it was deleted. Neither warrants an alarming toast — render it as empty.
+        console.log('[ChatInterface] fetchChatHistory: session not found, showing empty:', sessionId);
+        setCurrentChatHistory([]);
+        setSelectedMessageId(null);
+        setHasResponse(false);
+        setHasAiResponse(false);
+        setForceSidebarCollapsed(false);
+        return;
+      }
       console.error("[ChatInterface] fetchChatHistory: Error fetching chats:", err);
       console.error("[ChatInterface] fetchChatHistory: Error details:", err.response?.data || err.message);
       setChatError(stringToChatErrorDisplay('Failed to fetch chat history.'));
@@ -2060,6 +2114,48 @@ const ChatInterface = () => {
     setPendingQuestion('');
   };
 
+  /**
+   * Detach this UI from an in-flight answer WITHOUT stopping it.
+   *
+   * Cancelling the reader closes only our end of the SSE connection. The backend runs
+   * `_event_generator()` as a detached task, so the answer still finishes and is saved to
+   * chat history under the session id the client claimed before streaming began — which
+   * is why this is safe to call whenever the user navigates between conversations.
+   *
+   * Without it, an in-flight stream kept writing into the SHARED streaming state
+   * (animatedResponseContent / pendingQuestion / isGenerating / streamBufferRef), so the
+   * previous answer visibly bled into whichever chat you opened next.
+   */
+  const detachActiveStream = () => {
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      clearTimeout(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    if (streamUpdateTimeoutRef.current) {
+      clearTimeout(streamUpdateTimeoutRef.current);
+      streamUpdateTimeoutRef.current = null;
+    }
+    if (streamReaderRef.current) {
+      // Server-side generation continues; we simply stop consuming it here.
+      streamReaderRef.current.cancel().catch(() => { });
+      streamReaderRef.current = null;
+    }
+    activeStreamIsDeepRef.current = false;
+    // Stop treating this session as "unfetchable". The server finishes and persists it,
+    // so a later visit must be allowed to load it (a 404 in the meantime renders empty).
+    if (activeStreamSessionIdRef.current) {
+      locallyMintedSessionsRef.current.delete(activeStreamSessionIdRef.current);
+    }
+    activeStreamSessionIdRef.current = null;
+    streamBufferRef.current = '';
+    setIsAnimatingResponse(false);
+    setAnimatedResponseContent('');
+    setIsGenerating(false);
+    setLoadingChat(false);
+    setPendingQuestion('');
+  };
+
   useEffect(() => {
     return () => {
       if (animationFrameRef.current) {
@@ -2146,6 +2242,16 @@ const ChatInterface = () => {
       // Do not send the full preset text in `question` ? DB and UI store the prompt name only.
 
       const token = getAuthToken();
+      // Same reasoning as the main chat path: claim the session id up-front so an
+      // analysis abandoned mid-stream is still reachable in history afterwards.
+      const sessionForRequest = currentSessionId || mintSessionId();
+      activeStreamSessionIdRef.current = sessionForRequest;
+      if (!currentSessionId) {
+        // Not on the server until this answer is persisted — see fetchChatHistory.
+        locallyMintedSessionsRef.current.add(sessionForRequest);
+        setSelectedChatSessionId(sessionForRequest);
+        setNewChatMode(false);
+      }
       const response = await fetch(`${DOCS_BASE_URL}/${encodeURIComponent(folder)}/intelligent-chat/stream`, {
         method: 'POST',
         headers: {
@@ -2157,7 +2263,7 @@ const ChatInterface = () => {
           question: '',
           prompt_label: promptLabel,
           secret_id: secretId,
-          session_id: currentSessionId,
+          session_id: sessionForRequest,
           llm_name: 'gemini',
           learning_mode: learningModeActive,
           research_mode: researchModeActive,
@@ -2190,7 +2296,9 @@ const ChatInterface = () => {
       streamReaderRef.current = reader;
       const decoder = new TextDecoder();
       let buffer = '';
-      let newSessionId = currentSessionId;
+      // Default to the id we just claimed, not the (possibly null) incoming one, so the
+      // session stays correct even if the stream ends before `metadata` arrives.
+      let newSessionId = sessionForRequest;
       let finalMetadata = null;
       let messageId = Date.now().toString();
       let streamHadError = false;
@@ -2430,8 +2538,11 @@ const ChatInterface = () => {
               }
             } else if (parsed.type === 'done') {
               finalMetadata = { ...finalMetadata, ...parsed };
+              // Persisted server-side now, so history fetches for it will succeed.
+              locallyMintedSessionsRef.current.delete(sessionForRequest);
               const doneSid = finalMetadata.session_id || finalMetadata.sessionId;
               if (doneSid) {
+                locallyMintedSessionsRef.current.delete(doneSid);
                 newSessionId = doneSid;
                 setSelectedChatSessionId(doneSid);
               }
@@ -2634,6 +2745,17 @@ const ChatInterface = () => {
         }
 
         const token = getAuthToken();
+        // Claim an id for this conversation BEFORE streaming starts, and select it
+        // immediately, so navigating away mid-answer still leaves a session to come
+        // back to (the server persists under this same id even if the client leaves).
+        const sessionForRequest = selectedChatSessionId || mintSessionId();
+        activeStreamSessionIdRef.current = sessionForRequest;
+        if (!selectedChatSessionId) {
+          // Not on the server until this answer is persisted — see fetchChatHistory.
+          locallyMintedSessionsRef.current.add(sessionForRequest);
+          setSelectedChatSessionId(sessionForRequest);
+          setNewChatMode(false);
+        }
         const response = await fetch(`${DOCS_BASE_URL}/${encodeURIComponent(folderName)}/intelligent-chat/stream`, {
           method: 'POST',
           headers: {
@@ -2644,7 +2766,7 @@ const ChatInterface = () => {
           body: JSON.stringify({
             question: questionText,
             ...(displayLabel ? { prompt_label: displayLabel } : {}),
-            session_id: selectedChatSessionId || undefined,
+            session_id: sessionForRequest,
             llm_name: 'gemini',
             learning_mode: learningModeActive,
             research_mode: researchModeActive,
@@ -2934,8 +3056,11 @@ const ChatInterface = () => {
                 }
               } else if (parsed.type === 'done') {
                 finalMetadata = parsed;
+                // Persisted server-side now, so history fetches for it will succeed.
+                locallyMintedSessionsRef.current.delete(sessionForRequest);
                 const doneSessionId = finalMetadata.session_id || finalMetadata.sessionId;
                 if (doneSessionId) {
+                  locallyMintedSessionsRef.current.delete(doneSessionId);
                   newSessionId = doneSessionId;
                   setSelectedChatSessionId(doneSessionId);
                 }
@@ -3218,6 +3343,9 @@ const ChatInterface = () => {
   };
 
   const handleNewChat = () => {
+    // Stop rendering the previous answer here — it keeps generating server-side and
+    // lands in its own session's history.
+    detachActiveStream();
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
@@ -3245,9 +3373,16 @@ const ChatInterface = () => {
   };
 
   const handleSelectChatSession = useCallback((sessionId) => {
+    // Moving to a DIFFERENT chat while one is still answering: detach from that stream so
+    // its tokens stop rendering here. It finishes server-side and is saved to its own
+    // session. Re-opening the chat that is currently answering keeps its live tokens.
+    if (activeStreamSessionIdRef.current && activeStreamSessionIdRef.current !== sessionId) {
+      detachActiveStream();
+    }
     setSelectedChatSessionId(sessionId);
     setHasAiResponse(true);
     setNewChatMode(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setSelectedChatSessionId, setHasAiResponse]);
 
   const handleDeleteSession = useCallback(async (sessionId) => {
