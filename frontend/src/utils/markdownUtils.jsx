@@ -287,6 +287,61 @@ export function preprocessLaTeX(text) {
 }
 
 /**
+ * Structure that never appears inside a real display-math span: a blank line, a
+ * table row or delimiter, an HTML tag, a markdown heading, or a bold marker.
+ * Any of these means the `$$` pair fences prose the model mis-delimited.
+ */
+const NOT_MATH_STRUCTURE =
+  /\n\s*\n|\n\s*\||\|\s*:?-{2,}|<\/?[a-zA-Z][^>]*>|\*\*|(?:^|\n)\s{0,3}#{1,6}\s/;
+
+/**
+ * Signals that genuinely indicate LaTeX. `\_` and `\\` are markdown escapes, so
+ * a backslash only counts when followed by two or more letters (`\frac`, `\pi`).
+ *
+ * A bare `_` is deliberately NOT a signal. That was the old rule, and it broke
+ * every drafted legal document: signature rules ("Signature: ______") and
+ * escaped underscores made `$$ Society Seal $$` look like math, so KaTeX tried
+ * to parse a whole table and failed on the first `&` ("TENANT'S EMPLOYMENT &
+ * INCOME VERIFICATION"), rendering the answer as red unstructured text.
+ */
+const LATEX_SIGNAL = /\\(?![_\\])[a-zA-Z]{2,}|[\^_]\{|[A-Za-z0-9)\]}]\^[A-Za-z0-9(]/;
+
+const spanIsRealMath = (inner) =>
+  !NOT_MATH_STRUCTURE.test(inner) && LATEX_SIGNAL.test(inner);
+
+/**
+ * Models wrap seals, placeholders and emphasis in `$$ … $$` ("$$ Society Seal")
+ * despite prompt rules forbidding it. remark-math reads `$$` as display math and
+ * swallows everything up to the next `$$` — tables, headings and all — into one
+ * broken KaTeX span, which renders red with literal `|` and `<strong>` showing.
+ *
+ * Spans that actually look like LaTeX are left alone so equations from
+ * `preprocessLaTeX` still render. Everything else is unwrapped: a short span
+ * becomes bold (the emphasis the model meant), a multi-block one just loses the
+ * delimiters, because bolding it would swallow the tables inside.
+ */
+export function neutralizeNonMathDollarSpans(text) {
+  const source = String(text || '');
+  if (!source.includes('$$')) return source;
+
+  const preserved = [];
+  let out = source.replace(/\$\$([\s\S]*?)\$\$/g, (match, inner) => {
+    if (spanIsRealMath(inner)) {
+      preserved.push(match);
+      return `\uE000MATH${preserved.length - 1}\uE000`;
+    }
+    const body = inner.trim();
+    if (!body) return '';
+    return NOT_MATH_STRUCTURE.test(inner) || body.length > 200 ? body : `**${body}**`;
+  });
+
+  // An odd count leaves one `$$` dangling, and remark-math would open a math
+  // span that swallows the rest of the chunk. Escape it to render literally.
+  out = out.replace(/\$\$/g, '\\$\\$');
+  return out.replace(/\uE000MATH(\d+)\uE000/g, (_, index) => preserved[Number(index)]);
+}
+
+/**
  * Tightens bold and italic markers by removing internal spaces and converts them
  * to HTML tags as a safety net for non-standard markdown output.
  */

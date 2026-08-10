@@ -14,6 +14,7 @@ import {
   ensureTableSeparators,
   markdownTableComponents,
   markdownRehypePlugins,
+  neutralizeNonMathDollarSpans,
   normalizeMarkdownFormatting,
   splitMarkdownIntoRenderChunks,
 } from '../../utils/markdownUtils';
@@ -145,22 +146,6 @@ const deepResearchMarkdownComponents = {
   a: DeepResearchAnchor,
   img: () => null,
 };
-
-/**
- * Models sometimes wrap citations or emphasis in $$ ... $$ ("$$ Appeal No.
- * 9/2016 Judgment $$") despite prompt rules forbidding it. remark-math reads
- * $$ as display math and swallows the surrounding structure into one giant
- * broken KaTeX span — the whole answer then renders as red, unstructured
- * text with literal ## and <strong>. Convert prose-looking $$ spans to bold;
- * only spans that actually look like LaTeX (backslash commands, ^ _ { })
- * stay math, so genuine equations from the backend's LaTeX conversion
- * still render.
- */
-const LATEX_LIKE = /(\\[a-zA-Z]+)|[\^_{}]/;
-const neutralizeNonMathDollarSpans = (text) =>
-  String(text || '').replace(/\$\$([\s\S]*?)\$\$/g, (match, inner) =>
-    LATEX_LIKE.test(inner) ? match : `**${inner.trim()}**`
-  );
 
 /** Canonical URLs the server fetched and validated for this answer. */
 function validatedUrlSet(citations) {
