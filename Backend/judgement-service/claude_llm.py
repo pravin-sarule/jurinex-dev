@@ -38,6 +38,30 @@ TModel = TypeVar("TModel", bound=BaseModel)
 _client = None
 _client_failed = False
 
+# Billing circuit-breaker: when Anthropic rejects a call because the credit
+# balance is exhausted, retrying is pointless — every stage would burn two
+# doomed round-trips per call before its Gemini fallback. One billing error
+# opens the breaker for a cooldown window during which claude_available()
+# reports False and everything routes straight to Gemini.
+_BILLING_COOLDOWN_SECONDS = 300
+_billing_blocked_until = 0.0
+
+
+def _is_billing_error(exc: Exception) -> bool:
+    return "credit balance is too low" in str(exc).lower()
+
+
+def _trip_billing_breaker() -> None:
+    global _billing_blocked_until
+    import time
+    if time.time() >= _billing_blocked_until:
+        logger.error(
+            "[claude] Anthropic credit balance exhausted — routing ALL Claude "
+            "stages to Gemini for %ds (top up at console.anthropic.com; issue "
+            "spotting and query generation are noticeably weaker on the "
+            "fallback)", _BILLING_COOLDOWN_SECONDS)
+    _billing_blocked_until = time.time() + _BILLING_COOLDOWN_SECONDS
+
 # output_model.__name__ -> 1 (messages.parse), 2 (raw all-required schema),
 # 3 (plain JSON prompting). GroundsExtractResult is pre-seeded at tier 2:
 # its schema is known to exceed the grammar limit, so the doomed tier-1
@@ -65,6 +89,10 @@ def _get_client():
 
 
 def claude_available() -> bool:
+    if _billing_blocked_until:
+        import time
+        if time.time() < _billing_blocked_until:
+            return False
     return _get_client() is not None
 
 
@@ -184,6 +212,10 @@ async def claude_parse(system: str, user: str, output_model: type[TModel],
         return await asyncio.to_thread(_parse_once, system, user, output_model,
                                        max_tokens, model)
     except Exception as first_error:
+        if _is_billing_error(first_error):
+            # Not a transient failure — retrying burns another doomed call.
+            _trip_billing_breaker()
+            return None
         logger.warning("[claude] %s call failed (%s) — retrying once",
                        output_model.__name__, first_error)
         try:
@@ -193,6 +225,8 @@ async def claude_parse(system: str, user: str, output_model: type[TModel],
             return await asyncio.to_thread(_parse_once, system, retry_user,
                                            output_model, max_tokens, model)
         except Exception as second_error:
+            if _is_billing_error(second_error):
+                _trip_billing_breaker()
             logger.error("[claude] %s call failed twice (%s) — Gemini fallback",
                          output_model.__name__, second_error)
             return None

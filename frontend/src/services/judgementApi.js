@@ -23,12 +23,24 @@ function getAuthHeader() {
   return headers;
 }
 
+// A network-level failure surfaces as an opaque TypeError ("Failed to
+// fetch") — translate it so users know the service was unreachable (down,
+// restarting, or the request was cut off) rather than a data problem.
+const NETWORK_ERROR_MSG =
+  'Could not reach the research service — it may be restarting or the '
+  + 'request was cut off. Nothing was lost; please try again in a moment.';
+
 async function postJson(path, body) {
-  const response = await fetch(`${JUDGEMENT_SERVICE_URL}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
-    body: JSON.stringify(body),
-  });
+  let response;
+  try {
+    response = await fetch(`${JUDGEMENT_SERVICE_URL}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error(NETWORK_ERROR_MSG);
+  }
   if (!response.ok) {
     await throwIfQuotaResponse(response, 'Judgement service request failed');
     let detail = `Judgement service error (${response.status})`;
@@ -94,11 +106,16 @@ export const judgementApi = {
     form.append('mode', mode);
     if (title) form.append('title', title);
     form.append('queryStyle', queryStyle);
-    const response = await fetch(`${JUDGEMENT_SERVICE_URL}/api/v1/analyze/upload`, {
-      method: 'POST',
-      headers: { ...getAuthHeader() },
-      body: form,
-    });
+    let response;
+    try {
+      response = await fetch(`${JUDGEMENT_SERVICE_URL}/api/v1/analyze/upload`, {
+        method: 'POST',
+        headers: { ...getAuthHeader() },
+        body: form,
+      });
+    } catch {
+      throw new Error(NETWORK_ERROR_MSG);
+    }
     if (!response.ok) {
       await throwIfQuotaResponse(response, 'Document analysis failed');
       let detail = `Document analysis failed (${response.status})`;

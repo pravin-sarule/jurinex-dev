@@ -132,13 +132,21 @@ def _budget_case_text(raw_text: str, budget: int) -> str:
             + text[-(budget - head):])
 
 
-def _gen_config(temperature: float) -> genai_types.GenerateContentConfig:
+def _gen_config(temperature: float,
+                model: str | None = None) -> genai_types.GenerateContentConfig:
     # Determinism (user requirement: the same case must yield the same
     # issues, queries and judgments on every run): temperature is forced to
     # 0 regardless of the per-agent request. The argument is kept so
     # per-agent tuning can return by deleting one line.
     del temperature
-    return genai_types.GenerateContentConfig(temperature=0.0)
+    config = genai_types.GenerateContentConfig(temperature=0.0)
+    if model and model.startswith("gemini-3"):
+        # Gemini 3 models think at a HIGH level by default; LOW keeps the
+        # structured-extraction quality while cutting latency substantially
+        # (user directive 2026-08-10 — these are the primary analysis
+        # models now that Claude is off for analysis).
+        config.thinking_config = genai_types.ThinkingConfig(thinking_level="low")
+    return config
 
 
 # ─── Agentic Document Context Service (Section 5) ────────────────────────────
@@ -167,12 +175,8 @@ def build_classify_agent() -> LlmAgent:
     )
 
 
-def build_extract_agent() -> LlmAgent:
-    return LlmAgent(
-        name="context_extract",
-        model=get_settings().gemini_model,
-        description="Extracts structured case context from the document.",
-        instruction=(
+def build_extract_agent(document_type: str | None = None) -> LlmAgent:
+    instruction = (
             "You are extracting structured case context from an Indian legal document "
             "for downstream precedent search. The document type is: {doc_classification}.\n\n"
             "Extract:\n"
@@ -188,7 +192,16 @@ def build_extract_agent() -> LlmAgent:
             "2. If something is unknown, leave that field as an empty string — do NOT guess.\n"
             "3. Copy section numbers and statute names EXACTLY as written in the source.\n"
             "Return strict JSON matching the schema."
-        ),
+    )
+    if document_type:
+        # Standalone fast path: the type is already known — inject it as a
+        # literal so this agent needs no session state from a classifier.
+        instruction = instruction.replace("{doc_classification}", document_type)
+    return LlmAgent(
+        name="context_extract",
+        model=get_settings().gemini_model,
+        description="Extracts structured case context from the document.",
+        instruction=instruction,
         generate_content_config=_gen_config(0.1),
         output_schema=CaseContextDraft,
         output_key="case_context_draft",
@@ -264,7 +277,7 @@ def build_issue_split_agent() -> LlmAgent:
             "and perspective ('petitioner'/'respondent'/'neutral'). Return strict "
             "JSON matching the schema."
         ),
-        generate_content_config=_gen_config(0.25),
+        generate_content_config=_gen_config(0.25, get_settings().gemini_fallback_model),
         output_schema=IssueList,
         output_key="issues",
         disallow_transfer_to_parent=True,
@@ -356,7 +369,7 @@ def build_keyword_extract_agent(style: str = "simple") -> LlmAgent:
             "generic filler like 'criminal case' or 'court proceedings'.\n"
             "Return strict JSON matching the schema."
         ),
-        generate_content_config=_gen_config(0.25),
+        generate_content_config=_gen_config(0.25, get_settings().gemini_keyword_fallback_model),
         output_schema=KeywordSet,
         output_key="keywords",
         disallow_transfer_to_parent=True,
@@ -1046,7 +1059,7 @@ def build_grounds_extract_agent() -> LlmAgent:
         model=get_settings().gemini_fallback_model,
         description="Extracts the legal grounds pleaded in a filing.",
         instruction=GROUNDS_EXTRACTOR_SYSTEM,
-        generate_content_config=_gen_config(0.1),
+        generate_content_config=_gen_config(0.1, get_settings().gemini_fallback_model),
         output_schema=GroundsExtractResult,
         output_key="grounds_extract",
         disallow_transfer_to_parent=True,
@@ -1151,7 +1164,7 @@ def build_fresh_extract_agent() -> LlmAgent:
         model=get_settings().gemini_fallback_model,
         description="Formulates proposed grounds for a fresh, unfiled matter.",
         instruction=FRESH_CASE_SYSTEM,
-        generate_content_config=_gen_config(0.1),
+        generate_content_config=_gen_config(0.1, get_settings().gemini_fallback_model),
         output_schema=GroundsExtractResult,
         output_key="fresh_extract",
         disallow_transfer_to_parent=True,
@@ -1902,13 +1915,22 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
     session_id = sessions.new_session_id()
     _t0 = time.perf_counter()
 
-    out = await run_agent_once(
-        build_document_context_agent(), raw_text,
-        ["doc_classification", "case_context_draft"],
-    )
+    # Context stage, split for speed (was one SequentialAgent feeding the
+    # FULL stage-1 budget through TWO serial flash calls — ~47s on a 120k
+    # case). The document type is visible in the opening pages, and the
+    # context fields (parties, forum, prayer) live at the head and tail —
+    # neither call needs the whole material. Stage 1 below still reads the
+    # full budget, so issue/ground coverage is unchanged.
+    out = await run_agent_once(build_classify_agent(), raw_text[:8_000],
+                               ["doc_classification"])
     classification = DocClassification.model_validate(
         out.get("doc_classification") or {"document_type": "mixed"})
-    draft = CaseContextDraft.model_validate(out.get("case_context_draft") or {})
+    extract_input = _budget_case_text(raw_text,
+                                      get_settings().context_llm_input_chars)
+    ex = await run_agent_once(
+        build_extract_agent(classification.document_type), extract_input,
+        ["case_context_draft"])
+    draft = CaseContextDraft.model_validate(ex.get("case_context_draft") or {})
     context = verify_context_against_source(draft, source, classification.document_type)
     _t_ctx = time.perf_counter()
 
