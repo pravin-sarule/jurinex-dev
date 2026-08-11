@@ -486,9 +486,11 @@ export default function CitationResearchPanel() {
         researchMode: saved.researchMode || 'issues',
         groundsMeta: saved.groundsMeta || null,
       });
-      setSelectedIds(new Set((saved.suggestedIssues || []).map((i) => i.id)));
+      // Reopened sessions follow the same convention: nothing pre-selected.
+      setSelectedIds(new Set());
       setCustomIssues([]);
-      setQueryPicks({});
+      setQueryPicks(Object.fromEntries(
+        (saved.suggestedIssues || []).map((i) => [i.id, { selected: [], custom: [] }])));
       setQueryDrafts({});
       const issuesWithResults = (saved.issues || []).filter((i) => (i.results || []).length > 0);
       if (issuesWithResults.length > 0) {
@@ -643,9 +645,12 @@ export default function CitationResearchPanel() {
         // description steers which grounds and issues come back.
         : await judgementApi.analyzeUpload(files, caseText.trim(), researchMode, uploadTitle.trim(), queryStyle);
       setAnalysis(data);
-      setSelectedIds(new Set((data.suggestedIssues || []).map((i) => i.id)));
+      // Nothing pre-selected: the user consciously picks what to research;
+      // checking a ground ticks its whole query set (toggleIssue).
+      setSelectedIds(new Set());
       setCustomIssues([]);
-      setQueryPicks({});
+      setQueryPicks(Object.fromEntries(
+        (data.suggestedIssues || []).map((i) => [i.id, { selected: [], custom: [] }])));
       setQueryDrafts({});
       setSearchResponse(null);
       setStep('issues');
@@ -745,7 +750,13 @@ export default function CitationResearchPanel() {
       setAnalysis((prev) => (prev
         ? { ...prev, suggestedIssues: [...(prev.suggestedIssues || []), r.issue] }
         : prev));
+      // The user explicitly added this issue — select it with all its
+      // queries ticked, matching the check-a-ground convention.
       setSelectedIds((prev) => new Set([...prev, r.issue.id]));
+      setQueryPicks((prev) => ({
+        ...prev,
+        [r.issue.id]: { selected: [...(r.issue.queries || [])], custom: [] },
+      }));
       setCustomDraft('');
     } catch {
       setCustomIssues((prev) => [...prev, text]);
