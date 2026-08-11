@@ -78,6 +78,10 @@ const crypto = require('crypto');
 const { collectDeviceInfo, lookupGeoLocation } = require('../utils/deviceInfo');
 const { createAndSendOTP, verifyOTP, sendPasswordSetEmail } = require('../services/otpService');
 
+// ⚠️ TEMPORARY: skips email OTP on regular login (username/password only).
+// Set to false (or BYPASS_LOGIN_OTP=false in env) to restore OTP verification.
+const BYPASS_LOGIN_OTP = process.env.BYPASS_LOGIN_OTP !== 'false';
+
 // Device-session bookkeeping shared by every token-issuing path: enforce the
 // 3-device limit (oldest active session is signed out), record the new device's
 // IP/browser/OS, and resolve the IP's location in the background. Returns the
@@ -507,6 +511,40 @@ const login = async (req, res) => {
         success: true,
         message: 'First-time login detected. OTP sent to your email. Please verify to change your password.',
         email: user.email,
+      });
+    }
+
+    // ⚠️ TEMPORARY OTP BYPASS: issue the token directly after password check.
+    // Restore OTP by setting BYPASS_LOGIN_OTP=false (or removing this block).
+    if (BYPASS_LOGIN_OTP) {
+      const activeUser = await markUserActiveSession(user.id) || user;
+      const token = await createDeviceSession(req, activeUser);
+      console.log(`[AuthController] ⚠️ OTP bypass active - direct login for: ${email}`);
+
+      let professionalProfile;
+      try {
+        professionalProfile = await UserProfessionalProfile.findOrCreate(activeUser.id);
+      } catch (profileError) {
+        console.error('[AuthController] ⚠️ Error checking/creating professional profile:', profileError);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Login successful',
+        token,
+        user: {
+          id: activeUser.id,
+          username: activeUser.username,
+          email: activeUser.email,
+          role: activeUser.role,
+          is_blocked: activeUser.is_blocked,
+          account_type: activeUser.account_type,
+          approval_status: activeUser.approval_status,
+          first_login: activeUser.first_login,
+        },
+        professionalProfile: professionalProfile ? {
+          is_profile_completed: professionalProfile.is_profile_completed
+        } : null,
       });
     }
 

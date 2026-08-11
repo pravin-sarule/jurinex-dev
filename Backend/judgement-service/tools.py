@@ -11,6 +11,7 @@ never originate a citation.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import logging
 import math
@@ -602,6 +603,7 @@ class IndianKanoonClient:
                     logger.warning("[IK] HTTP %s for %s: %s", resp.status_code, path, resp.text[:200])
                     return None
                 self.auth_failed = False
+                _ik_count_billed(path)
                 return resp.json()
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 if attempt < settings.ik_max_retries:
@@ -621,6 +623,7 @@ class IndianKanoonClient:
         cache_key = f"ik:search:{hashlib.sha1(norm.encode()).hexdigest()}:{pagenum}"
         cached = cache.get_json(cache_key)
         if cached is not None:
+            _ik_count_cached()
             return cached
         data = await self._request("/search/", {"formInput": query, "pagenum": pagenum})
         docs = (data or {}).get("docs") or []
@@ -636,6 +639,7 @@ class IndianKanoonClient:
         # v2 cache key: samples carry docId dicts, not bare title strings.
         info = cache.get_json(f"ik:docinfo2:{doc_id}")
         if text is not None and info is not None:
+            _ik_count_cached()
             return text or None, info
         # maxcites/maxcitedby are REQUIRED for IK to include citeList /
         # citedbyList in the response — without them both come back empty.
@@ -679,6 +683,7 @@ class IndianKanoonClient:
         cache_key = f"ik:docmeta:{doc_id}"
         cached = cache.get_json(cache_key)
         if cached is not None:
+            _ik_count_cached()
             return cached
         data = await self._request(f"/docmeta/{doc_id}/") or {}
         meta = {k: strip_html(str(v)).strip() for k, v in data.items()
@@ -783,6 +788,82 @@ class IndianKanoonClient:
 
 
 ik_client = IndianKanoonClient()
+
+
+# ─── Indian Kanoon spend tracker (per search run) ────────────────────────────
+# Official rate card, INR per request — mirrored from the IK account page.
+IK_RATES_INR = {
+    "search": 0.50,       # /search/
+    "doc": 0.20,          # /doc/ (full judgment)
+    "docmeta": 0.02,      # /docmeta/
+    "docfragment": 0.05,  # /docfragment/ (unused by this pipeline)
+    "origdoc": 0.50,      # /origdoc/  (unused by this pipeline)
+}
+_IK_KIND_LABELS = [
+    ("search", "Search"),
+    ("doc", "Document"),
+    ("docmeta", "Document Metainfo"),
+    ("docfragment", "Document Fragment"),
+    ("origdoc", "Original Document"),
+]
+
+# ContextVar so concurrent runs never mix counts: child tasks (the per-issue
+# fan-out) inherit the context of the request that started the run.
+_ik_cost_tracker: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar(
+    "ik_cost_tracker", default=None)
+
+
+def ik_cost_start() -> dict:
+    """Begin tracking billed/cached IK calls for the current task tree."""
+    tracker: dict = {"billed": Counter(), "cached": 0}
+    _ik_cost_tracker.set(tracker)
+    return tracker
+
+
+def _ik_kind_for_path(path: str) -> str:
+    if path.startswith("/docmeta"):
+        return "docmeta"
+    if path.startswith("/docfragment"):
+        return "docfragment"
+    if path.startswith("/origdoc"):
+        return "origdoc"
+    if path.startswith("/doc"):
+        return "doc"
+    return "search"
+
+
+def _ik_count_billed(path: str) -> None:
+    tracker = _ik_cost_tracker.get()
+    if tracker is not None:
+        tracker["billed"][_ik_kind_for_path(path)] += 1
+
+
+def _ik_count_cached() -> None:
+    tracker = _ik_cost_tracker.get()
+    if tracker is not None:
+        tracker["cached"] += 1
+
+
+def ik_cost_log(tracker: dict, tag: str) -> None:
+    """Tabular IK spend summary for one completed run, at rate-card rates."""
+    billed: Counter = tracker["billed"]
+    total_calls = sum(billed.values())
+    total_cost = sum(IK_RATES_INR[kind] * count for kind, count in billed.items())
+    sep = "-" * 54
+    logger.info("[ik-cost] %s", sep)
+    logger.info("[ik-cost] Indian Kanoon API spend — %s", tag)
+    logger.info("[ik-cost] %-22s %6s %7s %10s", "Request Type", "Calls", "Rate", "Cost INR")
+    for kind, label in _IK_KIND_LABELS:
+        count = billed.get(kind, 0)
+        if count == 0 and kind in ("docfragment", "origdoc"):
+            continue  # endpoints this pipeline never calls
+        logger.info("[ik-cost] %-22s %6d %7.2f %10.2f",
+                    label, count, IK_RATES_INR[kind], IK_RATES_INR[kind] * count)
+    if tracker["cached"]:
+        logger.info("[ik-cost] %-22s %6d %7s %10.2f",
+                    "Cache hits (free)", tracker["cached"], "-", 0.0)
+    logger.info("[ik-cost] %-22s %6d %7s %10.2f", "TOTAL", total_calls, "", total_cost)
+    logger.info("[ik-cost] %s", sep)
 
 
 # ─── Embeddings + re-rank (Section 6) ────────────────────────────────────────

@@ -74,6 +74,8 @@ from tools import (
     forum_court_rank,
     good_law_signal,
     ik_client,
+    ik_cost_log,
+    ik_cost_start,
     is_forum_high_court,
     judged_band,
     keyword_signal,
@@ -2039,6 +2041,9 @@ async def run_issue_search(session_id: str, context: CaseContext,
     no bypass. Keywords generated at analyze time are reused here, after
     the user's per-issue query selection (checkboxes + own queries) is
     applied on top."""
+    # Per-run Indian Kanoon spend meter — the fan-out's child tasks inherit
+    # this context; the tabular summary logs when the judgement completes.
+    ik_tracker = ik_cost_start()
     keywords_map: dict[str, KeywordSet] = {}
     session = sessions.load(session_id) or {}
     for issue_id, dump in (session.get("issueKeywords") or {}).items():
@@ -2051,7 +2056,10 @@ async def run_issue_search(session_id: str, context: CaseContext,
     fanout_results = await issue_fanout(issues, context, keywords_map,
                                         curated_ids=curated_ids,
                                         query_style=session.get("queryStyle", "simple"))
-    return assemble_response(session_id, context, fanout_results)
+    response = assemble_response(session_id, context, fanout_results)
+    ik_cost_log(ik_tracker,
+                f"search run {session_id[:8]} ({len(issues)} issue(s))")
+    return response
 
 
 async def run_search_pipeline(raw_text: str, source_text: str | None = None,
