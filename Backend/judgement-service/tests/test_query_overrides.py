@@ -61,9 +61,11 @@ def test_none_overrides_is_a_no_op():
     assert out["1"].anchor_queries == _kw().anchor_queries
 
 
-def test_anchors_only_fanout_sends_no_contra_or_axis_queries(monkeypatch):
-    """Curated issues fetch with EXACTLY the user's queries: contra and
-    axis-term IK searches are not sent (axis terms still score locally)."""
+def test_fanout_sends_only_the_display_queries(monkeypatch):
+    """One IK call per display query, curated or not: contra and axis-term
+    searches are never sent when anchors exist (axis terms still score
+    locally); a keyword set with NO anchors falls back to axis terms so an
+    issue never silently fetches nothing."""
     import asyncio
 
     from tools import ik_client
@@ -77,7 +79,7 @@ def test_anchors_only_fanout_sends_no_contra_or_axis_queries(monkeypatch):
     monkeypatch.setattr(ik_client, "search", _fake_search)
 
     kw = _kw()
-    asyncio.run(ik_client.fanout_and_fetch(kw, anchors_only=True))
+    asyncio.run(ik_client.fanout_and_fetch(kw))
     assert len(sent) == len(kw.anchor_queries)
     assert all(any(anchor.split()[0].strip('"') in wire for wire in sent)
                for anchor in kw.anchor_queries)
@@ -86,5 +88,6 @@ def test_anchors_only_fanout_sends_no_contra_or_axis_queries(monkeypatch):
         assert "abuse of process" not in wire  # axis terms not sent
 
     sent.clear()
-    asyncio.run(ik_client.fanout_and_fetch(kw, anchors_only=False))
-    assert len(sent) > len(kw.anchor_queries)  # full fan-out unchanged
+    no_anchors = _kw().model_copy(update={"anchor_queries": [], "contra_queries": []})
+    asyncio.run(ik_client.fanout_and_fetch(no_anchors))
+    assert len(sent) == len(no_anchors.all_terms())  # degraded fallback

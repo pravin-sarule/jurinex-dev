@@ -19,6 +19,14 @@ import Swal from 'sweetalert2';
 import judgementApi from '../../services/judgementApi';
 import documentApi from '../../services/documentApi';
 import CitationReviewResults from './CitationReviewResults';
+import AdvancedSearchModal from './AdvancedSearchModal';
+import DOCTYPE_CATEGORIES from './ikDoctypes';
+
+// Court groups for the issues-step "choose courts" box — the court subset of
+// Indian Kanoon's document types (laws/others make no sense as precedent).
+const COURT_SCOPE_GROUPS = DOCTYPE_CATEGORIES.filter(
+  (cat) => ['sc', 'highcourts', 'districtcourts', 'tribunals'].includes(cat.key),
+);
 
 // Palette matches the app's light theme: slate text/borders, the brand
 // teal (#21C1B6 / hover #1AA49B) as accent, and tinted status colours
@@ -362,6 +370,18 @@ export default function CitationResearchPanel() {
   // Advanced search: opt-in Boolean AND/OR query generation. Off = the
   // standard keyword queries the system has always used.
   const [advancedSearch, setAdvancedSearch] = useState(false);
+  // Advanced Search popup: direct Indian Kanoon search with the user's own
+  // criteria (IK /advsearch mirror) — independent of the research pipeline.
+  const [advSearchOpen, setAdvSearchOpen] = useState(false);
+  // Court scope (issues-step Advanced search): restrict the run's IK queries
+  // court-wise. Nothing selected = the service's default coverage.
+  const [scopeSupreme, setScopeSupreme] = useState(false);
+  const [scopeCaseCourt, setScopeCaseCourt] = useState(false);
+  const [scopeCourts, setScopeCourts] = useState(new Set());
+  const [courtsOpen, setCourtsOpen] = useState(false);
+  // Date range for the run — every query gets fromdate:/todate: when set.
+  const [scopeFromDate, setScopeFromDate] = useState(''); // yyyy-mm-dd
+  const [scopeToDate, setScopeToDate] = useState('');
 
   // Description boxes grow with their content instead of scrolling inside.
   // height:auto first so shrinking works; scrollHeight then includes the
@@ -795,6 +815,12 @@ export default function CitationResearchPanel() {
         issueIds: [...selectedIds],
         customIssues,
         queryOverrides,
+        // Court scope boxes — sent only when the user restricted courts.
+        courtScope: (scopeSupreme || scopeCaseCourt || scopeCourts.size > 0)
+          ? { supremeCourt: scopeSupreme, caseCourt: scopeCaseCourt, courts: [...scopeCourts] }
+          : null,
+        fromdate: scopeFromDate,
+        todate: scopeToDate,
       });
       setSearchResponse(data);
       setStep('results');
@@ -816,6 +842,12 @@ export default function CitationResearchPanel() {
     setFiles([]);
     setUploadTitle('');
     setSelectedCaseId(null);
+    setScopeSupreme(false);
+    setScopeCaseCourt(false);
+    setScopeCourts(new Set());
+    setCourtsOpen(false);
+    setScopeFromDate('');
+    setScopeToDate('');
     try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* non-fatal */ }
   };
 
@@ -857,6 +889,8 @@ export default function CitationResearchPanel() {
             </div>
           </header>
 
+          <AdvancedSearchModal open={advSearchOpen} onClose={() => setAdvSearchOpen(false)} />
+
           <div className="grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_320px] lg:grid-rows-[minmax(0,1fr)] items-start lg:items-stretch lg:flex-1 lg:min-h-0">
             {/* ── Left column: bounded at lg — steps 1–2 scroll (the cases pane
                 flexes inside them); the Analyse section is pinned below and
@@ -867,26 +901,38 @@ export default function CitationResearchPanel() {
               {/* STEP 1 — choose a case (or upload) */}
               <StepLab n="1" title="Choose a case" note="or upload a document" />
 
-              <div role="tablist" className="inline-flex items-center gap-[3px] rounded-xl border border-[#E5ECEB] bg-white p-1 shadow-sm mb-3.5 shrink-0 lg:self-start">
-                {[
-                  { key: 'case', label: 'My cases', icon: BriefcaseIcon },
-                  { key: 'text', label: 'Upload document', icon: DocumentTextIcon },
-                ].map(({ key, label, icon: TabIcon }) => (
+              <div className="flex flex-wrap items-center gap-2.5 mb-3.5 shrink-0 lg:self-start">
+                <div role="tablist" className="inline-flex items-center gap-[3px] rounded-xl border border-[#E5ECEB] bg-white p-1 shadow-sm">
+                  {[
+                    { key: 'case', label: 'My cases', icon: BriefcaseIcon },
+                    { key: 'text', label: 'Upload document', icon: DocumentTextIcon },
+                  ].map(({ key, label, icon: TabIcon }) => (
+                    <button
+                      key={key}
+                      type="button"
+                      role="tab"
+                      aria-selected={inputMode === key}
+                      onClick={() => setInputMode(key)}
+                      className={`flex items-center gap-2 px-4 py-2 rounded-[9px] text-[length:calc(13px*var(--jnx-text-scale,1))] font-semibold transition-colors ${
+                        inputMode === key
+                          ? 'bg-[#0F1B21] text-white'
+                          : 'text-[#64757C] hover:bg-[#EFF4F3] hover:text-[#25353C]'
+                      }`}
+                    >
+                      <TabIcon className="h-[15px] w-[15px]" /> {label}
+                    </button>
+                  ))}
+                </div>
+                {/* Advanced Search popup trigger — direct Indian Kanoon search */}
+                <div className="inline-flex rounded-xl border border-[#E5ECEB] bg-white p-1 shadow-sm">
                   <button
-                    key={key}
                     type="button"
-                    role="tab"
-                    aria-selected={inputMode === key}
-                    onClick={() => setInputMode(key)}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-[9px] text-[length:calc(13px*var(--jnx-text-scale,1))] font-semibold transition-colors ${
-                      inputMode === key
-                        ? 'bg-[#0F1B21] text-white'
-                        : 'text-[#64757C] hover:bg-[#EFF4F3] hover:text-[#25353C]'
-                    }`}
+                    onClick={() => setAdvSearchOpen(true)}
+                    className="flex items-center gap-2 px-4 py-2 rounded-[9px] text-[length:calc(13px*var(--jnx-text-scale,1))] font-semibold text-[#0E8371] hover:bg-[#E9F9F5] transition-colors"
                   >
-                    <TabIcon className="h-[15px] w-[15px]" /> {label}
+                    <MagnifyingGlassIcon className="h-[15px] w-[15px]" /> Advanced Search
                   </button>
-                ))}
+                </div>
               </div>
 
               {inputMode === 'case' && (
@@ -1353,7 +1399,7 @@ export default function CitationResearchPanel() {
         <article
           key={issue.id}
           className={`bg-white border-[1.5px] rounded-[14px] flex flex-col overflow-hidden transition-all duration-200 hover:shadow-[0_2px_5px_rgba(15,27,33,0.04),0_10px_24px_-12px_rgba(15,27,33,0.12)] ${
-            active ? 'border-[#BFE9DF]' : 'border-[#E5ECEB] opacity-55'
+            active ? 'border-[#BFE9DF]' : 'border-[#E5ECEB]'
           }`}
         >
           {/* Head — clicking the label/title (or the tick) toggles selection */}
@@ -1635,6 +1681,158 @@ export default function CitationResearchPanel() {
               <button onClick={selectAllIssues} className="shrink-0 text-[length:calc(12px*var(--jnx-text-scale,1))] font-semibold text-[#0E8371] px-2 py-1 rounded-lg transition-colors hover:bg-[#E9F9F5]">
                 Select all
               </button>
+            )}
+          </div>
+
+          {/* Court scope — Advanced search: the three court boxes. The run's
+              IK queries carry doctypes: for exactly the ticked courts;
+              nothing ticked = default coverage (SC + High Courts + tribunals). */}
+          <div className="shrink-0">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2.5">
+              <button
+                type="button"
+                onClick={() => setScopeSupreme((v) => !v)}
+                aria-pressed={scopeSupreme}
+                className={`text-left rounded-[13px] border-[1.5px] px-[13px] py-[11px] transition-colors ${
+                  scopeSupreme ? 'border-[#3FC8B4] bg-[#F6FDFB]' : 'border-[#E5ECEB] bg-white hover:border-[#BFE9DF]'
+                }`}
+              >
+                <span className="flex items-start gap-2.5">
+                  <span className={`mt-px h-5 w-5 shrink-0 rounded-md border-[1.5px] flex items-center justify-center transition-colors ${
+                    scopeSupreme ? 'bg-[#0E8371] border-[#0E8371]' : 'bg-white border-[#D8E1E0]'
+                  }`}>
+                    {scopeSupreme && <CheckIcon strokeWidth={3.4} className="h-[11px] w-[11px] text-white" />}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-[length:calc(13px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21]">Supreme Court</span>
+                    <span className="block text-[length:calc(11px*var(--jnx-text-scale,1))] text-[#93A2A7] leading-snug">Judgments of the Supreme Court of India</span>
+                  </span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setScopeCaseCourt((v) => !v)}
+                aria-pressed={scopeCaseCourt}
+                className={`text-left rounded-[13px] border-[1.5px] px-[13px] py-[11px] transition-colors ${
+                  scopeCaseCourt ? 'border-[#3FC8B4] bg-[#F6FDFB]' : 'border-[#E5ECEB] bg-white hover:border-[#BFE9DF]'
+                }`}
+              >
+                <span className="flex items-start gap-2.5">
+                  <span className={`mt-px h-5 w-5 shrink-0 rounded-md border-[1.5px] flex items-center justify-center transition-colors ${
+                    scopeCaseCourt ? 'bg-[#0E8371] border-[#0E8371]' : 'bg-white border-[#D8E1E0]'
+                  }`}>
+                    {scopeCaseCourt && <CheckIcon strokeWidth={3.4} className="h-[11px] w-[11px] text-white" />}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-[length:calc(13px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21]">This case&apos;s court</span>
+                    <span className="block text-[length:calc(11px*var(--jnx-text-scale,1))] text-[#93A2A7] leading-snug truncate">
+                      {analysis?.caseContext?.forum || 'The High Court applicable to this case (all High Courts when undetectable)'}
+                    </span>
+                  </span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setCourtsOpen((v) => !v)}
+                aria-expanded={courtsOpen}
+                className={`text-left rounded-[13px] border-[1.5px] px-[13px] py-[11px] transition-colors ${
+                  scopeCourts.size > 0 ? 'border-[#3FC8B4] bg-[#F6FDFB]' : 'border-[#E5ECEB] bg-white hover:border-[#BFE9DF]'
+                }`}
+              >
+                <span className="flex items-start gap-2.5">
+                  <span className="mt-px h-5 w-5 shrink-0 rounded-md bg-[#EFF4F3] flex items-center justify-center">
+                    <ChevronRightIcon className={`h-[13px] w-[13px] text-[#64757C] transition-transform ${courtsOpen ? 'rotate-90' : ''}`} />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[length:calc(13px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21]">
+                      Choose courts
+                      {scopeCourts.size > 0 && (
+                        <em className="not-italic ml-1.5 px-1.5 py-px rounded-full bg-[#E9F9F5] border border-[#BFE9DF] text-[length:calc(10px*var(--jnx-text-scale,1))] font-bold text-[#0E8371]">{scopeCourts.size}</em>
+                      )}
+                    </span>
+                    <span className="block text-[length:calc(11px*var(--jnx-text-scale,1))] text-[#93A2A7] leading-snug">Pick any High Courts, district courts or tribunals</span>
+                  </span>
+                </span>
+              </button>
+
+              {/* 4 — date range: rides on every query as fromdate:/todate: */}
+              <div className={`rounded-[13px] border-[1.5px] px-[13px] py-[9px] transition-colors ${
+                (scopeFromDate || scopeToDate) ? 'border-[#3FC8B4] bg-[#F6FDFB]' : 'border-[#E5ECEB] bg-white'
+              }`}>
+                <span className="flex items-center justify-between mb-1">
+                  <span className="text-[length:calc(13px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21]">Date range</span>
+                  {(scopeFromDate || scopeToDate) && (
+                    <button
+                      type="button"
+                      onClick={() => { setScopeFromDate(''); setScopeToDate(''); }}
+                      className="text-[length:calc(10.5px*var(--jnx-text-scale,1))] font-bold text-[#0E8371] px-1.5 py-0.5 rounded-md hover:bg-[#3FC8B4]/15"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </span>
+                <span className="grid grid-cols-2 gap-1.5">
+                  {[
+                    { value: scopeFromDate, set: setScopeFromDate, label: 'From' },
+                    { value: scopeToDate, set: setScopeToDate, label: 'To' },
+                  ].map(({ value, set, label }) => (
+                    <label key={label} className="block">
+                      <span className="block mb-0.5 text-[length:calc(9.5px*var(--jnx-text-scale,1))] font-bold tracking-[0.07em] uppercase text-[#93A2A7]">{label}</span>
+                      <input
+                        type="date"
+                        value={value}
+                        onChange={(e) => set(e.target.value)}
+                        className="w-full bg-white border border-[#E5ECEB] rounded-[8px] px-2 py-1 text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#0F1B21] outline-none focus:border-[#3FC8B4]"
+                      />
+                    </label>
+                  ))}
+                </span>
+              </div>
+            </div>
+
+            {courtsOpen && (
+              <div className="mt-2 rounded-[13px] border border-[#E5ECEB] bg-white px-4 py-2.5 max-h-[300px] overflow-y-auto">
+                {COURT_SCOPE_GROUPS.map((cat) => {
+                  const allOn = cat.options.every(([v]) => scopeCourts.has(v));
+                  return (
+                    <div key={cat.key} className="py-2 border-b border-[#EFF4F3] last:border-b-0">
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <span className="text-[length:calc(10.5px*var(--jnx-text-scale,1))] font-bold tracking-[0.07em] uppercase text-[#64757C]">{cat.label}</span>
+                        <button
+                          type="button"
+                          onClick={() => setScopeCourts((prev) => {
+                            const next = new Set(prev);
+                            cat.options.forEach(([v]) => { if (allOn) next.delete(v); else next.add(v); });
+                            return next;
+                          })}
+                          className="text-[length:calc(10.5px*var(--jnx-text-scale,1))] font-bold text-[#0E8371] px-1.5 py-0.5 rounded-md hover:bg-[#E9F9F5]"
+                        >
+                          {allOn ? 'Uncheck all' : 'Check all'}
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-3 gap-y-1">
+                        {cat.options.map(([value, label]) => (
+                          <label key={value} className="flex items-center gap-2 cursor-pointer rounded-md px-1.5 py-1 hover:bg-[#F8FAFC]">
+                            <input
+                              type="checkbox"
+                              checked={scopeCourts.has(value)}
+                              onChange={() => setScopeCourts((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(value)) next.delete(value); else next.add(value);
+                                return next;
+                              })}
+                              className="h-3.5 w-3.5 rounded accent-[#0E8371]"
+                            />
+                            <span className="text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#475569] truncate">{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
 

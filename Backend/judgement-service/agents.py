@@ -68,19 +68,24 @@ from tools import (
     case_court_profile,
     citation_guardian,
     composite_score,
+    cost_totals,
     enforce_verifier_rules,
     fact_match_signal,
     find_pinpoint,
+    flush_usage_events,
     forum_court_rank,
     good_law_signal,
     ik_client,
-    ik_cost_log,
     ik_cost_start,
     is_forum_high_court,
     judged_band,
     keyword_signal,
+    llm_track_usage,
+    merge_cost_ledger,
     party_perspective,
     rerank,
+    run_cost_log,
+    shelf_present,
     statutory_shelf_patterns,
     to_ik_operators,
     verify_context_against_source,
@@ -694,12 +699,21 @@ line in United Bank of India v. Naresh Kumar if it appears in the text."""
 
 
 def build_judgment_verifier_agent() -> LlmAgent:
+    # thinking_budget=0 (user decision 2026-08-14): 2.5-flash THINKS by
+    # default and thinking bills as OUTPUT tokens across ~12 calls per
+    # issue — the deterministic enforce_verifier_rules layer is the real
+    # precision guard, so the verifier runs thinking-off. Guarded to
+    # 2.5-era models; Gemini 3 models use thinking_level (see _gen_config).
+    model = get_settings().gemini_model
+    config = _gen_config(0.1, model)
+    if model.startswith("gemini-2"):
+        config.thinking_config = genai_types.ThinkingConfig(thinking_budget=0)
     return LlmAgent(
         name="judgment_verifier",
-        model=get_settings().gemini_model,
+        model=model,
         description="Verifies whether ONE fetched judgment is usable for ONE issue.",
         instruction=JUDGMENT_VERIFIER_SYSTEM,
-        generate_content_config=_gen_config(0.1),
+        generate_content_config=config,
         output_schema=JudgmentVerification,
         output_key="judgment_verification",
         disallow_transfer_to_parent=True,
@@ -708,6 +722,93 @@ def build_judgment_verifier_agent() -> LlmAgent:
 
 
 _VERIFIER_DOC_BUDGET = 22000  # chars of judgment text per verification call
+
+
+# ─── Verifier fast path: direct Gemini call with CONTEXT CACHING ─────────────
+# The v3 verifier prompt (~5k tokens) is identical across every call of a
+# run (~12 per issue × all issues). Explicit context caching bills those
+# tokens once per TTL window at the cached rate instead of full price on
+# every call. Any failure degrades to the ADK agent path — never breaks.
+_VERIFIER_CACHE_TTL_S = 3600
+_verifier_cache: dict[str, tuple[str, float]] = {}  # model -> (name, expires)
+_verifier_cache_lock: asyncio.Lock | None = None
+_verifier_cache_failed = False
+_direct_client = None
+
+
+def _genai_direct():
+    global _direct_client
+    if _direct_client is None:
+        from google import genai
+        _direct_client = genai.Client(api_key=get_settings().google_api_key)
+    return _direct_client
+
+
+async def _verifier_cached_name(model: str) -> str | None:
+    """Create or reuse the cached verifier system prompt for `model`.
+    None disables the fast path (caching unsupported / API error)."""
+    global _verifier_cache_failed, _verifier_cache_lock
+    if _verifier_cache_failed:
+        return None
+    if _verifier_cache_lock is None:
+        _verifier_cache_lock = asyncio.Lock()
+    now = time.time()
+    name, expires = _verifier_cache.get(model, (None, 0.0))
+    if name and now < expires - 120:
+        return name
+    async with _verifier_cache_lock:
+        name, expires = _verifier_cache.get(model, (None, 0.0))
+        if name and now < expires - 120:
+            return name
+        try:
+            cache = await asyncio.to_thread(
+                _genai_direct().caches.create, model=model,
+                config=genai_types.CreateCachedContentConfig(
+                    system_instruction=JUDGMENT_VERIFIER_SYSTEM,
+                    ttl=f"{_VERIFIER_CACHE_TTL_S}s"))
+            _verifier_cache[model] = (cache.name, now + _VERIFIER_CACHE_TTL_S)
+            logger.info("[verifier] context cache ready (%s) — the system "
+                        "prompt now bills once per hour, not per call",
+                        cache.name)
+            return cache.name
+        except Exception as exc:
+            logger.warning("[verifier] context caching unavailable (%s) — "
+                           "plain per-call prompts instead", exc)
+            _verifier_cache_failed = True
+            return None
+
+
+async def _verify_direct_cached(message: str) -> JudgmentVerification | None:
+    """Verifier call outside ADK: cached system prompt + JSON schema +
+    thinking off. Returns None on ANY failure — the ADK path takes over."""
+    settings = get_settings()
+    if not settings.verifier_context_cache or not settings.google_api_key:
+        return None
+    model = settings.gemini_model
+    cache_name = await _verifier_cached_name(model)
+    if not cache_name:
+        return None
+    config = genai_types.GenerateContentConfig(
+        temperature=0.0,
+        cached_content=cache_name,
+        response_mime_type="application/json",
+        response_schema=JudgmentVerification,
+    )
+    if model.startswith("gemini-2"):
+        config.thinking_config = genai_types.ThinkingConfig(thinking_budget=0)
+    try:
+        resp = await asyncio.to_thread(
+            _genai_direct().models.generate_content,
+            model=model, contents=message, config=config)
+        llm_track_usage(model, getattr(resp, "usage_metadata", None),
+                        task="judgment_verifier")
+        parsed = getattr(resp, "parsed", None)
+        if isinstance(parsed, JudgmentVerification):
+            return parsed
+        return JudgmentVerification.model_validate_json(resp.text or "")
+    except Exception as exc:
+        logger.debug("[verifier] cached-path call failed (%s) — ADK fallback", exc)
+        return None
 
 
 async def verify_judgments(issue: Issue, context: CaseContext,
@@ -753,8 +854,23 @@ async def verify_judgments(issue: Issue, context: CaseContext,
     # verifier waves are the dominant slice of search wall time.
     semaphore = asyncio.Semaphore(get_settings().verifier_concurrency)
 
+    triage_skips = {"n": 0}
+
     async def _verify_one(cand: Candidate) -> tuple[str, JudgmentVerification | None]:
         text = cand.doc_text or ""
+        # PRE-TRIAGE (deterministic, free): the shelf gate is absolute — a
+        # judgment whose FULL text never mentions ANY of the issue's
+        # statutory anchors would be force-rejected AFTER the LLM call
+        # anyway (enforce_verifier_rules), so skip the paid verifier call
+        # and synthesize the identical reject. Pure-doctrine issues carry
+        # no patterns and skip nothing.
+        if shelf_patterns and text and not shelf_present(text, shelf_patterns):
+            triage_skips["n"] += 1
+            return cand.doc_id, JudgmentVerification(
+                verdict="reject", score=0, include_in_output=False,
+                reject_reason=("different statutory shelf — none of the issue's "
+                               "provisions appear in the judgment text "
+                               "(pre-triage, no verifier call spent)"))
         if len(text) > _VERIFIER_DOC_BUDGET:
             # keep the tail intact — the operative order lives there
             text = (text[:_VERIFIER_DOC_BUDGET - 9000]
@@ -776,6 +892,10 @@ async def verify_judgments(issue: Issue, context: CaseContext,
                     JUDGMENT_VERIFIER_SYSTEM, message, JudgmentVerification,
                     max_tokens=3000, model=settings.judgement_verifier_claude_model)
             if verdict is None:
+                # Fast path: direct Gemini call with the CACHED system
+                # prompt (billed once/hour, not per call). None → ADK path.
+                verdict = await _verify_direct_cached(message)
+            if verdict is None:
                 try:
                     out = await run_agent_once(build_judgment_verifier_agent(), message,
                                                ["judgment_verification"])
@@ -789,6 +909,10 @@ async def verify_judgments(issue: Issue, context: CaseContext,
                                                    issue.perspective, shelf_patterns)
 
     results = await asyncio.gather(*(_verify_one(c) for c in judged))
+    if triage_skips["n"]:
+        logger.info("[verifier] issue %s: %d/%d docs rejected by shelf "
+                    "pre-triage — no verifier tokens spent on them",
+                    issue.id, triage_skips["n"], len(judged))
     return {doc_id: v for doc_id, v in results if v is not None}
 
 
@@ -936,8 +1060,13 @@ async def run_agent_once(agent, message: str, output_keys: list[str]) -> dict[st
     runner = InMemoryRunner(agent=agent, app_name=_APP)
     session = await runner.session_service.create_session(app_name=_APP, user_id="pipeline")
     content = genai_types.Content(role="user", parts=[genai_types.Part(text=message[:_llm_budget()])])
+    # Cost meter: every model-response event carries usage_metadata — the
+    # run's tracker (contextvar) turns it into the [cost] table at run end.
+    model_name = str(getattr(agent, "model", "") or "gemini")
+    task_name = str(getattr(agent, "name", "") or "agent")
     async for _event in runner.run_async(user_id="pipeline", session_id=session.id, new_message=content):
-        pass
+        llm_track_usage(model_name, getattr(_event, "usage_metadata", None),
+                        task=task_name)
     session = await runner.session_service.get_session(
         app_name=_APP, user_id="pipeline", session_id=session.id)
     state = session.state if session else {}
@@ -1524,23 +1653,20 @@ async def generate_queries(issue: Issue, context: CaseContext,
 
 async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
                        exclude: set[str] | None = None,
-                       anchors_only: bool = False) -> dict[str, Any]:
+                       page_map: dict[str, int] | None = None) -> dict[str, Any]:
     """One complete fetch → rerank → verify → score round for one issue.
-    Returns {candidates, scored}; the caller decides whether to retry with
-    reformulated queries when nothing usable survives. anchors_only: the
-    user hand-picked this issue's queries — fetch with exactly those."""
+    ONE IK call per display query — the court filter (user's boxes, else
+    the env default) rides inside every query; repeat runs advance to the
+    next IK page via page_map."""
     settings = get_settings()
 
-    # IK fetch — union across anchor/contra/axis queries, dedupe, cap.
-    # The court the case itself points at (forum field, else the HC named
-    # in the case material — Maharashtra → Bombay HC) gets its own
-    # targeted anchor searches and top placement.
+    # RANKING only (no longer a fetch input): the case's own High Court
+    # still sorts first among the surfaced results.
     forum_profile = case_court_profile(
         context.forum, f"{context.procedural_history} {context.raw_case_summary}")
-    pool = await ik_client.fanout_and_fetch(
-        keywords, exclude=exclude,
-        forum_doctype=(forum_profile or {}).get("doctype"),
-        anchors_only=anchors_only)
+
+    pool = await ik_client.fanout_and_fetch(keywords, exclude=exclude,
+                                            page_map=page_map)
     if not pool:
         return {"candidates": {}, "scored": []}
 
@@ -1659,15 +1785,16 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
 async def _process_issue(issue: Issue, context: CaseContext,
                          pre_keywords: KeywordSet | None = None,
                          curated: bool = False,
-                         query_style: str = "simple") -> dict[str, Any]:
-    """Per-issue pipeline with automatic query reformulation: if the first
-    round yields NO usable judgment for this issue, a genuinely different
-    query set is generated (for this issue only) and one more round runs —
-    already-fetched documents are excluded, so only fresh candidates are
-    read. Still empty after the retry → honest empty list.
-    curated: the user checked/typed this issue's queries — round 1 fetches
-    with EXACTLY those; the reformulation retry (their queries found no
-    usable judgment) falls back to a full generated set."""
+                         query_style: str = "simple",
+                         page_map: dict[str, int] | None = None) -> dict[str, Any]:
+    """Per-issue pipeline — ONE fetch round, one IK call per display query
+    (total calls == total displayed queries, by user demand). There is NO
+    automatic reformulation retry: an empty round returns an honest empty
+    list; re-running the search advances every query to its next IK page,
+    and editing the queries is the user's call.
+    curated: the user checked/typed this issue's queries — they replaced
+    the generated anchors upstream (apply_query_overrides), so the fetch is
+    exactly their selection either way."""
     # Stage 2 — query generation (already done at analyze time for suggested
     # issues; generated live for custom/user-typed ones).
     keywords = pre_keywords if pre_keywords and pre_keywords.all_terms() \
@@ -1675,57 +1802,50 @@ async def _process_issue(issue: Issue, context: CaseContext,
     if not keywords.all_terms():
         logger.warning("[pipeline] issue %s produced no keywords — skipping fetch", issue.id)
         return {"issue": issue, "keywords": keywords, "candidates": {}, "scored": []}
+    if curated and not keywords.anchor_queries:
+        # The user unchecked EVERY query for this issue — zero IK calls
+        # (the axis-term fallback is for degraded generation, never for a
+        # deliberate empty selection).
+        logger.info("[pipeline] issue %s: user unchecked every query — nothing fetched",
+                    issue.id)
+        return {"issue": issue, "keywords": keywords, "candidates": {}, "scored": []}
 
-    round1 = await _issue_round(issue, context, keywords, anchors_only=curated)
-    if round1["scored"]:
-        return {"issue": issue, "keywords": keywords, **round1}
-
-    if curated:
-        # The user hand-picked EXACTLY these queries — never substitute a
-        # generated set behind their back. An honest empty tells them their
-        # selection found nothing usable; widening is their call.
-        logger.info("[pipeline] issue %s: curated queries found no usable judgment — "
-                    "honest empty, no auto-reformulation", issue.id)
-        return {"issue": issue, "keywords": keywords, **round1}
-
-    # No usable judgment — reformulate ONCE for this issue and fetch fresh.
-    tried = list(keywords.anchor_queries) + list(keywords.contra_queries) + keywords.all_terms()
-    logger.info("[pipeline] issue %s: no usable judgment — reformulating queries and retrying",
-                issue.id)
-    retry_keywords = await generate_queries(issue, context, failed_queries=tried,
-                                            style=query_style)
-    if not retry_keywords.all_terms():
-        return {"issue": issue, "keywords": keywords, **round1}
-    round2 = await _issue_round(issue, context, retry_keywords,
-                                exclude=set(round1["candidates"].keys()))
-    return {
-        "issue": issue,
-        "keywords": retry_keywords,
-        # Closed world: the guardian pool carries BOTH rounds' fetches.
-        "candidates": {**round1["candidates"], **round2["candidates"]},
-        "scored": round2["scored"],
-    }
+    round1 = await _issue_round(issue, context, keywords, page_map=page_map)
+    if not round1["scored"]:
+        logger.info("[pipeline] issue %s: no usable judgment this round — honest empty "
+                    "(re-run fetches the next IK page%s)", issue.id,
+                    ", curated" if curated else "")
+    return {"issue": issue, "keywords": keywords, **round1}
 
 
 async def issue_fanout(issues: list[Issue], context: CaseContext,
                        keywords_map: dict[str, KeywordSet] | None = None,
                        curated_ids: set[str] | None = None,
                        query_style: str = "simple",
+                       page_map: dict[str, dict[str, int]] | None = None,
                        ) -> list[dict[str, Any]]:
     """Dynamic-cardinality fan-out: one per-issue pipeline per issue, run
     concurrently. IK rate limiting is enforced inside the shared client
     semaphore, not here. One issue failing never kills the request.
     curated_ids: issues whose queries the user hand-picked — those fetch
-    with exactly their selected queries."""
+    with exactly their selected queries.
+    page_map: the session's page ledger, keyed PER ISSUE (issue id → {wire
+    query → last page}). Each issue advances only the pages IT has used: an
+    issue that never fetched a query starts at page one even when another
+    issue already used that query (whose page-one fetch then serves it from
+    cache, free). Sub-maps are created here and mutated in place."""
     keywords_map = keywords_map or {}
     curated_ids = curated_ids or set()
 
     async def _safe(issue: Issue) -> dict[str, Any]:
         t0 = time.perf_counter()
         try:
+            issue_pages = (page_map.setdefault(str(issue.id), {})
+                           if page_map is not None else None)
             result = await _process_issue(issue, context, keywords_map.get(str(issue.id)),
                                           curated=str(issue.id) in curated_ids,
-                                          query_style=query_style)
+                                          query_style=query_style,
+                                          page_map=issue_pages)
             logger.info("[timing] issue %s: %.1fs (%d candidates → %d results%s)",
                         issue.id, time.perf_counter() - t0,
                         len(result.get("candidates") or {}),
@@ -1916,6 +2036,8 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
     source = source_text or raw_text
     session_id = sessions.new_session_id()
     _t0 = time.perf_counter()
+    # Phase-level cost meter (models only here — analyze makes no IK calls).
+    cost_tracker = ik_cost_start()
 
     # Context stage, split for speed (was one SequentialAgent feeding the
     # FULL stage-1 budget through TWO serial flash calls — ~47s on a 120k
@@ -1999,7 +2121,15 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
         "researchMode": mode,
         "queryStyle": query_style,
         "groundsMeta": grounds_meta,
+        # Cumulative cost ledger: analyze is step one of the session's bill.
+        "costLedger": merge_cost_ledger(None, cost_tracker),
     })
+    run_cost_log(merge_cost_ledger(None, cost_tracker),
+                 f"END-TO-END session {session_id[:8]} — after analyze "
+                 f"({len(issues)} issue(s))", step=cost_tracker)
+    # Per-user billing ledger (citation_usage_events) — priced by the DB.
+    await asyncio.to_thread(flush_usage_events, cost_tracker,
+                            session_id=session_id, stage="analyze")
     return session_id, context, issues, grounds_meta
 
 
@@ -2025,7 +2155,7 @@ def apply_query_overrides(keywords_map: dict[str, KeywordSet],
                 cleaned.append(text)
         kw.anchor_queries = cleaned[:MAX_QUERIES_PER_ISSUE]
         # Curated = STRICT: the user's list is the WHOLE query set for this
-        # issue. Contra queries are neither fetched (anchors_only) nor kept —
+        # issue. Contra queries are neither fetched nor kept —
         # leaving them in made the results page show system queries the user
         # never selected ("3 queries used" against one ticked box).
         kw.contra_queries = []
@@ -2053,12 +2183,37 @@ async def run_issue_search(session_id: str, context: CaseContext,
             logger.warning("[pipeline] stored keywords for issue %s invalid — regenerating", issue_id)
     keywords_map = apply_query_overrides(keywords_map, query_overrides)
     curated_ids = {str(issue_id) for issue_id in (query_overrides or {})}
+    # Page ledger, PER ISSUE per query: an issue advances only the pages it
+    # has itself used (Run #1 → pagenum 0, Run #2 → pagenum 1 …); an issue
+    # that never ran a query starts at page one even when another issue
+    # already used the same query — that repeat page comes from cache, free.
+    # (Entries from the older flat {wire: page} shape are skipped.)
+    page_map: dict[str, dict[str, int]] = {}
+    for issue_key, sub in (session.get("ikQueryPages") or {}).items():
+        if isinstance(sub, dict):
+            page_map[str(issue_key)] = {str(w): int(p) for w, p in sub.items()}
     fanout_results = await issue_fanout(issues, context, keywords_map,
                                         curated_ids=curated_ids,
-                                        query_style=session.get("queryStyle", "simple"))
+                                        query_style=session.get("queryStyle", "simple"),
+                                        page_map=page_map)
     response = assemble_response(session_id, context, fanout_results)
-    ik_cost_log(ik_tracker,
-                f"search run {session_id[:8]} ({len(issues)} issue(s))")
+    # Fold this run into the session's cumulative ledger, but print THIS
+    # RUN's own bill as the table — the cumulative figures (analyze + every
+    # earlier run) read as "wrong API counts" when shown as the main table.
+    # The session lifetime total follows as one line.
+    cost_session = sessions.load(session_id) or {}
+    cost_session["ikQueryPages"] = page_map
+    cost_ledger = merge_cost_ledger(cost_session.get("costLedger"), ik_tracker)
+    cost_session["costLedger"] = cost_ledger
+    sessions.save(session_id, cost_session)
+    run_cost_log(ik_tracker,
+                 f"THIS SEARCH RUN — session {session_id[:8]} ({len(issues)} issue(s))")
+    ai_all, ik_all = cost_totals(cost_ledger)
+    logger.info("[cost] SESSION TOTAL so far (analyze + every run + reports): %.2f INR",
+                ai_all + ik_all)
+    # Per-user billing ledger (citation_usage_events) — priced by the DB.
+    await asyncio.to_thread(flush_usage_events, ik_tracker,
+                            session_id=session_id, stage="search_run")
     return response
 
 

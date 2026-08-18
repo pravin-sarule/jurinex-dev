@@ -178,3 +178,5 @@ Sonnet path exists) · `IK_DOCTYPES` · `IK_CANDIDATE_CAP=30` · `IK_FULL_DOC_TO
 
 Run: `.\venv\Scripts\python.exe -m uvicorn api:app --port 8005` · offline tests:
 `python -m pytest -q` (42, no network/LLM).
+
+

@@ -1,6 +1,7 @@
-﻿"""Per-issue reformulation retry: an issue with NO usable judgment gets a
-genuinely different query set and ONE fresh round; already-fetched docs are
-excluded; an issue that found results never triggers a retry."""
+"""Single-round policy: ONE fetch round per issue per run — one IK call per
+display query, NO automatic reformulation retry (total calls must equal the
+displayed query count). Empty rounds return honestly; re-running the search
+advances the per-query page ledger instead of regenerating queries."""
 
 import pytest
 
@@ -14,103 +15,89 @@ def _ctx() -> CaseContext:
 
 
 @pytest.mark.asyncio
-async def test_empty_issue_triggers_reformulated_retry(monkeypatch):
+async def test_empty_round_returns_honest_empty_without_reformulation(monkeypatch):
     issue = Issue(id=1, issue="Whether the FIR is liable to be quashed?")
-    first_kw = KeywordSet(statutory=["Section 482 CrPC"], anchor_queries=["a1"],
-                          contra_queries=["c1"])
-    retry_kw = KeywordSet(statutory=["482 Cr.P.C."], anchor_queries=["b1"])
-    calls = {"gen": 0, "round": 0}
-
-    async def fake_generate(issue_arg, ctx_arg, failed_queries=None, style="simple"):
-        calls["gen"] += 1
-        # the reformulation call must carry every previously tried query
-        assert failed_queries is not None
-        assert "a1" in failed_queries and "c1" in failed_queries
-        assert "Section 482 CrPC" in failed_queries
-        return retry_kw
-
-    async def fake_round(issue_arg, ctx_arg, kw, exclude=None, anchors_only=False):
-        calls["round"] += 1
-        if calls["round"] == 1:
-            assert kw is first_kw
-            return {"candidates": {"d1": "cand1"}, "scored": []}
-        assert kw is retry_kw
-        # round 2 must never re-fetch round 1's documents
-        assert exclude == {"d1"}
-        return {"candidates": {"d2": "cand2"}, "scored": ["SURVIVOR"]}
-
-    monkeypatch.setattr(agents, "generate_queries", fake_generate)
-    monkeypatch.setattr(agents, "_issue_round", fake_round)
-
-    out = await agents._process_issue(issue, _ctx(), pre_keywords=first_kw)
-    assert out["scored"] == ["SURVIVOR"]
-    # guardian pool carries BOTH rounds (closed world)
-    assert set(out["candidates"]) == {"d1", "d2"}
-    assert out["keywords"] is retry_kw
-    assert calls == {"gen": 1, "round": 2}
-
-
-@pytest.mark.asyncio
-async def test_curated_issue_never_reformulates(monkeypatch):
-    """User-curated queries are FINAL: an empty round returns an honest
-    empty — the system must never substitute a generated query set."""
-    issue = Issue(id=3, issue="Whether the FIR is liable to be quashed?")
-    kw = KeywordSet(statutory=["Section 482 CrPC"], anchor_queries=['"my only query"'])
-    rounds = {"n": 0}
+    kw = KeywordSet(statutory=["Section 482 CrPC"], anchor_queries=["a1"],
+                    contra_queries=["c1"])
+    calls = {"round": 0}
 
     async def fake_generate(*args, **kwargs):  # pragma: no cover
-        raise AssertionError("curated issues must never regenerate queries")
+        raise AssertionError("no reformulation: stored keywords must be used as-is")
 
-    async def fake_round(issue_arg, ctx_arg, kw_arg, exclude=None, anchors_only=False):
-        rounds["n"] += 1
-        assert anchors_only is True  # only the user's queries fetch
+    async def fake_round(issue_arg, ctx_arg, kw_arg, exclude=None, page_map=None):
+        calls["round"] += 1
+        assert kw_arg is kw
         return {"candidates": {"d1": "cand1"}, "scored": []}
 
     monkeypatch.setattr(agents, "generate_queries", fake_generate)
     monkeypatch.setattr(agents, "_issue_round", fake_round)
 
-    out = await agents._process_issue(issue, _ctx(), pre_keywords=kw, curated=True)
-    assert out["scored"] == [] and rounds["n"] == 1
+    out = await agents._process_issue(issue, _ctx(), pre_keywords=kw)
+    assert out["scored"] == []          # honest empty — never padded
+    assert calls["round"] == 1          # exactly ONE round, ever
     assert out["keywords"] is kw
 
 
 @pytest.mark.asyncio
-async def test_no_retry_when_first_round_has_results(monkeypatch):
+async def test_results_pass_through_single_round(monkeypatch):
     issue = Issue(id=2, issue="Whether bail should be granted?")
     kw = KeywordSet(statutory=["Section 439 CrPC"], anchor_queries=["a1"])
-    calls = {"gen": 0, "round": 0}
 
-    async def fake_generate(*args, **kwargs):  # pragma: no cover
-        calls["gen"] += 1
-        raise AssertionError("must not reformulate when results exist")
-
-    async def fake_round(issue_arg, ctx_arg, kw_arg, exclude=None, anchors_only=False):
-        calls["round"] += 1
+    async def fake_round(issue_arg, ctx_arg, kw_arg, exclude=None, page_map=None):
         return {"candidates": {"d9": "cand"}, "scored": ["HIT"]}
 
-    monkeypatch.setattr(agents, "generate_queries", fake_generate)
     monkeypatch.setattr(agents, "_issue_round", fake_round)
-
     out = await agents._process_issue(issue, _ctx(), pre_keywords=kw)
     assert out["scored"] == ["HIT"]
     assert out["keywords"] is kw
-    assert calls == {"gen": 0, "round": 1}
 
 
 @pytest.mark.asyncio
-async def test_retry_gives_up_honestly_when_still_empty(monkeypatch):
+async def test_curated_empty_selection_fetches_nothing(monkeypatch):
+    """The user unchecked every query for this issue — zero IK calls."""
     issue = Issue(id=3, issue="Whether the order is appealable?")
-    kw = KeywordSet(statutory=["Section 96 CPC"], anchor_queries=["a1"])
-    retry_kw = KeywordSet(statutory=["Section 104 CPC"])
+    kw = KeywordSet(statutory=["Section 96 CPC"], anchor_queries=[])
 
-    async def fake_generate(issue_arg, ctx_arg, failed_queries=None, style="simple"):
-        return retry_kw
+    async def boom(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("must not fetch when the user unchecked every query")
 
-    async def fake_round(issue_arg, ctx_arg, kw_arg, exclude=None, anchors_only=False):
+    monkeypatch.setattr(agents, "_issue_round", boom)
+    out = await agents._process_issue(issue, _ctx(), pre_keywords=kw, curated=True)
+    assert out["scored"] == [] and out["candidates"] == {}
+
+
+@pytest.mark.asyncio
+async def test_page_map_reaches_the_round(monkeypatch):
+    issue = Issue(id=4, issue="Whether the suit is barred by limitation?")
+    kw = KeywordSet(anchor_queries=["a1"], statutory=["s1"])
+    seen = {}
+
+    async def fake_round(issue_arg, ctx_arg, kw_arg, exclude=None, page_map=None):
+        seen["page_map"] = page_map
         return {"candidates": {}, "scored": []}
 
-    monkeypatch.setattr(agents, "generate_queries", fake_generate)
     monkeypatch.setattr(agents, "_issue_round", fake_round)
+    page_map = {"some wire": 3}
+    await agents._process_issue(issue, _ctx(), pre_keywords=kw, page_map=page_map)
+    assert seen["page_map"] is page_map
 
-    out = await agents._process_issue(issue, _ctx(), pre_keywords=kw)
-    assert out["scored"] == []  # honest empty â€” never padded
+
+@pytest.mark.asyncio
+async def test_page_ledger_is_per_issue(monkeypatch):
+    """The ledger is keyed per issue: an issue that already used a query
+    advances ITS pages; a different issue sharing the same query starts at
+    page one (its sub-ledger is empty)."""
+    issues = [Issue(id=1, issue="Whether A?"), Issue(id=2, issue="Whether B?")]
+    captured = {}
+
+    async def fake_process(issue, context, pre_keywords=None, curated=False,
+                           query_style="simple", page_map=None):
+        captured[issue.id] = page_map
+        return {"issue": issue, "keywords": None, "candidates": {}, "scored": []}
+
+    monkeypatch.setattr(agents, "_process_issue", fake_process)
+    master = {"1": {'"shared query" doctypes:x': 0}}  # issue 1 already used page one
+    await agents.issue_fanout(issues, _ctx(), page_map=master)
+    assert captured[1] == {'"shared query" doctypes:x': 0}  # its own history
+    assert captured[2] == {}                                # fresh — starts at page one
+    assert set(master) == {"1", "2"}                        # sub-ledgers persist

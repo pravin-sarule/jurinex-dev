@@ -33,6 +33,7 @@ from auth import jwt_verification_enabled, resolve_user_id
 from config import get_settings
 from schemas import (
     AddIssueRequest,
+    AdvancedSearchRequest,
     AnalyzeCaseFreshRequest,
     AnalyzeCaseRequest,
     AnalyzeResponse,
@@ -51,18 +52,28 @@ from schemas import (
 )
 from stores import postgres, sessions, store_health
 from tools import (
+    IK_RATES_INR,
     band_for,
+    case_court_profile,
     citation_guardian,
     composite_score,
+    flush_usage_events,
+    set_court_scope,
+    set_date_scope,
+    set_usage_identity,
     embedder,
     cosine,
     fetch_case_pages,
     grounded_good_law_check,
     ik_client,
+    ik_cost_start,
+    merge_cost_ledger,
     normalize_ws,
+    run_cost_log,
     parse_document,
     parse_document_pages,
     strip_html,
+    to_ik_operators,
     year_from_text,
 )
 from schemas import ScoredResult, SignalSet
@@ -251,6 +262,7 @@ def _gather_case_text(text: str | None, file_ref: str | None) -> str:
 
 @app.post("/api/v1/analyze", response_model=AnalyzeResponse)
 async def analyze(request: SearchRequest, http_request: Request) -> AnalyzeResponse:
+    set_usage_identity(resolve_user_id(http_request))
     raw_text = await asyncio.to_thread(_gather_case_text, request.caseInput.text,
                                        request.caseInput.fileRef)
     session_id, context, issues, grounds_meta = await analyze_case(
@@ -271,6 +283,7 @@ async def analyze_from_case(request: AnalyzeCaseRequest, http_request: Request) 
     issues carry 'file, page N' source references."""
     auth_header = http_request.headers.get("authorization")
     user_id = resolve_user_id(http_request, request.userId)
+    set_usage_identity(user_id, request.caseId)
     try:
         case_title, pages, llm_text, full_text = await fetch_case_pages(
             request.caseId, auth_header, user_id)
@@ -312,6 +325,7 @@ async def analyze_fresh_case(request: AnalyzeCaseFreshRequest,
                             detail="objective is required — describe what the client wants to achieve")
     auth_header = http_request.headers.get("authorization")
     user_id = resolve_user_id(http_request, request.userId)
+    set_usage_identity(user_id, request.caseId)
     try:
         case_title, pages, llm_text, full_text = await fetch_case_pages(
             request.caseId, auth_header, user_id)
@@ -351,6 +365,7 @@ async def analyze_upload(http_request: Request,
     works. Every page keeps its own filename so issue source references
     remain per-document ('file, page N'). `title` names the research in
     history; blank falls back to the first filename."""
+    set_usage_identity(resolve_user_id(http_request))
     uploads = [u for u in [*(files or []), file] if u is not None]
     if not uploads:
         raise HTTPException(status_code=400, detail="Upload at least one document")
@@ -391,6 +406,7 @@ async def search_run(session_id: str, request: RunSearchRequest,
     session = sessions.load(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Unknown or expired sessionId — analyze first")
+    set_usage_identity(resolve_user_id(http_request), session.get("caseId"))
     context = CaseContext.model_validate(session.get("caseContext") or {})
     suggested = [Issue.model_validate(i) for i in session.get("suggestedIssues", [])]
 
@@ -419,9 +435,41 @@ async def search_run(session_id: str, request: RunSearchRequest,
     context.needs_clarification = False
     context.clarification_question = None
 
-    logger.info("[run] session %s issueIds=%s custom=%d overrides=%s",
+    # Court scope (the three Advanced-search boxes on the issues step):
+    # selected boxes become ONE doctypes list that replaces the env default
+    # for every query of this run. Nothing selected = behaviour unchanged.
+    scope = request.courtScope
+    scope_tokens: list[str] = []
+    if scope is not None:
+        if scope.supremeCourt:
+            scope_tokens.append("supremecourt")
+        if scope.caseCourt:
+            profile = case_court_profile(
+                context.forum, f"{context.procedural_history} {context.raw_case_summary}")
+            # "All applicable courts" fallback: the case names no High Court
+            # we can map — search every High Court rather than none.
+            scope_tokens.append((profile or {}).get("doctype") or "highcourts")
+        for token in scope.courts:
+            token = token.strip().lower()
+            if re.fullmatch(r"[a-z_-]+", token):  # doctype tokens only, never query text
+                scope_tokens.append(token)
+    seen_tokens: set[str] = set()
+    scope_tokens = [t for t in scope_tokens if not (t in seen_tokens or seen_tokens.add(t))]
+    set_court_scope(",".join(scope_tokens) if scope_tokens else None)
+
+    # Date range: rides on EVERY query of this run as fromdate:/todate:.
+    date_parts: list[str] = []
+    if request.fromdate.strip():
+        date_parts.append(f"fromdate:{_ik_date(request.fromdate, 'fromdate')}")
+    if request.todate.strip():
+        date_parts.append(f"todate:{_ik_date(request.todate, 'todate')}")
+    set_date_scope(" ".join(date_parts) if date_parts else None)
+
+    logger.info("[run] session %s issueIds=%s custom=%d overrides=%s courts=%s dates=%s",
                 session_id, request.issueIds, len(request.customIssues),
-                {k: len(v) for k, v in (request.queryOverrides or {}).items()} or "none")
+                {k: len(v) for k, v in (request.queryOverrides or {}).items()} or "none",
+                ",".join(scope_tokens) or "default",
+                " ".join(date_parts) or "all")
     response = await run_issue_search(session_id, context, chosen,
                                       query_overrides=request.queryOverrides or None)
     if ik_client.auth_failed and not any(i.results for i in response.issues):
@@ -560,7 +608,8 @@ def _bench_from_text(doc_text: str) -> list[str]:
 
 
 @app.get("/api/v1/search/{session_id}/report/{issue_id}/{doc_id}")
-async def citation_report(session_id: str, issue_id: int, doc_id: str):
+async def citation_report(session_id: str, issue_id: int, doc_id: str,
+                          http_request: Request):
     """Full legal-intelligence report for one surfaced citation. Closed
     world holds: reports exist only for docIds already in this session's
     guardian-verified results. LLM analysis is grounded on the fetched
@@ -578,6 +627,8 @@ async def citation_report(session_id: str, issue_id: int, doc_id: str):
         # Never generate a report for a docId that wasn't verified into results.
         raise HTTPException(status_code=404, detail="docId is not part of this issue's verified results")
 
+    set_usage_identity(resolve_user_id(http_request), session.get("caseId"))
+    cost_tracker = ik_cost_start()
     doc_text, info = await ik_client.fetch_doc_bundle(doc_id)
     meta = await ik_client.fetch_doc_meta(doc_id)
     context = session.get("caseContext") or {}
@@ -630,6 +681,16 @@ async def citation_report(session_id: str, issue_id: int, doc_id: str):
                                "caseSummary": case_summary.model_dump()}
             sessions.save(session_id, session)
 
+    # The user now has the final judgement report — fold this view into the
+    # session ledger and print the true END-TO-END bill, nothing skipped.
+    cost_ledger = merge_cost_ledger(session.get("costLedger"), cost_tracker)
+    session["costLedger"] = cost_ledger
+    sessions.save(session_id, session)
+    run_cost_log(cost_ledger,
+                 f"END-TO-END session {session_id[:8]} — through report view {doc_id}",
+                 step=cost_tracker)
+    await asyncio.to_thread(flush_usage_events, cost_tracker,
+                            session_id=session_id, stage="report_view")
     return CitationReport(
         docId=doc_id,
         issueId=issue_id,
@@ -839,6 +900,154 @@ async def _ik_escape(session_id: str, request: RefineRequest,
     ]
     return RefineResponse(sessionId=session_id, issueId=request.issueId,
                           mode="ik_escape", items=refined, matchedCount=len(refined))
+
+
+# ─── Advanced Search (direct Indian Kanoon query, no pipeline) ──────────────
+
+_DATE_YMD = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")   # HTML <input type=date>
+_DATE_DMY = re.compile(r"^(\d{1,2})-(\d{1,2})-(\d{4})$")   # IK wire format
+
+
+def _ik_date(value: str, field: str) -> str:
+    """Normalise either date form to IK's DD-MM-YYYY wire format."""
+    v = value.strip()
+    m = _DATE_YMD.match(v)
+    if m:
+        return f"{int(m.group(3))}-{int(m.group(2))}-{m.group(1)}"
+    m = _DATE_DMY.match(v)
+    if m:
+        return f"{int(m.group(1))}-{int(m.group(2))}-{m.group(3)}"
+    raise HTTPException(status_code=422, detail=f"{field} must be a date in DD-MM-YYYY form")
+
+
+@app.post("/api/v1/advanced-search")
+async def advanced_search(request: AdvancedSearchRequest,
+                          http_request: Request) -> dict[str, Any]:
+    """User-driven Indian Kanoon search: the filled criteria are combined
+    into one formInput with IK's own directives and results are returned
+    exactly as IK ranks them — no issue analysis, no verifier, no bands.
+    Directives ride inside formInput (not separate params) because that is
+    what IK's own advanced form emits and it keeps keyword-less searches
+    (e.g. bench + date range alone) valid."""
+    parts: list[str] = []
+    if request.query.strip():
+        # AND/OR/NOT are authored in readable form; IK's wire format is
+        # ANDD/ORR/NOTT — same translation the pipeline queries get.
+        parts.append(to_ik_operators(request.query))
+    for directive, value in (("title", request.title), ("cite", request.cite),
+                             ("author", request.author), ("bench", request.bench),
+                             ("doctypes", request.doctypes)):
+        if value.strip():
+            parts.append(f"{directive}:{normalize_ws(value.replace(', ', ','))}")
+    if request.fromdate.strip():
+        parts.append(f"fromdate:{_ik_date(request.fromdate, 'fromdate')}")
+    if request.todate.strip():
+        parts.append(f"todate:{_ik_date(request.todate, 'todate')}")
+    if not parts:
+        raise HTTPException(status_code=422, detail="Fill in at least one search field")
+    if request.sortby != "relevance":
+        parts.append(f"sortby:{request.sortby}")
+    form_input = " ".join(parts)
+
+    # Same console bill as the pipeline runs: one tracker per advanced
+    # search, printed via run_cost_log so IK spend is never silent.
+    set_usage_identity(resolve_user_id(http_request))
+    cost_tracker = ik_cost_start()
+    data = await ik_client.search_raw(form_input, pagenum=max(0, request.pagenum))
+    if data is None:
+        detail = ("Indian Kanoon rejected the API token — the prepaid account may be "
+                  "out of balance." if ik_client.auth_failed else
+                  "Indian Kanoon could not be reached — please try again in a moment.")
+        raise HTTPException(status_code=502, detail=detail)
+    if data.get("errmsg"):
+        raise HTTPException(status_code=502, detail=str(data["errmsg"]))
+
+    results: list[dict[str, Any]] = []
+    for doc in data.get("docs") or []:
+        doc_id = str(doc.get("tid") or "").strip()
+        if not doc_id:
+            continue
+        results.append({
+            "docId": doc_id,
+            "title": strip_html(str(doc.get("title") or "")).strip(),
+            "headline": strip_html(str(doc.get("headline") or "")).strip(),
+            "court": str(doc.get("docsource") or "").strip(),
+            "date": str(doc.get("publishdate") or "").strip(),
+            "numCitedby": int(doc.get("numcitedby") or 0),
+            "url": f"https://indiankanoon.org/doc/{doc_id}/",
+        })
+
+    # IK reports the total as "Showing X - Y of N" text (or a bare count in
+    # older responses); the parsed total drives real pagination client-side.
+    found = str(data.get("found") or "")
+    m = re.search(r"of\s+([\d,]+)", found)
+    total = int(m.group(1).replace(",", "")) if m else (
+        int(found.replace(",", "")) if found.replace(",", "").strip().isdigit() else None)
+    has_more = ((request.pagenum + 1) * 10 < total) if total is not None else len(results) >= 10
+
+    billed = dict(cost_tracker["billed"])
+    ik_total = sum(IK_RATES_INR[kind] * count for kind, count in billed.items())
+    run_cost_log(cost_tracker,
+                 f"ADVANCED SEARCH — page {request.pagenum + 1} — {form_input[:70]}")
+    await asyncio.to_thread(flush_usage_events, cost_tracker,
+                            session_id=None, stage="advanced_search")
+    return {
+        "formInput": form_input,
+        "pagenum": request.pagenum,
+        "found": found,
+        "total": total,
+        "hasMore": has_more,
+        "results": results,
+        # Mirrored in the browser console by the Advanced Search modal.
+        "cost": {
+            "billedSearches": billed.get("search", 0),
+            "cachedHits": cost_tracker["cached"],
+            "ratePerSearchInr": IK_RATES_INR["search"],
+            "totalInr": round(ik_total, 2),
+        },
+    }
+
+
+@app.get("/api/v1/advanced-search/doc/{doc_id}")
+async def advanced_search_doc(doc_id: str, http_request: Request) -> dict[str, Any]:
+    """Document view for the Advanced Search popup — the full judgment as
+    Indian Kanoon serves it (its own HTML, sanitized client-side before
+    rendering) plus bench/author metadata and cites/cited-by samples, so
+    clicking a result opens the judgment in-app like IK's own doc page."""
+    set_usage_identity(resolve_user_id(http_request))
+    cost_tracker = ik_cost_start()
+    raw, meta = await asyncio.gather(ik_client.fetch_doc_raw(doc_id),
+                                     ik_client.fetch_doc_meta(doc_id))
+    if raw is None:
+        detail = ("Indian Kanoon rejected the API token — the prepaid account may be "
+                  "out of balance." if ik_client.auth_failed else
+                  "Indian Kanoon could not be reached — please try again in a moment.")
+        raise HTTPException(status_code=502, detail=detail)
+
+    billed = dict(cost_tracker["billed"])
+    ik_total = sum(IK_RATES_INR[kind] * count for kind, count in billed.items())
+    run_cost_log(cost_tracker, f"ADVANCED SEARCH — document view {doc_id}")
+    await asyncio.to_thread(flush_usage_events, cost_tracker,
+                            session_id=None, stage="advanced_search_doc")
+    return {
+        "docId": doc_id,
+        "title": raw.get("title") or meta.get("title", ""),
+        "court": meta.get("docsource") or raw.get("docsource", ""),
+        "publishdate": raw.get("publishdate") or meta.get("publishdate", ""),
+        "author": meta.get("author", ""),
+        "bench": meta.get("bench", ""),
+        "citesCount": raw.get("numcites", 0),
+        "citedByCount": raw.get("numcitedby", 0),
+        "casesCited": raw.get("casesCited", []),
+        "citedBy": raw.get("citedBy", []),
+        "html": raw.get("html", ""),
+        "url": f"https://indiankanoon.org/doc/{doc_id}/",
+        "cost": {
+            "billed": billed,
+            "cachedHits": cost_tracker["cached"],
+            "totalInr": round(ik_total, 2),
+        },
+    }
 
 
 if __name__ == "__main__":

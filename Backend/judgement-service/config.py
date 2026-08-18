@@ -56,7 +56,10 @@ class Settings(BaseSettings):
     # query generation runs ~12×/analyze, so it stays on a strong flash.
     # Primary Gemini jobs (classify/extract/verifier/summaries) keep
     # gemini_model.
-    gemini_fallback_model: str = "gemini-3.1-pro-preview"  # = gemini-pro-latest today, pinned
+    # 2026-08-14 (user decision, supersedes the 3.1-pro pin): extraction on
+    # FLASH — stage-1 cost drops ~₹36 → ~₹3 per analyze; flip back to
+    # "gemini-3.1-pro-preview" if extraction quality needs the pro model.
+    gemini_fallback_model: str = "gemini-3.6-flash"
     gemini_keyword_fallback_model: str = "gemini-3.6-flash"
     gemini_embedding_model: str = "models/gemini-embedding-001"
     embedding_dim: int = 768
@@ -84,6 +87,10 @@ class Settings(BaseSettings):
     # tools.enforce_verifier_rules is the real precision guard; Claude at
     # ~12 calls/issue was slow and burned credits). Set true to opt back in.
     verifier_use_claude: bool = False
+    # Gemini explicit context caching for the verifier's ~5k-token system
+    # prompt (identical across ~150 calls/run) — cached tokens bill at a
+    # fraction of the input rate. Auto-degrades to plain calls on any error.
+    verifier_context_cache: bool = True
     judgement_verifier_claude_model: str = "claude-sonnet-5"
     # Concurrent verifier calls PER ISSUE. Sized so the full-doc top-N
     # verifies in ONE wave (two sequential waves used to dominate search
