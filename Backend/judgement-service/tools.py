@@ -908,16 +908,20 @@ _IK_KIND_LABELS = [
 
 # LLM rates, INR per 1M tokens (input, output), matched by model-name prefix.
 # Values follow the citation-service pricing.py conventions (USD list price
-# × 85 INR/USD) — EDIT these to the rates you are actually billed.
+# × 96 INR/USD) — EDIT these to the rates you are actually billed.
 LLM_RATES_INR = [
-    ("gemini-3.1-pro", (106.25, 850.00)),   # pro class ≈ $1.25 / $10 per 1M
-    ("gemini-3.6-flash", (8.50, 34.00)),    # flash class ≈ $0.10 / $0.40 per 1M
-    ("gemini-2.5-flash", (8.50, 34.00)),
-    ("claude", (255.00, 1275.00)),          # ≈ $3 / $15 per 1M (only if re-enabled)
+    ("gemini-3.1-pro", (120.00, 960.00)),   # pro class ≈ $1.25 / $10 per 1M
+    ("gemini-3.6-flash", (72.00, 360.00)),  # $0.75 / $3.75 per 1M × 96 (list, thru 31 Dec 2026)
+    ("gemini-2.5-flash", (28.80, 240.00)),  # $0.30 / $2.50 per 1M × 96 (list)
+    ("claude", (288.00, 1440.00)),          # ≈ $3 / $15 per 1M (only if re-enabled)
 ]
-DEFAULT_LLM_RATE_INR = (8.50, 34.00)
-GEMINI_EMBED_PER_1M_INR = 14.40             # embeddings, INR per 1M input tokens
-GEMINI_GROUNDING_PER_CALL_INR = 2.975       # Google-Search grounding, per call
+DEFAULT_LLM_RATE_INR = (28.80, 240.00)
+GEMINI_EMBED_PER_1M_INR = 14.40             # embeddings ≈ $0.15 per 1M × 96
+GEMINI_GROUNDING_PER_CALL_INR = 3.36        # Google-Search grounding ≈ $0.035/call × 96
+# Explicit context-cache STORAGE (the verifier's CachedContent): billed per
+# 1M tokens per HOUR the cache lives (Flash list $1.00/1M/hr × 96 INR/USD).
+# Implicit prefix caching has NO storage cost.
+GEMINI_CACHE_STORAGE_PER_1M_HR_INR = 96.00
 
 # ContextVar so concurrent runs never mix counts: child tasks (the per-issue
 # fan-out) inherit the context of the request that started the run.
@@ -931,7 +935,7 @@ def ik_cost_start() -> dict:
     context, so a whole pipeline phase reports into one tracker)."""
     tracker: dict = {"billed": Counter(), "cached": 0,
                      "llm": {}, "embed_calls": 0, "embed_tokens_est": 0,
-                     "grounding_calls": 0}
+                     "grounding_calls": 0, "cache_storage": {}}
     _ik_cost_tracker.set(tracker)
     return tracker
 
@@ -975,24 +979,33 @@ _TASK_LABELS = {
 }
 
 
-def llm_track_usage(model: str, usage: Any, task: str = "other") -> None:
+def llm_track_usage(model: str, usage: Any, task: str = "other",
+                    cache_method: str | None = None) -> None:
     """Record one model call's token usage from an ADK event's / genai
     response's usage_metadata, keyed by (task, model) so the bill shows
     which pipeline step spent what on which model. Events without usage
-    (partials) are skipped."""
+    (partials) are skipped. cached = tokens served from Gemini's context
+    cache — billed at 25% of the input rate. cache_method names WHICH
+    cache the call site rides ('explicit' = the verifier's CachedContent,
+    'implicit' = Gemini's automatic prefix cache); recorded on the row once
+    cached tokens are actually observed, and stored with the usage event."""
     tracker = _ik_cost_tracker.get()
     if tracker is None or usage is None:
         return
     prompt = getattr(usage, "prompt_token_count", 0) or 0
     output = ((getattr(usage, "candidates_token_count", 0) or 0)
               + (getattr(usage, "thoughts_token_count", 0) or 0))
+    cached = getattr(usage, "cached_content_token_count", 0) or 0
     if not prompt and not output:
         return
     row = tracker["llm"].setdefault(f"{task}|{model}",
-                                    {"calls": 0, "in": 0, "out": 0})
+                                    {"calls": 0, "in": 0, "out": 0, "cached": 0})
     row["calls"] += 1
     row["in"] += prompt
     row["out"] += output
+    row["cached"] = row.get("cached", 0) + cached
+    if cached and cache_method:
+        row["cache_method"] = cache_method
 
 
 def embed_track(texts: list[str], tokens: int | None = None) -> None:
@@ -1015,11 +1028,36 @@ def grounding_track() -> None:
         tracker["grounding_calls"] += 1
 
 
+def cache_storage_track(model: str, tokens: int, hours: float) -> None:
+    """One explicit context-cache CREATION: `tokens` stay stored for `hours`
+    (the cache TTL) and bill at the per-1M-per-hour storage rate. Recorded
+    on the run whose call created the cache — at one creation per hour, the
+    storage line appears once per hour of verifier traffic."""
+    tracker = _ik_cost_tracker.get()
+    if tracker is None or not tokens:
+        return
+    slot = tracker.setdefault("cache_storage", {}).setdefault(
+        model, {"count": 0, "tokens": 0, "cost": 0.0})
+    slot["count"] += 1
+    slot["tokens"] += int(tokens)
+    slot["cost"] += tokens / 1e6 * GEMINI_CACHE_STORAGE_PER_1M_HR_INR * hours
+
+
 def _llm_rate(model: str) -> tuple[float, float]:
     for prefix, rate in LLM_RATES_INR:
         if model.startswith(prefix):
             return rate
     return DEFAULT_LLM_RATE_INR
+
+
+def _llm_row_cost(model: str, row: dict) -> float:
+    """INR for one (task, model) usage row — cached input tokens (Gemini
+    context caching, implicit or explicit) bill at 25% of the input rate."""
+    rate_in, rate_out = _llm_rate(model)
+    cached = min(row.get("cached", 0), row.get("in", 0))
+    return ((row.get("in", 0) - cached) / 1e6 * rate_in
+            + cached / 1e6 * rate_in * 0.25
+            + row.get("out", 0) / 1e6 * rate_out)
 
 
 def merge_cost_ledger(ledger: dict | None, tracker: dict) -> dict:
@@ -1037,7 +1075,7 @@ def merge_cost_ledger(ledger: dict | None, tracker: dict) -> dict:
     }
     for model, row in tracker.get("llm", {}).items():
         dst = out["llm"].setdefault(model, {"calls": 0, "in": 0, "out": 0})
-        for key in ("calls", "in", "out"):
+        for key in ("calls", "in", "out", "cached"):
             dst[key] = dst.get(key, 0) + row.get(key, 0)
     for kind, count in dict(tracker.get("billed") or {}).items():
         out["billed"][kind] = out["billed"].get(kind, 0) + count
@@ -1046,6 +1084,13 @@ def merge_cost_ledger(ledger: dict | None, tracker: dict) -> dict:
     out["embed_tokens_est"] += tracker.get("embed_tokens_est", 0)
     out["grounding_calls"] += tracker.get("grounding_calls", 0)
     out["embed_est"] = bool(led.get("embed_est")) or bool(tracker.get("embed_est"))
+    out["cache_storage"] = {m: dict(s) for m, s in (led.get("cache_storage") or {}).items()}
+    for model, slot in (tracker.get("cache_storage") or {}).items():
+        dst = out["cache_storage"].setdefault(
+            model, {"count": 0, "tokens": 0, "cost": 0.0})
+        dst["count"] += slot.get("count", 0)
+        dst["tokens"] += slot.get("tokens", 0)
+        dst["cost"] += slot.get("cost", 0.0)
     return out
 
 
@@ -1081,6 +1126,8 @@ def _usage_rows(tracker: dict, session_id: str | None, stage: str) -> list[dict[
         "user_id": ident.get("user_id") or "anonymous",
         "case_id": ident.get("case_id"),
         "cache_hit": False,
+        "cached_tokens": 0,
+        "metadata": {"cache_method": "none"},
         "occurred_at": datetime.now(timezone.utc),
     }
     rows: list[dict[str, Any]] = []
@@ -1088,15 +1135,19 @@ def _usage_rows(tracker: dict, session_id: str | None, stage: str) -> list[dict[
         task, _, model = key.partition("|")
         if not model:  # rows from before task-level tracking
             task, model = "other", key
-        rate_in, rate_out = _llm_rate(model)
+        cached = int(min(r.get("cached", 0), r.get("in", 0)))
+        # Which cache served the cached tokens: 'explicit' (verifier
+        # CachedContent) / 'implicit' (Gemini prefix cache) / 'none'.
+        method = (r.get("cache_method") or "implicit") if cached else "none"
         rows.append({**base,
                      "provider": "claude" if model.startswith("claude") else "gemini",
                      "service": "judgement_ai", "operation": task, "model": model,
                      "unit": "tokens", "quantity": int(r["in"] + r["out"]),
                      "calls": int(r["calls"]),
                      "input_tokens": int(r["in"]), "output_tokens": int(r["out"]),
-                     "producer_cost_inr": round(
-                         r["in"] / 1e6 * rate_in + r["out"] / 1e6 * rate_out, 6)})
+                     "cached_tokens": cached,
+                     "metadata": {"cache_method": method},
+                     "producer_cost_inr": round(_llm_row_cost(model, r), 6)})
     if tracker.get("embed_calls"):
         tokens = int(tracker.get("embed_tokens_est") or 0)
         rows.append({**base, "provider": "gemini", "service": "judgement_ai",
@@ -1112,6 +1163,18 @@ def _usage_rows(tracker: dict, session_id: str | None, stage: str) -> list[dict[
                      "unit": "calls", "quantity": n, "calls": n,
                      "input_tokens": 0, "output_tokens": 0,
                      "producer_cost_inr": round(n * GEMINI_GROUNDING_PER_CALL_INR, 6)})
+    for model, slot in (tracker.get("cache_storage") or {}).items():
+        # Explicit context-cache storage — tokens held for the cache TTL.
+        rows.append({**base, "provider": "gemini", "service": "judgement_ai",
+                     "operation": "context_cache_storage", "model": model,
+                     "unit": "tokens", "quantity": int(slot.get("tokens", 0)),
+                     "calls": int(slot.get("count", 0)),
+                     "input_tokens": 0, "output_tokens": 0,
+                     "cached_tokens": int(slot.get("tokens", 0)),
+                     "metadata": {"cache_method": "explicit",
+                                  "rate_inr_per_1m_token_hour":
+                                      GEMINI_CACHE_STORAGE_PER_1M_HR_INR},
+                     "producer_cost_inr": round(slot.get("cost", 0.0), 6)})
     for kind, count in dict(tracker.get("billed") or {}).items():
         rows.append({**base, "provider": "indian_kanoon", "service": "indian_kanoon",
                      "operation": kind, "model": None,
@@ -1124,7 +1187,9 @@ def _usage_rows(tracker: dict, session_id: str | None, stage: str) -> list[dict[
                      "operation": "cache_hit", "model": None,
                      "unit": "calls", "quantity": n, "calls": n,
                      "input_tokens": 0, "output_tokens": 0,
-                     "cache_hit": True, "producer_cost_inr": 0.0})
+                     "cache_hit": True,
+                     "metadata": {"cache_method": "response_cache"},
+                     "producer_cost_inr": 0.0})
     for step_no, row in enumerate(rows):
         row["step_no"] = step_no
         row["event_key"] = (f"jud:{run_id}:{step_no}:{row['operation']}:"
@@ -1155,11 +1220,13 @@ def flush_usage_events(tracker: dict, *, session_id: str | None, stage: str) -> 
 def _cost_totals(tracker: dict) -> tuple[float, float]:
     """(ai_total, ik_total) in INR for one tracker/ledger."""
     ai = 0.0
-    for model, row in tracker.get("llm", {}).items():
-        rate_in, rate_out = _llm_rate(model)
-        ai += row.get("in", 0) / 1e6 * rate_in + row.get("out", 0) / 1e6 * rate_out
+    for key, row in tracker.get("llm", {}).items():
+        _task, _, model = key.partition("|")
+        ai += _llm_row_cost(model or key, row)
     ai += tracker.get("embed_tokens_est", 0) / 1e6 * GEMINI_EMBED_PER_1M_INR
     ai += tracker.get("grounding_calls", 0) * GEMINI_GROUNDING_PER_CALL_INR
+    ai += sum(slot.get("cost", 0.0)
+              for slot in (tracker.get("cache_storage") or {}).values())
     ik = sum(IK_RATES_INR[kind] * count
              for kind, count in dict(tracker.get("billed") or {}).items())
     return ai, ik
@@ -1184,18 +1251,26 @@ def run_cost_log(tracker: dict, tag: str, step: dict | None = None) -> None:
             task, model = "other", key
         llm_rows.append((_TASK_LABELS.get(task, task), model, row))
     llm_rows.sort()
-    if llm_rows or tracker.get("embed_calls") or tracker.get("grounding_calls"):
+    if (llm_rows or tracker.get("embed_calls") or tracker.get("grounding_calls")
+            or tracker.get("cache_storage")):
         logger.info("[cost] %s", dash)
         logger.info("[cost] %-27s %-24s %5s %11s %11s %8s",
                     "Task / agent", "Model", "Calls", "Tokens in",
                     "Tokens out", "Cost INR")
+        total_cached = 0
         for label, model, row in llm_rows:
-            rate_in, rate_out = _llm_rate(model)
-            cost = row["in"] / 1e6 * rate_in + row["out"] / 1e6 * rate_out
+            cost = _llm_row_cost(model, row)
             ai_total += cost
+            total_cached += min(row.get("cached", 0), row.get("in", 0))
             logger.info("[cost] %-27s %-24s %5d %11s %11s %8.2f",
                         label[:27], model[:24], row["calls"],
                         f"{row['in']:,}", f"{row['out']:,}", cost)
+        if llm_rows:
+            # Always printed — 0 means no call was served from a Gemini
+            # context cache (implicit prefix or the verifier's explicit one).
+            logger.info("[cost] %-27s %-24s %5s %11s %11s %8s",
+                        "  of which CACHED input", "(billed at 25%)", "",
+                        f"{total_cached:,}", "-", "")
         if tracker.get("embed_calls"):
             cost = tracker["embed_tokens_est"] / 1e6 * GEMINI_EMBED_PER_1M_INR
             ai_total += cost
@@ -1211,6 +1286,14 @@ def run_cost_log(tracker: dict, tag: str, step: dict | None = None) -> None:
             logger.info("[cost] %-27s %-24s %5d %11s %11s %8.2f",
                         "8 Google-search grounding", "per-call rate",
                         tracker["grounding_calls"], "-", "-", cost)
+        for model, slot in (tracker.get("cache_storage") or {}).items():
+            # Explicit context-cache STORAGE (verifier prompt held for its
+            # TTL). Implicit prefix caching stores nothing and costs nothing.
+            ai_total += slot.get("cost", 0.0)
+            logger.info("[cost] %-27s %-24s %5d %11s %11s %8.2f",
+                        "5 Context cache storage", model[:24],
+                        slot.get("count", 0), f"{slot.get('tokens', 0):,}",
+                        "-", slot.get("cost", 0.0))
         logger.info("[cost] %-27s %-24s %5s %11s %11s %8.2f",
                     "AI subtotal", "", "", "", "", ai_total)
 

@@ -65,6 +65,7 @@ from tools import (
     attribute_issue_sources,
     authority_signal,
     band_for,
+    cache_storage_track,
     case_court_profile,
     citation_guardian,
     composite_score,
@@ -229,13 +230,45 @@ def build_document_context_agent() -> SequentialAgent:
 
 # ─── Stage 1: Issue split ────────────────────────────────────────────────────
 
-def build_issue_split_agent() -> LlmAgent:
-    return LlmAgent(
-        name="issue_split",
-        model=get_settings().gemini_fallback_model,
-        description="Splits a case summary into distinct legal issues.",
-        instruction=(
-            "Act as an expert Indian legal researcher and advocate, equally at home "
+# ─── Implicit context caching for stage-1 (case analysis) ────────────────────
+# Gemini 2.5 models cache request PREFIXES automatically (implicit caching):
+# when two requests start with byte-identical tokens, the shared prefix is
+# billed at the cached-token discount. The stage-1 extractors (grounds +
+# issue spotting, fresh) all read the SAME case material, so their Gemini
+# fallback calls are cache-aligned: ONE shared neutral system line, the
+# shared [CASE MATERIAL + STRUCTURED CONTEXT] block FIRST, the task prompt
+# LAST — and extract_combined / extract_fresh run them SEQUENTIALLY in
+# fallback mode so the second call lands on the warm prefix. (The Claude
+# path is untouched; the verifier already uses EXPLICIT caching.)
+
+_CACHE_ALIGNED_SYSTEM = (
+    "You are a senior Indian litigation associate. Read the CASE MATERIAL, "
+    "then follow the TASK INSTRUCTIONS at the end of the message exactly. "
+    "Output STRICT JSON matching the response schema — nothing else.")
+
+# Room reserved after the shared prefix for the task prompt. The prefix must
+# be byte-identical across the extractors, so ALL of them use this reserve.
+_STAGE1_TASK_RESERVE = 18000
+
+
+def _stage1_prefix(raw_text: str, context: CaseContext) -> str:
+    """The byte-identical implicit-cache prefix every stage-1 fallback call
+    starts with. Anything that varies per extractor goes AFTER it."""
+    return (
+        f"CASE MATERIAL:\n{_budget_case_text(raw_text, _llm_budget() - _STAGE1_TASK_RESERVE)}\n\n"
+        f"STRUCTURED CONTEXT (already extracted and source-verified):\n"
+        f"Facts: {context.facts[:1500]}\n"
+        f"Procedural history: {context.procedural_history[:800]}\n"
+        f"Relief sought: {context.relief_sought[:300]}"
+    )
+
+
+def _cache_aligned(prefix: str, task_prompt: str, extra: str = "") -> str:
+    return f"{prefix}\n\n[TASK INSTRUCTIONS]\n{task_prompt}{extra}"
+
+
+ISSUE_SPLIT_PROMPT = (
+    "Act as an expert Indian legal researcher and advocate, equally at home "
             "in criminal, civil and commercial litigation. You receive the CLIENT'S "
             "raw case material (facts, pleadings, FIR, documents and a structured "
             "context). Extract EVERY distinct legal issue suitable for precedent "
@@ -275,15 +308,25 @@ def build_issue_split_agent() -> LlmAgent:
             "property identifiers, case numbers, or dates. Never add a provision "
             "the material does not support. Ground everything in the material — "
             "never invent. Order by importance to the client's relief; ids from 1.\n\n"
-            "6. For EACH issue also fill: title (a standardized ground name a "
-            "practitioner would recognise, in ANY field of law), doctrine (short "
-            "doctrinal label), sub_doctrine (the SPECIFIC trigger/test within the "
-            "doctrine as ONE short snake_case label — e.g. civil_colour, settlement, "
-            "triable_issue, balance_of_convenience, repealed_statute_fir — coin "
-            "whatever fits the field), statutory_hook (the governing provision), "
-            "and perspective ('petitioner'/'respondent'/'neutral'). Return strict "
-            "JSON matching the schema."
-        ),
+    "6. For EACH issue also fill: title (a standardized ground name a "
+    "practitioner would recognise, in ANY field of law), doctrine (short "
+    "doctrinal label), sub_doctrine (the SPECIFIC trigger/test within the "
+    "doctrine as ONE short snake_case label — e.g. civil_colour, settlement, "
+    "triable_issue, balance_of_convenience, repealed_statute_fir — coin "
+    "whatever fits the field), statutory_hook (the governing provision), "
+    "and perspective ('petitioner'/'respondent'/'neutral'). Return strict "
+    "JSON matching the schema."
+)
+
+
+def build_issue_split_agent() -> LlmAgent:
+    """Cache-aligned: the shared system line only — the full ISSUE_SPLIT_PROMPT
+    rides at the END of the message, after the implicit-cache prefix."""
+    return LlmAgent(
+        name="issue_split",
+        model=get_settings().gemini_fallback_model,
+        description="Splits a case summary into distinct legal issues.",
+        instruction=_CACHE_ALIGNED_SYSTEM,
         generate_content_config=_gen_config(0.25, get_settings().gemini_fallback_model),
         output_schema=IssueList,
         output_key="issues",
@@ -767,9 +810,14 @@ async def _verifier_cached_name(model: str) -> str | None:
                     system_instruction=JUDGMENT_VERIFIER_SYSTEM,
                     ttl=f"{_VERIFIER_CACHE_TTL_S}s"))
             _verifier_cache[model] = (cache.name, now + _VERIFIER_CACHE_TTL_S)
-            logger.info("[verifier] context cache ready (%s) — the system "
-                        "prompt now bills once per hour, not per call",
-                        cache.name)
+            # Cache STORAGE bills per 1M tokens per hour of TTL — put it on
+            # the bill of the run that created the cache (once per hour).
+            stored_tokens = int(getattr(getattr(cache, "usage_metadata", None),
+                                        "total_token_count", 0) or 0)
+            cache_storage_track(model, stored_tokens, _VERIFIER_CACHE_TTL_S / 3600)
+            logger.info("[verifier] context cache ready (%s, %s tokens stored) — "
+                        "the system prompt now bills once per hour, not per call",
+                        cache.name, f"{stored_tokens:,}")
             return cache.name
         except Exception as exc:
             logger.warning("[verifier] context caching unavailable (%s) — "
@@ -801,7 +849,7 @@ async def _verify_direct_cached(message: str) -> JudgmentVerification | None:
             _genai_direct().models.generate_content,
             model=model, contents=message, config=config)
         llm_track_usage(model, getattr(resp, "usage_metadata", None),
-                        task="judgment_verifier")
+                        task="judgment_verifier", cache_method="explicit")
         parsed = getattr(resp, "parsed", None)
         if isinstance(parsed, JudgmentVerification):
             return parsed
@@ -1065,8 +1113,10 @@ async def run_agent_once(agent, message: str, output_keys: list[str]) -> dict[st
     model_name = str(getattr(agent, "model", "") or "gemini")
     task_name = str(getattr(agent, "name", "") or "agent")
     async for _event in runner.run_async(user_id="pipeline", session_id=session.id, new_message=content):
+        # Any cached tokens on ADK-path calls come from Gemini's automatic
+        # prefix cache (the stage-1 cache-aligned messages).
         llm_track_usage(model_name, getattr(_event, "usage_metadata", None),
-                        task=task_name)
+                        task=task_name, cache_method="implicit")
     session = await runner.session_service.get_session(
         app_name=_APP, user_id="pipeline", session_id=session.id)
     state = session.state if session else {}
@@ -1126,10 +1176,14 @@ async def spot_issues(raw_text: str, context: CaseContext,
                 for idx, s in enumerate(result.issues[:MAX_ISSUES]) if s.issue.strip()
             ]
         logger.warning("[claude] issue spotter unavailable — Gemini issue split fallback")
-    # The fallback gets the SAME full case material as the Claude path — it
-    # previously received only raw_case_summary (one paragraph), which is why
-    # fallback runs under-spotted or found nothing beyond the grounds.
-    out = await run_agent_once(build_issue_split_agent(), user, ["issues"])
+    # The fallback gets the SAME full case material as the Claude path,
+    # cache-aligned: shared prefix first, task prompt (+ covered note) last,
+    # so it shares Gemini's implicit-cache prefix with the grounds call.
+    out = await run_agent_once(
+        build_issue_split_agent(),
+        _cache_aligned(_stage1_prefix(raw_text, context), ISSUE_SPLIT_PROMPT,
+                       extra=covered_note),
+        ["issues"])
     issue_list = IssueList.model_validate(out.get("issues") or {"issues": []})
     spotted = issue_list.issues[:MAX_ISSUES]
     for item in spotted:
@@ -1183,13 +1237,15 @@ async def enrich_custom_issue(issue: Issue, context: CaseContext) -> Issue:
 # ─── Grounds mode: extract the grounds pleaded in the filing itself ─────────
 
 def build_grounds_extract_agent() -> LlmAgent:
-    """Gemini fallback for the grounds extractor — same system prompt and
-    schema as the Claude path, so downstream conversion is identical."""
+    """Gemini fallback for the grounds extractor — same prompt text and
+    schema as the Claude path. Cache-aligned: the shared system line only;
+    GROUNDS_EXTRACTOR_SYSTEM rides at the END of the message, after the
+    implicit-cache prefix."""
     return LlmAgent(
         name="grounds_extract",
         model=get_settings().gemini_fallback_model,
         description="Extracts the legal grounds pleaded in a filing.",
-        instruction=GROUNDS_EXTRACTOR_SYSTEM,
+        instruction=_CACHE_ALIGNED_SYSTEM,
         generate_content_config=_gen_config(0.1, get_settings().gemini_fallback_model),
         output_schema=GroundsExtractResult,
         output_key="grounds_extract",
@@ -1251,8 +1307,11 @@ async def extract_grounds(raw_text: str, context: CaseContext,
             logger.warning("[claude] grounds extractor unavailable — Gemini fallback")
     if result is None:
         try:
-            out = await run_agent_once(build_grounds_extract_agent(), user,
-                                       ["grounds_extract"])
+            out = await run_agent_once(
+                build_grounds_extract_agent(),
+                _cache_aligned(_stage1_prefix(raw_text, context),
+                               GROUNDS_EXTRACTOR_SYSTEM),
+                ["grounds_extract"])
             result = GroundsExtractResult.model_validate(out.get("grounds_extract") or {})
         except Exception:
             logger.exception("[grounds] Gemini fallback failed")
@@ -1294,7 +1353,7 @@ def build_fresh_extract_agent() -> LlmAgent:
         name="fresh_extract",
         model=get_settings().gemini_fallback_model,
         description="Formulates proposed grounds for a fresh, unfiled matter.",
-        instruction=FRESH_CASE_SYSTEM,
+        instruction=_CACHE_ALIGNED_SYSTEM,
         generate_content_config=_gen_config(0.1, get_settings().gemini_fallback_model),
         output_schema=GroundsExtractResult,
         output_key="fresh_extract",
@@ -1329,19 +1388,25 @@ async def extract_fresh(raw_text: str, context: CaseContext, objective: str,
                 logger.warning("[claude] fresh extractor unavailable — Gemini fallback")
         if result is None:
             try:
-                out = await run_agent_once(build_fresh_extract_agent(), user,
-                                           ["fresh_extract"])
+                out = await run_agent_once(
+                    build_fresh_extract_agent(),
+                    _cache_aligned(
+                        _stage1_prefix(raw_text, context), FRESH_CASE_SYSTEM,
+                        extra=("\n\nCLIENT'S OBJECTIVE (the only instruction "
+                               f"you follow):\n{objective[:2000]}")),
+                    ["fresh_extract"])
                 result = GroundsExtractResult.model_validate(out.get("fresh_extract") or {})
             except Exception:
                 logger.exception("[fresh] Gemini fallback failed")
                 result = GroundsExtractResult()
         return result
 
-    # Proposed grounds AND the exhaustive issue spotter run CONCURRENTLY —
-    # raw_text carries the [CLIENT'S OBJECTIVE] header, so spotted issues are
-    # framed for the objective too. Same shape as combined mode.
-    result, spotted = await asyncio.gather(_fresh_grounds(),
-                                           spot_issues(raw_text, context))
+    # Proposed grounds first, then the exhaustive issue spotter — ALWAYS
+    # sequential so the spotter reuses the implicit-cache prefix whenever
+    # the calls end up on Gemini (raw_text carries the [CLIENT'S OBJECTIVE]
+    # header, so spotted issues are framed for the objective too).
+    result = await _fresh_grounds()
+    spotted = await spot_issues(raw_text, context)
 
     # Deterministic backstops: every fresh ground is PROPOSED and labelled —
     # a model that forgot the label still yields "Proposed Ground N" cards.
@@ -1481,10 +1546,13 @@ async def extract_combined(raw_text: str, context: CaseContext,
     surviving spotted issues; ids renumbered sequentially. A document
     with no pleaded grounds (or no spottable extras) is fine — combined
     never blocks on one side being empty."""
-    (grounds, grounds_meta), spotted = await asyncio.gather(
-        extract_grounds(raw_text, context),
-        spot_issues(raw_text, context),
-    )
+    # ALWAYS sequential — grounds first, then the spotter. Whenever the
+    # calls end up on Gemini (fallback, or Claude failing mid-run — a
+    # claude_available() pre-check misses that case), the spotter lands on
+    # the implicit-cache prefix the grounds call just warmed (byte-identical
+    # case-material prefix → cached-token discount on most of its input).
+    grounds, grounds_meta = await extract_grounds(raw_text, context)
+    spotted = await spot_issues(raw_text, context)
     merged = _merge_spotted_issues(grounds, spotted)
     # Gap-filler: pleaded grounds often absorb most spotted issues — when few
     # survive, ONE more spotter pass hunts only the categories grounds rarely
