@@ -3,7 +3,6 @@ import { MoreVertical, Trash2, CheckCircle, AlertCircle, Loader, Music, Play, Pa
 import { toast } from 'react-toastify';
 import DocumentProcessingProgress from './DocumentProcessingProgress';
 import documentApi from '../../services/documentApi';
-import { ChronologyButton } from '../Chronology';
 
 const PdfIcon = ({ className = "w-6 h-6", isProcessing = false }) => (
   <svg
@@ -42,7 +41,7 @@ const PdfIcon = ({ className = "w-6 h-6", isProcessing = false }) => (
   </svg>
 );
 
-const DocumentCard = ({ document, individualStatus, onDocumentClick, onChronologyClick, onDelete }) => {
+const DocumentCard = ({ document, individualStatus, onDocumentClick, onDelete }) => {
   const [showMenu, setShowMenu] = useState(false);
   const menuRef = useRef(null);
   const [animatedProgress, setAnimatedProgress] = useState(0);
@@ -415,7 +414,7 @@ const DocumentCard = ({ document, individualStatus, onDocumentClick, onChronolog
         </div>
 
         <div className="flex-1 min-w-0">
-          <div className="flex items-start justify-between gap-2">
+          <div className="flex items-center justify-between gap-2">
             <div className="flex-1 min-w-0">
               <p className="font-medium text-gray-900 truncate text-sm leading-tight mb-1" title={displayName}>
                 {displayName}
@@ -427,7 +426,7 @@ const DocumentCard = ({ document, individualStatus, onDocumentClick, onChronolog
               </div>
             </div>
 
-            <div className="flex items-center gap-1 flex-shrink-0">
+            <div className="flex items-center gap-1.5 flex-shrink-0">
               {isAudioFile && !isProcessing && (
                 <button
                   onClick={handleToggleAudio}
@@ -438,6 +437,12 @@ const DocumentCard = ({ document, individualStatus, onDocumentClick, onChronolog
                   {isResolvingAudio ? <Loader className="w-4 h-4 animate-spin" /> : isAudioPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
                 </button>
               )}
+              <span
+                className={`px-2 py-1 rounded-md text-xs font-medium whitespace-nowrap flex items-center gap-1.5 ${getStatusBadgeColor(currentStatus)}`}
+              >
+                {getStatusIcon(currentStatus)}
+                <span className="capitalize">{currentStatus}</span>
+              </span>
               {onDelete && !isProcessing && (
                 <div className="relative" ref={menuRef}>
                   <button
@@ -462,18 +467,6 @@ const DocumentCard = ({ document, individualStatus, onDocumentClick, onChronolog
                 </div>
               )}
             </div>
-          </div>
-
-          <div className="mt-2.5 flex items-center justify-between gap-2">
-            <span
-              className={`px-2 py-1 rounded-md text-xs font-medium whitespace-nowrap flex items-center gap-1.5 ${getStatusBadgeColor(currentStatus)}`}
-            >
-              {getStatusIcon(currentStatus)}
-              <span className="capitalize">{currentStatus}</span>
-            </span>
-            {onChronologyClick && isCompleted && (
-              <ChronologyButton onClick={() => onChronologyClick(document)} />
-            )}
           </div>
 
           {(isProcessing || isFailed) && (

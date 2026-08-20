@@ -7,7 +7,7 @@ import { DOCS_BASE_URL, getUserIdForDrafting } from "../../config/apiConfig";
 import GoogleDrivePicker from "../GoogleDrivePicker";
 import { extractUploadPolicyErrorMessage } from "../../utils/llmQuotaMessages";
 
-const FolderContent = ({ onDocumentClick, onChronologyClick }) => {
+const FolderContent = ({ onDocumentClick }) => {
  const {
  selectedFolder,
  documents,
@@ -570,7 +570,6 @@ showIconOnly={true}
  document={doc}
  individualStatus={processingDocuments.get(doc.id)}
  onDocumentClick={() => handleDocumentClick(doc)}
- onChronologyClick={onChronologyClick}
  onDelete={handleDeleteDocument}
  />
  ))
