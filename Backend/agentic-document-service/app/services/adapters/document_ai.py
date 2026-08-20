@@ -1836,13 +1836,16 @@ def _build_gemini_config(
             config_kwargs["tools"] = tools
 
         # ── Thinking (Gemini 2.5 numeric budget; Gemini 3.x thinking_level) ──
-        # Gemini 3 Flash thinks by default unless thinking_level is sent. "minimal"
-        # is the only way to keep auto-fill fast. Gemini 2.5 still uses thinking_budget
-        # and only when the admin thinking_mode toggle is on.
+        # Gemini 3 Flash thinks at its default (medium) unless thinking_level is sent.
+        # gemini-3.7-flash accepts only low|medium|high — "minimal" is a 400.
         if _gemini_model_supports_thinking_config(model_name) and not _is_gemma_model(model_name):
             raw_name = (model_name or "").strip().lower().rsplit("/", 1)[-1]
             level = str(llm_params.get("thinking_level") or "").strip().lower()
-            if "gemini-3" in raw_name and level in ("minimal", "low", "medium", "high"):
+            if "gemini-3.7" in raw_name and level in ("minimal", "default", ""):
+                level = "low"
+            gemini3_levels = ("low", "medium", "high")
+            allowed = gemini3_levels if "gemini-3.7" in raw_name else ("minimal",) + gemini3_levels
+            if "gemini-3" in raw_name and level in allowed:
                 try:
                     config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=level)
                     active_flags.append(f"thinking_level={level}")
