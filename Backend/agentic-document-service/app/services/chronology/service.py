@@ -5,7 +5,7 @@ from typing import Any
 
 from app.schemas.chronology import ChronologyTree
 
-from .extract import extract_grounded_events
+from .extract import extract_grounded_events, extract_grounded_report
 from .merge import empty_tree, merge_events
 from . import persist
 

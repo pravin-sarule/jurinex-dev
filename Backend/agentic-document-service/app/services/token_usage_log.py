@@ -564,6 +564,16 @@ def log_token_usage_table(
     routing: str | None = None,
 ) -> None:
     """Log immediately, or accumulate when a request session is active."""
+    _store_last_usage(
+        _normalize_usage(
+            {
+                **(usage or {}),
+                "provider": provider or (usage or {}).get("provider"),
+                "model": model_name or (usage or {}).get("model") or (usage or {}).get("modelName"),
+                "context": context,
+            }
+        )
+    )
     if _active_session_key() and _active_session_key() not in _flushed_session_keys:
         record_token_usage(
             context=context,

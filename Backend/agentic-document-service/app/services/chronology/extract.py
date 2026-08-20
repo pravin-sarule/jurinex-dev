@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from .dates import parse_date
@@ -13,6 +14,14 @@ logger = logging.getLogger("agentic_document_service.chronology.extract")
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _MAX_SUMMARY_SENTENCES = 5
+
+
+@dataclass(slots=True)
+class GroundingReport:
+    events: list[GroundedEvent]
+    kept: int
+    dropped: int
+    reasons: dict[str, int] = field(default_factory=dict)
 
 
 def _as_str(value: Any) -> str:
@@ -45,25 +54,36 @@ def _event_dicts(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def extract_grounded_events(
+def extract_grounded_report(
     payload: Any,
     *,
     source_text: str,
     document_name: str,
-) -> list[GroundedEvent]:
+) -> GroundingReport:
     """Keep only events with a parseable date, a source quote, and both present in OCR text."""
     out: list[GroundedEvent] = []
-    dropped = 0
+    reasons: dict[str, int] = {}
+
+    def _drop(reason: str) -> None:
+        reasons[reason] = reasons.get(reason, 0) + 1
+
     for item in _event_dicts(payload):
         parsed = parse_date(item.get("date") or item.get("eventDate") or item.get("event_date"))
         title = _as_str(item.get("title") or item.get("event") or item.get("heading"))
-        particulars = _clip_particulars(item.get("particulars") or item.get("summary") or item.get("description") or title)
-        quote = _as_str(item.get("sourceQuote") or item.get("source_quote") or item.get("quote") or item.get("evidence"))
+        particulars = _clip_particulars(
+            item.get("particulars") or item.get("summary") or item.get("description") or title
+        )
+        quote = _as_str(
+            item.get("sourceQuote") or item.get("source_quote") or item.get("quote") or item.get("evidence")
+        )
         if not parsed or not title:
-            dropped += 1
+            _drop("missing_date_or_title")
             continue
-        if not quote_in_source(quote, source_text) or not date_in_source(parsed, source_text):
-            dropped += 1
+        if not quote_in_source(quote, source_text):
+            _drop("quote_not_in_document")
+            continue
+        if not date_in_source(parsed, source_text):
+            _drop("date_not_in_document")
             continue
         event_type = normalize_event_type(item.get("eventType") or item.get("event_type"))
         phase = normalize_phase(item.get("phase"), event_type)
@@ -80,11 +100,25 @@ def extract_grounded_events(
                 source_quote=quote[:500],
             )
         )
-    if dropped:
+    dropped = sum(reasons.values())
+    if dropped or out:
         logger.info(
-            "[Chronology] grounded %d event(s), dropped %d unverifiable from %s",
+            "[Chronology] document=%s  kept=%d  dropped=%d  model=form_population_agent",
+            document_name,
             len(out),
             dropped,
-            document_name,
         )
-    return out
+    return GroundingReport(events=out, kept=len(out), dropped=dropped, reasons=reasons)
+
+
+def extract_grounded_events(
+    payload: Any,
+    *,
+    source_text: str,
+    document_name: str,
+) -> list[GroundedEvent]:
+    return extract_grounded_report(
+        payload,
+        source_text=source_text,
+        document_name=document_name,
+    ).events
