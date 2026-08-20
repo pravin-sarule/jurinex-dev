@@ -10,6 +10,7 @@ logger = logging.getLogger("agentic_document_service.token_usage")
 
 _session_key_var: ContextVar[str | None] = ContextVar("token_usage_session_key", default=None)
 _thread_local = threading.local()
+_last_usage_local = threading.local()
 _accumulators: dict[str, list[dict[str, Any]]] = {}
 _flushed_session_keys: set[str] = set()
 
@@ -142,6 +143,15 @@ def _normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | str]:
     }
 
 
+def _store_last_usage(normalized: dict[str, Any]) -> None:
+    _last_usage_local.data = dict(normalized)
+
+
+def get_last_usage() -> dict[str, Any]:
+    """Most recent LLM usage on THIS worker thread (input/output tokens + model)."""
+    return dict(getattr(_last_usage_local, "data", None) or {})
+
+
 def begin_token_usage_session(session_key: str | None = None) -> str:
     key = session_key or uuid.uuid4().hex[:12]
     _accumulators[key] = []
@@ -181,6 +191,7 @@ def record_token_usage(
             "context": context,
         }
     )
+    _store_last_usage(normalized)
     if key and key not in _flushed_session_keys and key in _accumulators:
         _accumulators[key].append(normalized)
         return
