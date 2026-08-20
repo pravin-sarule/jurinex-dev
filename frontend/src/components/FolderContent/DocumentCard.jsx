@@ -438,15 +438,15 @@ const DocumentCard = ({ document, individualStatus, onDocumentClick, onChronolog
                   {isResolvingAudio ? <Loader className="w-4 h-4 animate-spin" /> : isAudioPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
                 </button>
               )}
-              {onChronologyClick && isCompleted && (
-                <ChronologyButton onClick={() => onChronologyClick(document)} />
-              )}
               <span
                 className={`px-2 py-1 rounded-md text-xs font-medium whitespace-nowrap flex items-center gap-1.5 ${getStatusBadgeColor(currentStatus)}`}
               >
                 {getStatusIcon(currentStatus)}
                 <span className="capitalize">{currentStatus}</span>
               </span>
+              {onChronologyClick && isCompleted && (
+                <ChronologyButton onClick={() => onChronologyClick(document)} />
+              )}
               
               {onDelete && !isProcessing && (
                 <div className="relative" ref={menuRef}>
