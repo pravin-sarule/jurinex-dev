@@ -1669,6 +1669,7 @@ class FolderWorkflowService:
                              "filingDate", "petitioners", "respondents"}
         has_rich_data = len([k for k in extracted if k in meaningful_fields and extracted[k]]) >= 2
         needs_chronology = not tree.dates
+        did_rebuild = False
 
         if (not has_rich_data or needs_chronology) and stored_case.documents:
             combined_text = "\n\n---\n\n".join(
@@ -1699,6 +1700,7 @@ class FolderWorkflowService:
                     )
                     tree = merge_into_tree(tree, report.events)
                     self._store_chronology(case_id, tree, folder_name=folder_name)
+                    did_rebuild = True
                     log_run_report(
                         stage="extract-case-fields rebuild",
                         case_id=case_id,
@@ -1712,6 +1714,29 @@ class FolderWorkflowService:
                         drop_reasons=report.reasons,
                         tree=tree,
                     )
+
+        if not did_rebuild:
+            log_progress(4, 4, "Using stored chronology", dates=len(tree.dates), fields=len(extracted))
+            log_run_report(
+                stage="extract-case-fields cached",
+                case_id=case_id,
+                document_name="(stored)",
+                chars=0,
+                elapsed_s=0.0,
+                fields_filled=len([k for k in extracted if extracted.get(k)]),
+                field_names=[k for k in extracted if extracted.get(k)],
+                kept_events=tree.eventCount,
+                dropped_events=0,
+                drop_reasons=None,
+                tree=tree,
+                usage={
+                    "model": "(no new LLM call)",
+                    "provider": "-",
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "totalTokens": 0,
+                },
+            )
 
         extracted = dict(extracted)
         extracted["chronology"] = tree.as_dict()

@@ -93,9 +93,24 @@ node migrate.js
 
 Missing table does not fail upload; persist is best-effort and logged as a warning.
 
+## Console logs
+
+On each intake extract the document-service console prints:
+
+1. Progress bars — `1/4` OCR → `2/4` LLM → `3/4` ground dates → `4/4` merge
+2. A boxed **model / input tokens / output tokens / cost** table
+3. Unverifiable events dropped (quote or date not in OCR)
+4. Unique-date table and an ASCII phase tree (`phase → date → event`)
+
+Look for component **`AutoFill`**. Example progress line:
+
+```
+[AutoFill] [########--------]  2/4   50%  LLM extract  agent=form_population_agent
+```
+
 ## Tests
 
 ```bash
 cd Backend/agentic-document-service
-python -m unittest tests.test_chronology_dates tests.test_chronology_merge
+python -m unittest tests.test_chronology_dates tests.test_chronology_merge tests.test_chronology_console
 ```
