@@ -1841,7 +1841,7 @@ def _build_gemini_config(
         if _gemini_model_supports_thinking_config(model_name) and not _is_gemma_model(model_name):
             raw_name = (model_name or "").strip().lower().rsplit("/", 1)[-1]
             level = str(llm_params.get("thinking_level") or "").strip().lower()
-            if "gemini-3.7" in raw_name and level in ("minimal", "default", ""):
+            if "gemini-3.7" in raw_name and level == "minimal":
                 level = "low"
             gemini3_levels = ("low", "medium", "high")
             allowed = gemini3_levels if "gemini-3.7" in raw_name else ("minimal",) + gemini3_levels
