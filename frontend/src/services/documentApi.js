@@ -464,6 +464,66 @@ const documentApi = {
     };
   },
 
+  /** Create a document in an external editor (google|zoho) and link it into a storage folder. */
+  createStorageDocument: async (folderName, provider, title) => {
+    const response = await axios.post(
+      `${API_BASE_URL}/${folderPathSegment(folderName)}/create-document`,
+      { provider, title },
+      { headers: getAuthHeader(), timeout: 90000 }
+    );
+    return response.data;
+  },
+
+  /** Fresh editor session (iframe URL) for an external document. */
+  getEditorSession: async (fileId) => {
+    const response = await axios.post(
+      `${API_BASE_URL}/file/${fileId}/editor-session`,
+      {},
+      { headers: getAuthHeader(), timeout: 60000 }
+    );
+    return response.data;
+  },
+
+  /** Snapshot an editor-backed doc (Google/Zoho) into a chattable file id. */
+  getChatSource: async (fileId) => {
+    const response = await axios.post(
+      `${API_BASE_URL}/file/${fileId}/chat-source`,
+      {},
+      { headers: getAuthHeader(), timeout: 90000 }
+    );
+    return response.data;
+  },
+
+  /** Google Drive connection status (proxied through the document service). */
+  getGoogleAuthStatus: async () => {
+    const response = await axios.get(`${API_BASE_URL}/storage/google-auth-status`, {
+      headers: getAuthHeader(),
+    });
+    return response.data;
+  },
+
+  /** Rename a Case Storage folder; backend re-points the folder's files too. */
+  renameStorageFolder: async (folderId, newName) => {
+    const response = await axios.post(
+      `${API_BASE_URL}/storage/rename-folder`,
+      { folderId, newName },
+      { headers: getAuthHeader() }
+    );
+    return response.data;
+  },
+
+  /** Case Storage folders only (parent path 'case-storage') — never returned by the default /folders listing. */
+  getStorageFolders: async () => {
+    const response = await axios.get(`${API_BASE_URL}/folders`, {
+      params: { scope: 'storage' },
+      headers: getAuthHeader(),
+    });
+    return {
+      ...response.data,
+      folders: Array.isArray(response.data?.folders) ? response.data.folders : [],
+    };
+  },
+
   getDocumentsInFolder: async (folderName) => {
     const response = await axios.get(
       `${API_BASE_URL}/${folderPathSegment(folderName)}/files`,
@@ -472,11 +532,21 @@ const documentApi = {
     return normalizeFolderFilesResponse(response.data, folderName);
   },
 
-  uploadDocuments: async (folderName, files, secret_id = null) => {
+  uploadDocuments: async (folderName, files, secret_id = null, opts = {}) => {
     const isProduction = window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
     const environment = isProduction ? 'PRODUCTION' : 'LOCALHOST';
     const LARGE_FILE_THRESHOLD = 32 * 1024 * 1024;
     const uploadedDocuments = [];
+    // opts.process === false → storage-only upload (no OCR/embedding pipeline), used by Case Storage.
+    const skipProcessing = opts.process === false;
+    // opts.onProgress(percent 0-100) → aggregate byte progress across all files.
+    const totalBytes = Array.from(files).reduce((s, f) => s + (f.size || 0), 0) || 1;
+    let completedBytes = 0;
+    const reportProgress = (loadedInCurrent) => {
+      if (typeof opts.onProgress !== 'function') return;
+      const pct = Math.round(((completedBytes + (loadedInCurrent || 0)) / totalBytes) * 100);
+      opts.onProgress(Math.min(99, pct)); // 100 only when everything finished
+    };
 
     console.log(`[uploadDocuments] 🚀 Starting upload for ${files.length} file(s) to folder: ${folderName}`);
     console.log(`[uploadDocuments] 🌍 Environment: ${environment}`);
@@ -511,17 +581,11 @@ const documentApi = {
           console.log(`[📤 SIGNED URL UPLOAD] Signed URL (first 100 chars): ${signedUrl.substring(0, 100)}...`);
 
           console.log(`[📤 SIGNED URL UPLOAD] Step 2/3: Uploading file directly to GCS (PUT request)`);
-          const uploadResponse = await fetch(signedUrl, {
-            method: 'PUT',
-            body: file,
-            headers: {
-              'Content-Type': file.type || 'application/octet-stream',
-            },
+          // axios (not fetch) so onUploadProgress can drive the progress bar.
+          await axios.put(signedUrl, file, {
+            headers: { 'Content-Type': file.type || 'application/octet-stream' },
+            onUploadProgress: (e) => reportProgress(e.loaded),
           });
-
-          if (!uploadResponse.ok) {
-            throw new Error(`Failed to upload file to GCS: ${uploadResponse.statusText}`);
-          }
 
           console.log(`[📤 SIGNED URL UPLOAD] ✅ File uploaded to GCS successfully`);
 
@@ -536,6 +600,7 @@ const documentApi = {
               mimetype: file.type,
               size: file.size,
               secret_id,
+              ...(skipProcessing ? { process: false } : {}),
             },
             { headers: getAuthHeader() }
           );
@@ -560,6 +625,9 @@ const documentApi = {
           if (secret_id) {
             formData.append('secret_id', secret_id);
           }
+          if (skipProcessing) {
+            formData.append('process', 'false');
+          }
 
           const response = await axios.post(
             `${API_BASE_URL}/${folderPathSegment(folderName)}/upload`,
@@ -569,6 +637,7 @@ const documentApi = {
                 ...getAuthHeader(),
                 'Content-Type': 'multipart/form-data',
               },
+              onUploadProgress: (e) => reportProgress(Math.min(e.loaded, file.size)),
             }
           );
 
@@ -581,6 +650,8 @@ const documentApi = {
             [];
           uploadedDocuments.push(...docs);
         }
+        completedBytes += file.size || 0;
+        reportProgress(0);
       } catch (error) {
         const uploadMethod = isLarge ? 'SIGNED URL UPLOAD' : 'REGULAR UPLOAD';
         console.error(`[${uploadMethod}] ❌ Upload failed for ${file.name}:`, error);
@@ -619,6 +690,7 @@ const documentApi = {
     }
 
     console.log(`[uploadDocuments] ✅ Upload process completed. Successfully uploaded: ${uploadedDocuments.filter(d => !d.error).length}/${files.length} files`);
+    if (typeof opts.onProgress === 'function') opts.onProgress(100);
     return { success: true, documents: uploadedDocuments };
   },
 

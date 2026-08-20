@@ -96,6 +96,19 @@ def create_signed_upload_url(
     }
 
 
+def to_gcs_uri(bucket_name: str, gcs_path: str) -> str:
+    """Build a gs:// URI from user_files.gcs_path, tolerating both storage forms.
+
+    The column conventionally holds a RELATIVE object key, but some rows (e.g.
+    Case Storage uploads from mid-Aug 2026, processed-file URI write-backs) hold
+    a full gs:// URI — prefixing those again produces a doubled, 404ing path.
+    """
+    path = (gcs_path or "").strip()
+    if path.startswith("gs://"):
+        return path
+    return f"gs://{bucket_name}/{path.lstrip('/')}"
+
+
 def upload_file_to_gcs(bucket_name: str, gcs_path: str, data: bytes, mime_type: str) -> str:
     bucket = get_client().bucket(bucket_name)
     blob = bucket.blob(gcs_path)

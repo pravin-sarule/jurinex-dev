@@ -333,6 +333,38 @@ def enqueue_case_documents(
         raise
 
 
+def store_case_documents(
+    user_id: str,
+    folder_name: str,
+    documents: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Storage-only upload: persist files without queuing the processing pipeline."""
+    task = "store_documents_without_processing"
+    _log_agent_start(
+        "document_processing_agent",
+        task,
+        user_id=user_id,
+        folder_name=folder_name,
+        document_count=len(documents),
+    )
+    try:
+        payload = FOLDER_SERVICE.store_documents(
+            user_id=user_id,
+            folder_name=folder_name,
+            documents=[DocumentReference(**document) for document in documents],
+        )
+        _log_agent_success(
+            "document_processing_agent",
+            task,
+            folder_name=folder_name,
+            stored_count=len(payload.get("uploadedFiles", [])),
+        )
+        return payload
+    except Exception as exc:
+        _log_agent_error("document_processing_agent", task, exc, user_id=user_id, folder_name=folder_name)
+        raise
+
+
 def get_case_processing_status(folder_name: str, user_id: str | None = None) -> dict[str, Any]:
     task = "processing_status_lookup"
     _log_agent_start("document_processing_agent", task, folder_name=folder_name)
@@ -406,11 +438,11 @@ def update_case_tool(case_id: str, user_id: str, case_data: dict[str, Any]) -> d
         raise
 
 
-def list_case_folders(user_id: str | None = None) -> dict[str, Any]:
+def list_case_folders(user_id: str | None = None, scope: str = "cases") -> dict[str, Any]:
     task = "list_case_folders"
     _log_agent_start("document_processing_agent", task, user_id=user_id)
     try:
-        payload = FOLDER_SERVICE.list_folders(user_id)
+        payload = FOLDER_SERVICE.list_folders(user_id, scope=scope)
         _log_agent_success("document_processing_agent", task, folder_count=len(payload.get("folders", [])))
         return payload
     except Exception as exc:

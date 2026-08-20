@@ -29,6 +29,7 @@ from app.services.gcs_service import (
     delete_object_if_exists,
     download_object_buffer,
     get_object_metadata,
+    to_gcs_uri,
     upload_file_to_gcs,
 )
 from app.services.google_drive_service import download_file as download_from_drive
@@ -376,7 +377,7 @@ async def _load_files_for_chat(user_id: str, file_ids: list[str], cfg: dict[str,
         if not policy.get("ok"):
             raise ValueError(policy.get("message"))
         files.append(row)
-    uris = [f"gs://{bucket}/{f['gcs_path']}" for f in files]
+    uris = [to_gcs_uri(bucket, f["gcs_path"]) for f in files]
     return files, uris
 
 
@@ -438,6 +439,12 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
             history_rows = FileChatRepository.get_history(primary_file, None)[-5:]
 
         attached = resolve_attached_files_for_session(history_rows, files[0], primary_file, bucket)
+        if len(files) > 1:
+            # The request explicitly attached multiple files (file_ids) — they
+            # define the grounding set. Without this, the history-derived
+            # attachment (which only knows the session's original file) would
+            # silently drop every added source.
+            attached = build_attached_files_snapshot(files, bucket) or attached
         active_uris = build_active_gcs_uris_from_attached(attached) or uris
         # Only the last Q&A turn is sent as context to the LLM
         conv = format_conversation_history(history_rows[-1:])
@@ -492,8 +499,12 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
 
         # Claude chat models run WITHOUT Gemini explicit caching — the document
         # is sent directly to the Anthropic API by stream_llm_with_gcs below.
+        # Clients may also opt out entirely (disable_cache: true — used by the
+        # Case Storage "Ask Jurinex" chat): no cache is checked, created, or
+        # stored; the request goes straight to direct GCS streaming.
         use_claude = _is_claude_model(resolved_model)
-        if not use_claude:
+        disable_cache = bool(body.get("disable_cache"))
+        if not use_claude and not disable_cache:
             yield sse({"type": "status", "status": "cache_check", "message": "Checking Gemini explicit cache..."})
 
         # Use the plan/admin-configured model; fall back to ADK default
@@ -507,7 +518,7 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
         # between this check and generation, the ADK path yields nothing and the
         # GCS fallback below fetches the bytes itself.
         file_specs = []
-        if not use_claude:
+        if not use_claude and not disable_cache:
             cache_is_active = await gemini_cache_service.has_active_cache(primary_file)
             if not cache_is_active:
                 for f in files:
@@ -532,6 +543,15 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
         async def _pipe_llm_events(events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[str]:
             nonlocal full_answer, chunk_count, captured_usage
             async for ev in events:
+                # Authoritative stitched answer from the generator (excludes
+                # degenerate/restarted rounds that were streamed live) — replaces
+                # the chunk accumulation; never forwarded to the client directly.
+                if ev.get("type") in ("final_answer", "done"):
+                    authoritative = ev.get("text") or ev.get("answer") or ""
+                    # Unconditional replace: an EMPTY stitched answer means every
+                    # round was degenerate — the streamed garbage must not survive.
+                    full_answer = authoritative
+                    continue
                 if ev.get("type") == "thought":
                     yield sse({"type": "thought", "text": ev.get("text", "")})
                 elif ev.get("type") == "status":
@@ -562,7 +582,7 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
         # ── ADK ContextCacheConfig path (Gemini only — Claude runs uncached) ──
         # ADK manages the Gemini explicit cache lifecycle automatically:
         # creation, TTL extension, refresh after N uses. No validate_cache_exists needed.
-        if not use_claude:
+        if not use_claude and not disable_cache:
             try:
                 yield sse({"type": "status", "status": "cache_check", "message": "Checking Gemini explicit cache..."})
                 async for line in _pipe_llm_events(
@@ -591,7 +611,7 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
 
         # ── Direct GCS streaming: primary path for Claude, fallback for Gemini ──
         if not full_answer.strip():
-            if not use_claude:
+            if not use_claude and not disable_cache:
                 logger.warning("Falling back to direct GCS streaming")
             yield sse(
                 {
@@ -654,6 +674,10 @@ async def stream_document_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
                 secret_id=secret_id_save,
                 chat_history=hist_storage,
                 attached_files=attached_snapshot,
+                # Case Storage ("Ask Jurinex") chats are tagged so they never
+                # appear in ChatModel's conversation listings (which filter on
+                # chat_type='chat_model'); per-file history has no type filter.
+                chat_type="case_storage" if body.get("chat_source") == "case_storage" else "chat_model",
             )
         except Exception as save_exc:
             logger.warning("save_chat failed (answer will still be delivered): %s", save_exc)
@@ -816,6 +840,10 @@ async def stream_general_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
                     await asyncio.sleep(delay_ms / 1000.0)
             elif ev.get("type") == "usage":
                 captured_usage = ev
+            elif ev.get("type") in ("final_answer", "done"):
+                authoritative = ev.get("text") or ev.get("answer") or ""
+                # Unconditional replace (see doc path) — garbage must not survive.
+                full_answer = authoritative
 
         if not full_answer.strip():
             yield sse({"type": "error", "message": "Received empty response from LLM"})
@@ -1143,6 +1171,11 @@ async def stream_judgement_chat(ctx: dict[str, Any]) -> AsyncIterator[str]:
                         await asyncio.sleep(delay_ms / 1000.0)
                 elif ev.get("type") == "usage":
                     captured_usage = ev
+                elif ev.get("type") in ("final_answer", "done"):
+                    authoritative = ev.get("text") or ev.get("answer") or ""
+                    # Unconditional replace: an EMPTY stitched answer means every
+                    # round was degenerate — the streamed garbage must not survive.
+                    full_answer = authoritative
 
         if not full_answer.strip():
             step("Generate answer", "empty", (search_error or "no judgements found")[:60])

@@ -457,6 +457,7 @@ import 'react-toastify/dist/ReactToastify.css';
 import MainLayout from './layouts/MainLayout';
 import DashboardPage from './pages/DashboardPage';
 import DocumentUploadPage from './pages/DocumentUploadPage';
+import CaseStoragePage from './pages/CaseStoragePage';
 import FolderDetailPage from './pages/FolderDetailPage';
 import EvidenceMatrixPage from './pages/EvidenceMatrixPage';
 import TimelinePage from './pages/TimelinePage';
@@ -578,6 +579,17 @@ function App() {
                 <AuthChecker>
                   <MainLayout>
                     <FolderDetailPage />
+                  </MainLayout>
+                </AuthChecker>
+              }
+            />
+
+            <Route
+              path="/case-storage"
+              element={
+                <AuthChecker>
+                  <MainLayout>
+                    <CaseStoragePage />
                   </MainLayout>
                 </AuthChecker>
               }

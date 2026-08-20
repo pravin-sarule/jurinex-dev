@@ -326,6 +326,329 @@ class FolderWorkflowService:
             message="Documents queued successfully for parallel processing.",
         )
 
+    def store_documents(
+        self,
+        user_id: str,
+        folder_name: str,
+        documents: list[DocumentReference],
+    ) -> dict[str, Any]:
+        """Persist uploaded files as plain storage — no OCR/chunking/embedding pipeline.
+
+        Used by the Case Storage flow: files land in GCS + user_files with status
+        'uploaded' and never enter the processing queue, so they stay invisible to
+        case chat / extraction and cost nothing to store.
+        """
+        uploaded_files: list[dict[str, Any]] = []
+        if is_db_available():
+            try:
+                with get_db_connection() as conn, conn.cursor() as cur:
+                    for document in documents:
+                        db_file_id = self._create_db_file_record(
+                            cur,
+                            user_id=str(user_id),
+                            folder_name=folder_name,
+                            document=document,
+                            status="uploaded",
+                            processing_progress=100,
+                        )
+                        uploaded_files.append(
+                            {
+                                "id": db_file_id,
+                                "file_id": db_file_id,
+                                "document_name": document.document_name,
+                                "originalname": document.document_name,
+                                "mimetype": document.mime_type,
+                                "size": int(document.metadata.get("size") or 0),
+                                "status": "uploaded",
+                                "processing_progress": 100,
+                            }
+                        )
+                    conn.commit()
+            except Exception as exc:
+                logger.warning(
+                    "[FolderService] task=store_documents status=db_error user_id=%s folder=%s error=%s",
+                    user_id,
+                    folder_name,
+                    exc,
+                )
+        logger.info(
+            "[FolderService] task=store_documents status=saved user_id=%s folder=%s files=%s",
+            user_id,
+            folder_name,
+            len(uploaded_files),
+        )
+        return {
+            "success": True,
+            "folderName": folder_name,
+            "uploadedFiles": uploaded_files,
+            "documents": uploaded_files,
+            "message": "Documents uploaded to storage (no processing).",
+        }
+
+    def create_external_document(
+        self,
+        user_id: str,
+        folder_name: str,
+        provider: str,
+        external_id: str,
+        title: str,
+        mimetype: str,
+        extra_metadata: dict[str, Any] | None = None,
+        gcs_path: str | None = None,
+        size: int = 0,
+    ) -> dict[str, Any]:
+        """Link an editor-backed document (Google Docs / Zoho Writer) into a Case
+        Storage folder. Google docs are pointers (gcs_path 'external://…', which
+        delete_file skips); Zoho docs pass a real gs:// path since their DOCX
+        lives in our bucket and editor sessions/saves go through it.
+        """
+        if not is_db_available():
+            raise ValueError("Database unavailable")
+        file_id = str(uuid.uuid4())
+        doc_metadata = {"provider": provider, "external_id": str(external_id), **(extra_metadata or {})}
+        with get_db_connection() as conn, conn.cursor() as cur:
+            file_columns = self._get_table_columns(cur, "user_files")
+            payload: dict[str, Any] = {
+                "id": file_id,
+                "user_id": str(user_id),
+                "originalname": title,
+                "gcs_path": gcs_path or f"external://{provider}/{external_id}",
+                "folder_path": (folder_name or "").strip().strip("/") or None,
+                "mimetype": mimetype,
+                "size": int(size or 0),
+                "is_folder": False,
+                "status": "external",
+                "processing_progress": 100,
+            }
+            if "metadata" in file_columns:
+                payload["metadata"] = json.dumps(doc_metadata)
+            insert_columns = [column for column in payload if column in file_columns]
+            if "created_at" in file_columns:
+                insert_columns.append("created_at")
+            placeholders = ["NOW()" if column == "created_at" else "%s" for column in insert_columns]
+            values = [payload[column] for column in insert_columns if column != "created_at"]
+            cur.execute(
+                f"INSERT INTO user_files ({', '.join(insert_columns)}) VALUES ({', '.join(placeholders)})",
+                values,
+            )
+            conn.commit()
+        logger.info(
+            "[FolderService] task=create_external_document user_id=%s folder=%s provider=%s id=%s",
+            user_id, folder_name, provider, file_id,
+        )
+        return {
+            "success": True,
+            "file": {
+                "id": file_id,
+                "name": title,
+                "originalname": title,
+                "mimetype": mimetype,
+                "size": int(size or 0),
+                "status": "external",
+                "processing_progress": 100,
+                "metadata": doc_metadata,
+                "created_at": datetime.now(tz=UTC).isoformat(),
+            },
+        }
+
+    def get_external_document(self, file_id: str, user_id: str | None) -> dict[str, Any]:
+        """Fetch an external-document row (with metadata) for the editor-session endpoint."""
+        if not is_db_available():
+            raise ValueError("Database unavailable")
+        accessible_user_ids = self._get_accessible_user_ids(user_id) if user_id else []
+        if not accessible_user_ids:
+            raise ValueError("File not found or access denied.")
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, originalname, mimetype, status, metadata, gcs_path, user_id
+                FROM user_files
+                WHERE id::text = %s AND is_folder = false
+                  AND user_id::text = ANY(%s::text[])
+                LIMIT 1
+                """,
+                [str(file_id), [str(u) for u in accessible_user_ids]],
+            )
+            row = cur.fetchone()
+        if not row:
+            raise ValueError("File not found or access denied.")
+        if (row.get("status") or "") != "external" or not row.get("metadata"):
+            raise ValueError("Not an external editor document.")
+        return {
+            "id": str(row["id"]),
+            "name": row.get("originalname"),
+            "mimetype": row.get("mimetype"),
+            "metadata": row.get("metadata"),
+            "gcs_path": row.get("gcs_path"),
+            "user_id": str(row.get("user_id")),
+        }
+
+    def get_external_document_by_id(self, file_id: str) -> dict[str, Any]:
+        """Unauthenticated lookup for the Zoho save-callback (Zoho's servers call it;
+        the unguessable UUID is the credential, and writes only touch the row's own object)."""
+        if not is_db_available():
+            raise ValueError("Database unavailable")
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, originalname, gcs_path, status, metadata
+                FROM user_files
+                WHERE id::text = %s AND is_folder = false AND status = 'external'
+                LIMIT 1
+                """,
+                [str(file_id)],
+            )
+            row = cur.fetchone()
+        if not row:
+            raise ValueError("External document not found")
+        return {
+            "id": str(row["id"]),
+            "name": row.get("originalname"),
+            "gcs_path": row.get("gcs_path"),
+            "metadata": row.get("metadata"),
+        }
+
+    def prepare_chat_snapshot(self, file_id: str, user_id: str) -> dict[str, Any]:
+        """Make an editor-backed document (Google Doc / Zoho DOCX) chattable.
+
+        The chat service reads user_files.gcs_path raw bytes, which works only
+        for formats the LLM ingests (PDF/text). Google Docs live in Drive and
+        Zoho files are DOCX, so we snapshot: export/convert the CURRENT content
+        into a hidden sibling user_files row (folder_path NULL keeps it out of
+        every folder listing) and refresh it on each call. Returns
+        {chat_file_id, name} — chat history keys off the stable snapshot row.
+        """
+        from app.services.adapters import external_editors, gcs
+
+        record = self.get_external_document(file_id, user_id)
+        metadata = record.get("metadata") or {}
+        provider = (metadata.get("provider") or "").lower()
+
+        if provider == "google":
+            google_file_id = metadata.get("google_file_id") or metadata.get("external_id")
+            if not google_file_id:
+                raise ValueError("Missing Google file id on document")
+            content = external_editors.export_google_doc_pdf(record["user_id"], google_file_id)
+            ext, mimetype = "pdf", "application/pdf"
+        elif provider == "zoho":
+            gcs_path = record.get("gcs_path") or ""
+            if not gcs_path.startswith("gs://"):
+                raise ValueError("Zoho document has no storage object")
+            docx_bytes = gcs.download_bytes(gcs_path)
+            text = external_editors.extract_docx_text(docx_bytes)
+            if not text.strip():
+                text = "(The document is currently empty.)"
+            content = text.encode("utf-8")
+            ext, mimetype = "txt", "text/plain"
+        else:
+            raise ValueError(f"Unknown provider '{provider}'")
+
+        snapshot_key = f"{record['user_id']}/documents/.chat-snapshots/{file_id}.{ext}"
+        gcs.upload_bytes(content, snapshot_key, content_type=mimetype)
+
+        snapshot_id = metadata.get("chat_snapshot_id")
+        with get_db_connection() as conn, conn.cursor() as cur:
+            existing = None
+            if snapshot_id:
+                cur.execute("SELECT id FROM user_files WHERE id::text = %s", [str(snapshot_id)])
+                existing = cur.fetchone()
+            if existing:
+                cur.execute(
+                    "UPDATE user_files SET size = %s, mimetype = %s, gcs_path = %s, updated_at = NOW() WHERE id::text = %s",
+                    [len(content), mimetype, snapshot_key, str(snapshot_id)],
+                )
+            else:
+                snapshot_id = str(uuid.uuid4())
+                cur.execute(
+                    """
+                    INSERT INTO user_files
+                        (id, user_id, originalname, gcs_path, folder_path, mimetype, size,
+                         is_folder, status, processing_progress, metadata, created_at)
+                    VALUES (%s, %s, %s, %s, NULL, %s, %s, false, 'uploaded', 100, %s, NOW())
+                    """,
+                    [
+                        snapshot_id,
+                        str(record["user_id"]),
+                        f"{record.get('name') or 'document'}",
+                        snapshot_key,
+                        mimetype,
+                        len(content),
+                        json.dumps({"snapshot_of": str(file_id)}),
+                    ],
+                )
+                new_meta = {**metadata, "chat_snapshot_id": snapshot_id}
+                cur.execute(
+                    "UPDATE user_files SET metadata = %s WHERE id::text = %s",
+                    [json.dumps(new_meta), str(file_id)],
+                )
+            conn.commit()
+        logger.info(
+            "[FolderService] task=prepare_chat_snapshot file=%s provider=%s snapshot=%s bytes=%d",
+            file_id, provider, snapshot_id, len(content),
+        )
+        return {"chat_file_id": str(snapshot_id), "name": record.get("name")}
+
+    def update_external_document_content(self, file_id: str, size: int) -> None:
+        """After a Zoho save-callback overwrote the GCS object, record the new size."""
+        if not is_db_available():
+            return
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE user_files SET size = %s, updated_at = NOW() WHERE id::text = %s",
+                [int(size), str(file_id)],
+            )
+            conn.commit()
+
+    def rename_storage_folder(self, user_id: str, folder_id: str, new_name: str) -> dict[str, Any]:
+        """Rename a Case Storage folder (folder_path='case-storage') and re-point its files.
+
+        Files store the short folder name in folder_path, so they must follow the rename
+        or the folder's listing goes empty. GCS objects are NOT moved — file-level
+        gcs_path stays valid and is what signed view/download URLs use.
+        """
+        safe_new = re.sub(r"[^a-zA-Z0-9._-]", "_", (new_name or "").strip().strip("/"))
+        if not safe_new:
+            raise ValueError("Folder name cannot be empty")
+        if not is_db_available():
+            raise ValueError("Database unavailable")
+        with get_db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, originalname FROM user_files
+                WHERE id = %s AND user_id::text = %s AND is_folder = true AND folder_path = 'case-storage'
+                """,
+                [folder_id, str(user_id)],
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("Storage folder not found")
+            old_name = row["originalname"]
+            if old_name != safe_new:
+                cur.execute(
+                    """
+                    SELECT 1 FROM user_files
+                    WHERE user_id::text = %s AND is_folder = true
+                      AND folder_path = 'case-storage' AND originalname = %s
+                    """,
+                    [str(user_id), safe_new],
+                )
+                if cur.fetchone():
+                    raise ValueError("A folder with this name already exists")
+                cur.execute("UPDATE user_files SET originalname = %s WHERE id = %s", [safe_new, folder_id])
+                cur.execute(
+                    """
+                    UPDATE user_files SET folder_path = %s
+                    WHERE user_id::text = %s AND is_folder = false AND folder_path = %s
+                    """,
+                    [safe_new, str(user_id), old_name],
+                )
+                conn.commit()
+        logger.info(
+            "[FolderService] task=rename_storage_folder user_id=%s folder_id=%s old=%s new=%s",
+            user_id, folder_id, old_name, safe_new,
+        )
+        return {"success": True, "folder": {"id": folder_id, "name": safe_new, "previous_name": old_name}}
+
     def get_queue_status(self) -> dict:
         """Return current processing queue depth and worker count."""
         return self._job_queue.status()
@@ -382,8 +705,11 @@ class FolderWorkflowService:
                     exc,
                 )
 
-        # Also ensure in-memory entry for current session
-        self._ensure_case(user_id, folder_name)
+        # Also ensure in-memory entry for current session — but never for Case Storage
+        # folders: the in-memory record doubles as a "case" in the no-DB fallbacks of
+        # list_folders/list_cases, and storage folders must never surface as cases.
+        if clean_parent_path != "case-storage":
+            self._ensure_case(user_id, folder_name)
 
         return {
             "success": True,
@@ -582,23 +908,33 @@ class FolderWorkflowService:
         user_id: str,
         folder_name: str,
         document: DocumentReference,
+        status: str = "queued",
+        processing_progress: int = 0,
     ) -> str | None:
         file_columns = self._get_table_columns(cur, "user_files")
         if not file_columns:
             return None
 
         file_id = str(uuid.uuid4())
+        # Legacy convention: user_files.gcs_path holds the RELATIVE object key —
+        # consumers (e.g. the chat service) build gs://{bucket}/{gcs_path} themselves,
+        # so a full gs:// URI here doubles the prefix and 404s.
+        raw_gcs_path = document.metadata.get("gcs_path") or self._build_file_storage_key(
+            str(user_id), folder_name, document.document_name
+        )
+        if raw_gcs_path.startswith("gs://"):
+            raw_gcs_path = raw_gcs_path.split("/", 3)[3] if raw_gcs_path.count("/") >= 3 else raw_gcs_path
         insert_payload: dict[str, Any] = {
             "id": file_id,
             "user_id": user_id,
             "originalname": document.document_name,
-            "gcs_path": self._build_file_storage_key(str(user_id), folder_name, document.document_name),
+            "gcs_path": raw_gcs_path,
             "folder_path": (folder_name or "").strip().strip("/") or None,
             "mimetype": document.mime_type or "application/octet-stream",
             "size": int(document.metadata.get("size") or 0),
             "is_folder": False,
-            "status": "queued",
-            "processing_progress": 0,
+            "status": status,
+            "processing_progress": processing_progress,
         }
         insert_columns = [column for column in insert_payload.keys() if column in file_columns]
         if "created_at" in file_columns:
@@ -862,9 +1198,9 @@ class FolderWorkflowService:
             "file_count": file_count,
         }
 
-    def list_folders(self, user_id: str | None = None) -> dict[str, Any]:
+    def list_folders(self, user_id: str | None = None, scope: str = "cases") -> dict[str, Any]:
         if is_db_available():
-            db_folders = self._list_folders_from_db(user_id)
+            db_folders = self._list_folders_from_db(user_id, scope=scope)
             logger.info(
                 "[FolderService] task=list_folders source=db user_id=%s folder_count=%s",
                 user_id,
@@ -875,6 +1211,9 @@ class FolderWorkflowService:
                     "folders": db_folders,
                     "storage_summary": self._case_storage_summary(user_id, db_folders),
                 }
+            # Storage scope has no cases-table or in-memory equivalent — empty means empty.
+            if scope == "storage":
+                return {"folders": []}
             # Fallback: if user_files folders are missing, derive folder cards from cases table.
             case_folders = self._list_folders_from_cases_db(user_id)
             logger.info(
@@ -1089,6 +1428,9 @@ class FolderWorkflowService:
                     file_ids = [str(row["id"]) for row in cur.fetchall()]
 
                     if file_ids:
+                        # file_chats has no ON DELETE CASCADE on user_files —
+                        # clear per-file chats first or the row delete 500s.
+                        cur.execute("DELETE FROM file_chats WHERE file_id::text = ANY(%s::text[])", [file_ids])
                         cur.execute("DELETE FROM chunk_vectors WHERE file_id::text = ANY(%s::text[])", [file_ids])
                         db_counts["chunk_vectors"] = cur.rowcount or 0
                         cur.execute("DELETE FROM file_chunks WHERE file_id::text = ANY(%s::text[])", [file_ids])
@@ -1746,7 +2088,7 @@ class FolderWorkflowService:
             if accessible_user_ids:
                 cur.execute(
                     """
-                    SELECT id, originalname, gcs_path, folder_path, user_id
+                    SELECT id, originalname, gcs_path, folder_path, user_id, metadata
                     FROM user_files
                     WHERE id::text = %s AND is_folder = false
                       AND user_id::text = ANY(%s::text[])
@@ -1757,7 +2099,7 @@ class FolderWorkflowService:
             else:
                 cur.execute(
                     """
-                    SELECT id, originalname, gcs_path, folder_path, user_id
+                    SELECT id, originalname, gcs_path, folder_path, user_id, metadata
                     FROM user_files
                     WHERE id::text = %s AND is_folder = false
                     LIMIT 1
@@ -1771,16 +2113,38 @@ class FolderWorkflowService:
             gcs_path = row.get("gcs_path") or ""
             file_name = row.get("originalname") or file_id
 
-            # Delete vectors + chunks
+            # Cascade: an editor-backed doc may carry a hidden chat-snapshot row.
+            snapshot_gcs_path = None
+            row_meta = row.get("metadata") or {}
+            snapshot_id = row_meta.get("chat_snapshot_id") if isinstance(row_meta, dict) else None
+            if snapshot_id:
+                cur.execute("SELECT gcs_path FROM user_files WHERE id::text = %s", [str(snapshot_id)])
+                snap = cur.fetchone()
+                if snap:
+                    snapshot_gcs_path = snap.get("gcs_path")
+                # file_chats has no ON DELETE CASCADE — remove chats keyed to the
+                # snapshot (Ask Jurinex history for editor-backed docs) first.
+                cur.execute("DELETE FROM file_chats WHERE file_id::text = %s", [str(snapshot_id)])
+                cur.execute("DELETE FROM user_files WHERE id::text = %s", [str(snapshot_id)])
+
+            # Delete chats + vectors + chunks (file_chats is the only FK on
+            # user_files without ON DELETE CASCADE; the rest cascade in the DB).
+            cur.execute("DELETE FROM file_chats WHERE file_id::text = %s", [str(file_id)])
             cur.execute("DELETE FROM chunk_vectors WHERE file_id::text = %s", [str(file_id)])
             cur.execute("DELETE FROM file_chunks WHERE file_id::text = %s", [str(file_id)])
             cur.execute("DELETE FROM user_files WHERE id::text = %s", [str(file_id)])
             conn.commit()
 
-        # Delete GCS object (best-effort — don't fail if missing)
-        if gcs_path:
-            gcs_uri = gcs_path if gcs_path.startswith("gs://") else None
-            if gcs_uri:
+        # Delete GCS object(s) (best-effort — don't fail if missing).
+        # gcs_path may be a full gs:// URI, a relative object key (legacy convention),
+        # or an external:// pointer (no object of ours to delete).
+        for path in (gcs_path, snapshot_gcs_path):
+            if path and not path.startswith("external://"):
+                if path.startswith("gs://"):
+                    gcs_uri = path
+                else:
+                    bucket = settings.gcs_input_bucket_name or settings.gcs_bucket_name or "fileinputbucket"
+                    gcs_uri = f"gs://{bucket}/{path.lstrip('/')}"
                 delete_blob(gcs_uri)
 
         # Remove from in-memory vector store across all cases
@@ -2242,7 +2606,7 @@ class FolderWorkflowService:
             return "Active"
         return "Processing"
 
-    def _list_folders_from_db(self, user_id: str | None) -> list[dict[str, Any]]:
+    def _list_folders_from_db(self, user_id: str | None, scope: str = "cases") -> list[dict[str, Any]]:
         if not user_id:
             return []
         accessible_user_ids = self._get_accessible_user_ids(user_id)
@@ -2250,8 +2614,17 @@ class FolderWorkflowService:
             return []
         limited_firm_user = self._is_limited_firm_user(str(user_id))
 
+        # Case Storage folders live under the reserved parent path 'case-storage' and are
+        # plain document storage — they must never surface as cases (Projects page,
+        # create-case flow), and vice versa.
+        scope_filter = (
+            "AND uf.folder_path = 'case-storage'"
+            if scope == "storage"
+            else "AND COALESCE(uf.folder_path, '') <> 'case-storage'"
+        )
+
         # Fetch only folder records joined with cases — same logic as document-service
-        folder_query = """
+        folder_query = f"""
             SELECT
                 uf.id,
                 uf.user_id,
@@ -2264,6 +2637,7 @@ class FolderWorkflowService:
             LEFT JOIN cases c ON uf.id = c.folder_id
             WHERE uf.user_id::text = ANY(%s::text[])
               AND uf.is_folder = true
+              {scope_filter}
               AND (
                     %s = FALSE
                     OR EXISTS (
@@ -2494,6 +2868,7 @@ class FolderWorkflowService:
                 "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else "",
                 "summary": row.get("summary"),
                 "full_text_content": row.get("full_text_content"),
+                "metadata": row.get("metadata"),
             }
             for row in rows
             if not row.get("is_folder")
