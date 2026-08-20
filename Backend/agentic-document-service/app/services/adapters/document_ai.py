@@ -18,6 +18,7 @@ from app.services.prompt_orchestration import (
     format_instruction_for_query,
     is_custom_template_question as _is_custom_template_question_orch,
 )
+from app.services.chronology.prompt import CHRONOLOGY_EXTRACTION_BLOCK
 from app.services.token_usage_log import log_token_usage_table
 
 logger = logging.getLogger("agentic_document_service.document_ai")
@@ -144,11 +145,21 @@ Return ONLY valid JSON without markdown formatting. If a field is not found, use
 === DOCUMENT CONTENT ===
 """
 
+# Form fields + grounded events in one form_population_agent call (one document input bill).
+_EXTRACTION_PROMPT = (
+    _EXTRACTION_PROMPT.replace(
+        "Return ONLY valid JSON without markdown formatting. If a field is not found, use null or empty string.",
+        CHRONOLOGY_EXTRACTION_BLOCK
+        + "\n\nReturn ONLY valid JSON without markdown formatting. If a field is not found, use null or empty string.",
+        1,
+    )
+)
+
 
 @dataclass(slots=True)
 class ExtractionResult:
     text: str
-    entities: dict[str, str]
+    entities: dict[str, Any]
     confidence_by_field: dict[str, float]
     quality_score: float
 

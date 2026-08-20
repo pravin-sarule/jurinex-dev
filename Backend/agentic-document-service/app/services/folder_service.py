@@ -42,6 +42,15 @@ from app.services.secret_prompt_display import (
     resolve_secret_prompt_llm_name,
 )
 from app.services.adapters.speech_to_text import is_audio_filename, is_audio_mime
+from app.services.chronology import (
+    delete_tree,
+    empty_tree,
+    events_from_extraction,
+    load_or_empty,
+    merge_into_tree,
+    rebind_tree,
+    save_tree,
+)
 
 
 logger = logging.getLogger("agentic_document_service.folder")
@@ -177,7 +186,8 @@ class FolderWorkflowService:
         self._sessions: dict[str, dict[str, ChatSessionRecord]] = {}
         self._prompt_audit: list[PromptAuditRecord] = []
         self._extracted_by_case: dict[str, dict[str, Any]] = {}
-        # Guards _extracted_by_case merges now that documents finalize in parallel.
+        self._chronology_by_case: dict[str, Any] = {}
+        # Guards _extracted_by_case / chronology merges now that documents finalize in parallel.
         self._autofill_lock = threading.Lock()
         num_workers = getattr(settings, "processing_queue_workers", 4)
         self._job_queue = DocumentProcessingQueue(num_workers=num_workers)
