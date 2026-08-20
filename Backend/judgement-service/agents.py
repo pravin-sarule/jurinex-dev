@@ -65,20 +65,28 @@ from tools import (
     attribute_issue_sources,
     authority_signal,
     band_for,
+    cache_storage_track,
     case_court_profile,
     citation_guardian,
     composite_score,
+    cost_totals,
     enforce_verifier_rules,
     fact_match_signal,
     find_pinpoint,
+    flush_usage_events,
     forum_court_rank,
     good_law_signal,
     ik_client,
+    ik_cost_start,
     is_forum_high_court,
     judged_band,
     keyword_signal,
+    llm_track_usage,
+    merge_cost_ledger,
     party_perspective,
     rerank,
+    run_cost_log,
+    shelf_present,
     statutory_shelf_patterns,
     to_ik_operators,
     verify_context_against_source,
@@ -222,13 +230,45 @@ def build_document_context_agent() -> SequentialAgent:
 
 # ─── Stage 1: Issue split ────────────────────────────────────────────────────
 
-def build_issue_split_agent() -> LlmAgent:
-    return LlmAgent(
-        name="issue_split",
-        model=get_settings().gemini_fallback_model,
-        description="Splits a case summary into distinct legal issues.",
-        instruction=(
-            "Act as an expert Indian legal researcher and advocate, equally at home "
+# ─── Implicit context caching for stage-1 (case analysis) ────────────────────
+# Gemini 2.5 models cache request PREFIXES automatically (implicit caching):
+# when two requests start with byte-identical tokens, the shared prefix is
+# billed at the cached-token discount. The stage-1 extractors (grounds +
+# issue spotting, fresh) all read the SAME case material, so their Gemini
+# fallback calls are cache-aligned: ONE shared neutral system line, the
+# shared [CASE MATERIAL + STRUCTURED CONTEXT] block FIRST, the task prompt
+# LAST — and extract_combined / extract_fresh run them SEQUENTIALLY in
+# fallback mode so the second call lands on the warm prefix. (The Claude
+# path is untouched; the verifier already uses EXPLICIT caching.)
+
+_CACHE_ALIGNED_SYSTEM = (
+    "You are a senior Indian litigation associate. Read the CASE MATERIAL, "
+    "then follow the TASK INSTRUCTIONS at the end of the message exactly. "
+    "Output STRICT JSON matching the response schema — nothing else.")
+
+# Room reserved after the shared prefix for the task prompt. The prefix must
+# be byte-identical across the extractors, so ALL of them use this reserve.
+_STAGE1_TASK_RESERVE = 18000
+
+
+def _stage1_prefix(raw_text: str, context: CaseContext) -> str:
+    """The byte-identical implicit-cache prefix every stage-1 fallback call
+    starts with. Anything that varies per extractor goes AFTER it."""
+    return (
+        f"CASE MATERIAL:\n{_budget_case_text(raw_text, _llm_budget() - _STAGE1_TASK_RESERVE)}\n\n"
+        f"STRUCTURED CONTEXT (already extracted and source-verified):\n"
+        f"Facts: {context.facts[:1500]}\n"
+        f"Procedural history: {context.procedural_history[:800]}\n"
+        f"Relief sought: {context.relief_sought[:300]}"
+    )
+
+
+def _cache_aligned(prefix: str, task_prompt: str, extra: str = "") -> str:
+    return f"{prefix}\n\n[TASK INSTRUCTIONS]\n{task_prompt}{extra}"
+
+
+ISSUE_SPLIT_PROMPT = (
+    "Act as an expert Indian legal researcher and advocate, equally at home "
             "in criminal, civil and commercial litigation. You receive the CLIENT'S "
             "raw case material (facts, pleadings, FIR, documents and a structured "
             "context). Extract EVERY distinct legal issue suitable for precedent "
@@ -268,15 +308,25 @@ def build_issue_split_agent() -> LlmAgent:
             "property identifiers, case numbers, or dates. Never add a provision "
             "the material does not support. Ground everything in the material — "
             "never invent. Order by importance to the client's relief; ids from 1.\n\n"
-            "6. For EACH issue also fill: title (a standardized ground name a "
-            "practitioner would recognise, in ANY field of law), doctrine (short "
-            "doctrinal label), sub_doctrine (the SPECIFIC trigger/test within the "
-            "doctrine as ONE short snake_case label — e.g. civil_colour, settlement, "
-            "triable_issue, balance_of_convenience, repealed_statute_fir — coin "
-            "whatever fits the field), statutory_hook (the governing provision), "
-            "and perspective ('petitioner'/'respondent'/'neutral'). Return strict "
-            "JSON matching the schema."
-        ),
+    "6. For EACH issue also fill: title (a standardized ground name a "
+    "practitioner would recognise, in ANY field of law), doctrine (short "
+    "doctrinal label), sub_doctrine (the SPECIFIC trigger/test within the "
+    "doctrine as ONE short snake_case label — e.g. civil_colour, settlement, "
+    "triable_issue, balance_of_convenience, repealed_statute_fir — coin "
+    "whatever fits the field), statutory_hook (the governing provision), "
+    "and perspective ('petitioner'/'respondent'/'neutral'). Return strict "
+    "JSON matching the schema."
+)
+
+
+def build_issue_split_agent() -> LlmAgent:
+    """Cache-aligned: the shared system line only — the full ISSUE_SPLIT_PROMPT
+    rides at the END of the message, after the implicit-cache prefix."""
+    return LlmAgent(
+        name="issue_split",
+        model=get_settings().gemini_fallback_model,
+        description="Splits a case summary into distinct legal issues.",
+        instruction=_CACHE_ALIGNED_SYSTEM,
         generate_content_config=_gen_config(0.25, get_settings().gemini_fallback_model),
         output_schema=IssueList,
         output_key="issues",
@@ -692,12 +742,21 @@ line in United Bank of India v. Naresh Kumar if it appears in the text."""
 
 
 def build_judgment_verifier_agent() -> LlmAgent:
+    # thinking_budget=0 (user decision 2026-08-14): 2.5-flash THINKS by
+    # default and thinking bills as OUTPUT tokens across ~12 calls per
+    # issue — the deterministic enforce_verifier_rules layer is the real
+    # precision guard, so the verifier runs thinking-off. Guarded to
+    # 2.5-era models; Gemini 3 models use thinking_level (see _gen_config).
+    model = get_settings().gemini_model
+    config = _gen_config(0.1, model)
+    if model.startswith("gemini-2"):
+        config.thinking_config = genai_types.ThinkingConfig(thinking_budget=0)
     return LlmAgent(
         name="judgment_verifier",
-        model=get_settings().gemini_model,
+        model=model,
         description="Verifies whether ONE fetched judgment is usable for ONE issue.",
         instruction=JUDGMENT_VERIFIER_SYSTEM,
-        generate_content_config=_gen_config(0.1),
+        generate_content_config=config,
         output_schema=JudgmentVerification,
         output_key="judgment_verification",
         disallow_transfer_to_parent=True,
@@ -706,6 +765,98 @@ def build_judgment_verifier_agent() -> LlmAgent:
 
 
 _VERIFIER_DOC_BUDGET = 22000  # chars of judgment text per verification call
+
+
+# ─── Verifier fast path: direct Gemini call with CONTEXT CACHING ─────────────
+# The v3 verifier prompt (~5k tokens) is identical across every call of a
+# run (~12 per issue × all issues). Explicit context caching bills those
+# tokens once per TTL window at the cached rate instead of full price on
+# every call. Any failure degrades to the ADK agent path — never breaks.
+_VERIFIER_CACHE_TTL_S = 3600
+_verifier_cache: dict[str, tuple[str, float]] = {}  # model -> (name, expires)
+_verifier_cache_lock: asyncio.Lock | None = None
+_verifier_cache_failed = False
+_direct_client = None
+
+
+def _genai_direct():
+    global _direct_client
+    if _direct_client is None:
+        from google import genai
+        _direct_client = genai.Client(api_key=get_settings().google_api_key)
+    return _direct_client
+
+
+async def _verifier_cached_name(model: str) -> str | None:
+    """Create or reuse the cached verifier system prompt for `model`.
+    None disables the fast path (caching unsupported / API error)."""
+    global _verifier_cache_failed, _verifier_cache_lock
+    if _verifier_cache_failed:
+        return None
+    if _verifier_cache_lock is None:
+        _verifier_cache_lock = asyncio.Lock()
+    now = time.time()
+    name, expires = _verifier_cache.get(model, (None, 0.0))
+    if name and now < expires - 120:
+        return name
+    async with _verifier_cache_lock:
+        name, expires = _verifier_cache.get(model, (None, 0.0))
+        if name and now < expires - 120:
+            return name
+        try:
+            cache = await asyncio.to_thread(
+                _genai_direct().caches.create, model=model,
+                config=genai_types.CreateCachedContentConfig(
+                    system_instruction=JUDGMENT_VERIFIER_SYSTEM,
+                    ttl=f"{_VERIFIER_CACHE_TTL_S}s"))
+            _verifier_cache[model] = (cache.name, now + _VERIFIER_CACHE_TTL_S)
+            # Cache STORAGE bills per 1M tokens per hour of TTL — put it on
+            # the bill of the run that created the cache (once per hour).
+            stored_tokens = int(getattr(getattr(cache, "usage_metadata", None),
+                                        "total_token_count", 0) or 0)
+            cache_storage_track(model, stored_tokens, _VERIFIER_CACHE_TTL_S / 3600)
+            logger.info("[verifier] context cache ready (%s, %s tokens stored) — "
+                        "the system prompt now bills once per hour, not per call",
+                        cache.name, f"{stored_tokens:,}")
+            return cache.name
+        except Exception as exc:
+            logger.warning("[verifier] context caching unavailable (%s) — "
+                           "plain per-call prompts instead", exc)
+            _verifier_cache_failed = True
+            return None
+
+
+async def _verify_direct_cached(message: str) -> JudgmentVerification | None:
+    """Verifier call outside ADK: cached system prompt + JSON schema +
+    thinking off. Returns None on ANY failure — the ADK path takes over."""
+    settings = get_settings()
+    if not settings.verifier_context_cache or not settings.google_api_key:
+        return None
+    model = settings.gemini_model
+    cache_name = await _verifier_cached_name(model)
+    if not cache_name:
+        return None
+    config = genai_types.GenerateContentConfig(
+        temperature=0.0,
+        cached_content=cache_name,
+        response_mime_type="application/json",
+        response_schema=JudgmentVerification,
+    )
+    if model.startswith("gemini-2"):
+        config.thinking_config = genai_types.ThinkingConfig(thinking_budget=0)
+    try:
+        resp = await asyncio.to_thread(
+            _genai_direct().models.generate_content,
+            model=model, contents=message, config=config)
+        llm_track_usage(model, getattr(resp, "usage_metadata", None),
+                        task="judgment_verifier", cache_method="explicit")
+        parsed = getattr(resp, "parsed", None)
+        if isinstance(parsed, JudgmentVerification):
+            return parsed
+        return JudgmentVerification.model_validate_json(resp.text or "")
+    except Exception as exc:
+        logger.debug("[verifier] cached-path call failed (%s) — ADK fallback", exc)
+        return None
 
 
 async def verify_judgments(issue: Issue, context: CaseContext,
@@ -751,8 +902,23 @@ async def verify_judgments(issue: Issue, context: CaseContext,
     # verifier waves are the dominant slice of search wall time.
     semaphore = asyncio.Semaphore(get_settings().verifier_concurrency)
 
+    triage_skips = {"n": 0}
+
     async def _verify_one(cand: Candidate) -> tuple[str, JudgmentVerification | None]:
         text = cand.doc_text or ""
+        # PRE-TRIAGE (deterministic, free): the shelf gate is absolute — a
+        # judgment whose FULL text never mentions ANY of the issue's
+        # statutory anchors would be force-rejected AFTER the LLM call
+        # anyway (enforce_verifier_rules), so skip the paid verifier call
+        # and synthesize the identical reject. Pure-doctrine issues carry
+        # no patterns and skip nothing.
+        if shelf_patterns and text and not shelf_present(text, shelf_patterns):
+            triage_skips["n"] += 1
+            return cand.doc_id, JudgmentVerification(
+                verdict="reject", score=0, include_in_output=False,
+                reject_reason=("different statutory shelf — none of the issue's "
+                               "provisions appear in the judgment text "
+                               "(pre-triage, no verifier call spent)"))
         if len(text) > _VERIFIER_DOC_BUDGET:
             # keep the tail intact — the operative order lives there
             text = (text[:_VERIFIER_DOC_BUDGET - 9000]
@@ -774,6 +940,10 @@ async def verify_judgments(issue: Issue, context: CaseContext,
                     JUDGMENT_VERIFIER_SYSTEM, message, JudgmentVerification,
                     max_tokens=3000, model=settings.judgement_verifier_claude_model)
             if verdict is None:
+                # Fast path: direct Gemini call with the CACHED system
+                # prompt (billed once/hour, not per call). None → ADK path.
+                verdict = await _verify_direct_cached(message)
+            if verdict is None:
                 try:
                     out = await run_agent_once(build_judgment_verifier_agent(), message,
                                                ["judgment_verification"])
@@ -787,6 +957,10 @@ async def verify_judgments(issue: Issue, context: CaseContext,
                                                    issue.perspective, shelf_patterns)
 
     results = await asyncio.gather(*(_verify_one(c) for c in judged))
+    if triage_skips["n"]:
+        logger.info("[verifier] issue %s: %d/%d docs rejected by shelf "
+                    "pre-triage — no verifier tokens spent on them",
+                    issue.id, triage_skips["n"], len(judged))
     return {doc_id: v for doc_id, v in results if v is not None}
 
 
@@ -934,8 +1108,15 @@ async def run_agent_once(agent, message: str, output_keys: list[str]) -> dict[st
     runner = InMemoryRunner(agent=agent, app_name=_APP)
     session = await runner.session_service.create_session(app_name=_APP, user_id="pipeline")
     content = genai_types.Content(role="user", parts=[genai_types.Part(text=message[:_llm_budget()])])
+    # Cost meter: every model-response event carries usage_metadata — the
+    # run's tracker (contextvar) turns it into the [cost] table at run end.
+    model_name = str(getattr(agent, "model", "") or "gemini")
+    task_name = str(getattr(agent, "name", "") or "agent")
     async for _event in runner.run_async(user_id="pipeline", session_id=session.id, new_message=content):
-        pass
+        # Any cached tokens on ADK-path calls come from Gemini's automatic
+        # prefix cache (the stage-1 cache-aligned messages).
+        llm_track_usage(model_name, getattr(_event, "usage_metadata", None),
+                        task=task_name, cache_method="implicit")
     session = await runner.session_service.get_session(
         app_name=_APP, user_id="pipeline", session_id=session.id)
     state = session.state if session else {}
@@ -995,10 +1176,14 @@ async def spot_issues(raw_text: str, context: CaseContext,
                 for idx, s in enumerate(result.issues[:MAX_ISSUES]) if s.issue.strip()
             ]
         logger.warning("[claude] issue spotter unavailable — Gemini issue split fallback")
-    # The fallback gets the SAME full case material as the Claude path — it
-    # previously received only raw_case_summary (one paragraph), which is why
-    # fallback runs under-spotted or found nothing beyond the grounds.
-    out = await run_agent_once(build_issue_split_agent(), user, ["issues"])
+    # The fallback gets the SAME full case material as the Claude path,
+    # cache-aligned: shared prefix first, task prompt (+ covered note) last,
+    # so it shares Gemini's implicit-cache prefix with the grounds call.
+    out = await run_agent_once(
+        build_issue_split_agent(),
+        _cache_aligned(_stage1_prefix(raw_text, context), ISSUE_SPLIT_PROMPT,
+                       extra=covered_note),
+        ["issues"])
     issue_list = IssueList.model_validate(out.get("issues") or {"issues": []})
     spotted = issue_list.issues[:MAX_ISSUES]
     for item in spotted:
@@ -1052,13 +1237,15 @@ async def enrich_custom_issue(issue: Issue, context: CaseContext) -> Issue:
 # ─── Grounds mode: extract the grounds pleaded in the filing itself ─────────
 
 def build_grounds_extract_agent() -> LlmAgent:
-    """Gemini fallback for the grounds extractor — same system prompt and
-    schema as the Claude path, so downstream conversion is identical."""
+    """Gemini fallback for the grounds extractor — same prompt text and
+    schema as the Claude path. Cache-aligned: the shared system line only;
+    GROUNDS_EXTRACTOR_SYSTEM rides at the END of the message, after the
+    implicit-cache prefix."""
     return LlmAgent(
         name="grounds_extract",
         model=get_settings().gemini_fallback_model,
         description="Extracts the legal grounds pleaded in a filing.",
-        instruction=GROUNDS_EXTRACTOR_SYSTEM,
+        instruction=_CACHE_ALIGNED_SYSTEM,
         generate_content_config=_gen_config(0.1, get_settings().gemini_fallback_model),
         output_schema=GroundsExtractResult,
         output_key="grounds_extract",
@@ -1120,8 +1307,11 @@ async def extract_grounds(raw_text: str, context: CaseContext,
             logger.warning("[claude] grounds extractor unavailable — Gemini fallback")
     if result is None:
         try:
-            out = await run_agent_once(build_grounds_extract_agent(), user,
-                                       ["grounds_extract"])
+            out = await run_agent_once(
+                build_grounds_extract_agent(),
+                _cache_aligned(_stage1_prefix(raw_text, context),
+                               GROUNDS_EXTRACTOR_SYSTEM),
+                ["grounds_extract"])
             result = GroundsExtractResult.model_validate(out.get("grounds_extract") or {})
         except Exception:
             logger.exception("[grounds] Gemini fallback failed")
@@ -1163,7 +1353,7 @@ def build_fresh_extract_agent() -> LlmAgent:
         name="fresh_extract",
         model=get_settings().gemini_fallback_model,
         description="Formulates proposed grounds for a fresh, unfiled matter.",
-        instruction=FRESH_CASE_SYSTEM,
+        instruction=_CACHE_ALIGNED_SYSTEM,
         generate_content_config=_gen_config(0.1, get_settings().gemini_fallback_model),
         output_schema=GroundsExtractResult,
         output_key="fresh_extract",
@@ -1198,19 +1388,25 @@ async def extract_fresh(raw_text: str, context: CaseContext, objective: str,
                 logger.warning("[claude] fresh extractor unavailable — Gemini fallback")
         if result is None:
             try:
-                out = await run_agent_once(build_fresh_extract_agent(), user,
-                                           ["fresh_extract"])
+                out = await run_agent_once(
+                    build_fresh_extract_agent(),
+                    _cache_aligned(
+                        _stage1_prefix(raw_text, context), FRESH_CASE_SYSTEM,
+                        extra=("\n\nCLIENT'S OBJECTIVE (the only instruction "
+                               f"you follow):\n{objective[:2000]}")),
+                    ["fresh_extract"])
                 result = GroundsExtractResult.model_validate(out.get("fresh_extract") or {})
             except Exception:
                 logger.exception("[fresh] Gemini fallback failed")
                 result = GroundsExtractResult()
         return result
 
-    # Proposed grounds AND the exhaustive issue spotter run CONCURRENTLY —
-    # raw_text carries the [CLIENT'S OBJECTIVE] header, so spotted issues are
-    # framed for the objective too. Same shape as combined mode.
-    result, spotted = await asyncio.gather(_fresh_grounds(),
-                                           spot_issues(raw_text, context))
+    # Proposed grounds first, then the exhaustive issue spotter — ALWAYS
+    # sequential so the spotter reuses the implicit-cache prefix whenever
+    # the calls end up on Gemini (raw_text carries the [CLIENT'S OBJECTIVE]
+    # header, so spotted issues are framed for the objective too).
+    result = await _fresh_grounds()
+    spotted = await spot_issues(raw_text, context)
 
     # Deterministic backstops: every fresh ground is PROPOSED and labelled —
     # a model that forgot the label still yields "Proposed Ground N" cards.
@@ -1350,10 +1546,13 @@ async def extract_combined(raw_text: str, context: CaseContext,
     surviving spotted issues; ids renumbered sequentially. A document
     with no pleaded grounds (or no spottable extras) is fine — combined
     never blocks on one side being empty."""
-    (grounds, grounds_meta), spotted = await asyncio.gather(
-        extract_grounds(raw_text, context),
-        spot_issues(raw_text, context),
-    )
+    # ALWAYS sequential — grounds first, then the spotter. Whenever the
+    # calls end up on Gemini (fallback, or Claude failing mid-run — a
+    # claude_available() pre-check misses that case), the spotter lands on
+    # the implicit-cache prefix the grounds call just warmed (byte-identical
+    # case-material prefix → cached-token discount on most of its input).
+    grounds, grounds_meta = await extract_grounds(raw_text, context)
+    spotted = await spot_issues(raw_text, context)
     merged = _merge_spotted_issues(grounds, spotted)
     # Gap-filler: pleaded grounds often absorb most spotted issues — when few
     # survive, ONE more spotter pass hunts only the categories grounds rarely
@@ -1522,23 +1721,20 @@ async def generate_queries(issue: Issue, context: CaseContext,
 
 async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
                        exclude: set[str] | None = None,
-                       anchors_only: bool = False) -> dict[str, Any]:
+                       page_map: dict[str, int] | None = None) -> dict[str, Any]:
     """One complete fetch → rerank → verify → score round for one issue.
-    Returns {candidates, scored}; the caller decides whether to retry with
-    reformulated queries when nothing usable survives. anchors_only: the
-    user hand-picked this issue's queries — fetch with exactly those."""
+    ONE IK call per display query — the court filter (user's boxes, else
+    the env default) rides inside every query; repeat runs advance to the
+    next IK page via page_map."""
     settings = get_settings()
 
-    # IK fetch — union across anchor/contra/axis queries, dedupe, cap.
-    # The court the case itself points at (forum field, else the HC named
-    # in the case material — Maharashtra → Bombay HC) gets its own
-    # targeted anchor searches and top placement.
+    # RANKING only (no longer a fetch input): the case's own High Court
+    # still sorts first among the surfaced results.
     forum_profile = case_court_profile(
         context.forum, f"{context.procedural_history} {context.raw_case_summary}")
-    pool = await ik_client.fanout_and_fetch(
-        keywords, exclude=exclude,
-        forum_doctype=(forum_profile or {}).get("doctype"),
-        anchors_only=anchors_only)
+
+    pool = await ik_client.fanout_and_fetch(keywords, exclude=exclude,
+                                            page_map=page_map)
     if not pool:
         return {"candidates": {}, "scored": []}
 
@@ -1657,15 +1853,16 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
 async def _process_issue(issue: Issue, context: CaseContext,
                          pre_keywords: KeywordSet | None = None,
                          curated: bool = False,
-                         query_style: str = "simple") -> dict[str, Any]:
-    """Per-issue pipeline with automatic query reformulation: if the first
-    round yields NO usable judgment for this issue, a genuinely different
-    query set is generated (for this issue only) and one more round runs —
-    already-fetched documents are excluded, so only fresh candidates are
-    read. Still empty after the retry → honest empty list.
-    curated: the user checked/typed this issue's queries — round 1 fetches
-    with EXACTLY those; the reformulation retry (their queries found no
-    usable judgment) falls back to a full generated set."""
+                         query_style: str = "simple",
+                         page_map: dict[str, int] | None = None) -> dict[str, Any]:
+    """Per-issue pipeline — ONE fetch round, one IK call per display query
+    (total calls == total displayed queries, by user demand). There is NO
+    automatic reformulation retry: an empty round returns an honest empty
+    list; re-running the search advances every query to its next IK page,
+    and editing the queries is the user's call.
+    curated: the user checked/typed this issue's queries — they replaced
+    the generated anchors upstream (apply_query_overrides), so the fetch is
+    exactly their selection either way."""
     # Stage 2 — query generation (already done at analyze time for suggested
     # issues; generated live for custom/user-typed ones).
     keywords = pre_keywords if pre_keywords and pre_keywords.all_terms() \
@@ -1673,57 +1870,50 @@ async def _process_issue(issue: Issue, context: CaseContext,
     if not keywords.all_terms():
         logger.warning("[pipeline] issue %s produced no keywords — skipping fetch", issue.id)
         return {"issue": issue, "keywords": keywords, "candidates": {}, "scored": []}
+    if curated and not keywords.anchor_queries:
+        # The user unchecked EVERY query for this issue — zero IK calls
+        # (the axis-term fallback is for degraded generation, never for a
+        # deliberate empty selection).
+        logger.info("[pipeline] issue %s: user unchecked every query — nothing fetched",
+                    issue.id)
+        return {"issue": issue, "keywords": keywords, "candidates": {}, "scored": []}
 
-    round1 = await _issue_round(issue, context, keywords, anchors_only=curated)
-    if round1["scored"]:
-        return {"issue": issue, "keywords": keywords, **round1}
-
-    if curated:
-        # The user hand-picked EXACTLY these queries — never substitute a
-        # generated set behind their back. An honest empty tells them their
-        # selection found nothing usable; widening is their call.
-        logger.info("[pipeline] issue %s: curated queries found no usable judgment — "
-                    "honest empty, no auto-reformulation", issue.id)
-        return {"issue": issue, "keywords": keywords, **round1}
-
-    # No usable judgment — reformulate ONCE for this issue and fetch fresh.
-    tried = list(keywords.anchor_queries) + list(keywords.contra_queries) + keywords.all_terms()
-    logger.info("[pipeline] issue %s: no usable judgment — reformulating queries and retrying",
-                issue.id)
-    retry_keywords = await generate_queries(issue, context, failed_queries=tried,
-                                            style=query_style)
-    if not retry_keywords.all_terms():
-        return {"issue": issue, "keywords": keywords, **round1}
-    round2 = await _issue_round(issue, context, retry_keywords,
-                                exclude=set(round1["candidates"].keys()))
-    return {
-        "issue": issue,
-        "keywords": retry_keywords,
-        # Closed world: the guardian pool carries BOTH rounds' fetches.
-        "candidates": {**round1["candidates"], **round2["candidates"]},
-        "scored": round2["scored"],
-    }
+    round1 = await _issue_round(issue, context, keywords, page_map=page_map)
+    if not round1["scored"]:
+        logger.info("[pipeline] issue %s: no usable judgment this round — honest empty "
+                    "(re-run fetches the next IK page%s)", issue.id,
+                    ", curated" if curated else "")
+    return {"issue": issue, "keywords": keywords, **round1}
 
 
 async def issue_fanout(issues: list[Issue], context: CaseContext,
                        keywords_map: dict[str, KeywordSet] | None = None,
                        curated_ids: set[str] | None = None,
                        query_style: str = "simple",
+                       page_map: dict[str, dict[str, int]] | None = None,
                        ) -> list[dict[str, Any]]:
     """Dynamic-cardinality fan-out: one per-issue pipeline per issue, run
     concurrently. IK rate limiting is enforced inside the shared client
     semaphore, not here. One issue failing never kills the request.
     curated_ids: issues whose queries the user hand-picked — those fetch
-    with exactly their selected queries."""
+    with exactly their selected queries.
+    page_map: the session's page ledger, keyed PER ISSUE (issue id → {wire
+    query → last page}). Each issue advances only the pages IT has used: an
+    issue that never fetched a query starts at page one even when another
+    issue already used that query (whose page-one fetch then serves it from
+    cache, free). Sub-maps are created here and mutated in place."""
     keywords_map = keywords_map or {}
     curated_ids = curated_ids or set()
 
     async def _safe(issue: Issue) -> dict[str, Any]:
         t0 = time.perf_counter()
         try:
+            issue_pages = (page_map.setdefault(str(issue.id), {})
+                           if page_map is not None else None)
             result = await _process_issue(issue, context, keywords_map.get(str(issue.id)),
                                           curated=str(issue.id) in curated_ids,
-                                          query_style=query_style)
+                                          query_style=query_style,
+                                          page_map=issue_pages)
             logger.info("[timing] issue %s: %.1fs (%d candidates → %d results%s)",
                         issue.id, time.perf_counter() - t0,
                         len(result.get("candidates") or {}),
@@ -1914,6 +2104,8 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
     source = source_text or raw_text
     session_id = sessions.new_session_id()
     _t0 = time.perf_counter()
+    # Phase-level cost meter (models only here — analyze makes no IK calls).
+    cost_tracker = ik_cost_start()
 
     # Context stage, split for speed (was one SequentialAgent feeding the
     # FULL stage-1 budget through TWO serial flash calls — ~47s on a 120k
@@ -1997,7 +2189,15 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
         "researchMode": mode,
         "queryStyle": query_style,
         "groundsMeta": grounds_meta,
+        # Cumulative cost ledger: analyze is step one of the session's bill.
+        "costLedger": merge_cost_ledger(None, cost_tracker),
     })
+    run_cost_log(merge_cost_ledger(None, cost_tracker),
+                 f"END-TO-END session {session_id[:8]} — after analyze "
+                 f"({len(issues)} issue(s))", step=cost_tracker)
+    # Per-user billing ledger (citation_usage_events) — priced by the DB.
+    await asyncio.to_thread(flush_usage_events, cost_tracker,
+                            session_id=session_id, stage="analyze")
     return session_id, context, issues, grounds_meta
 
 
@@ -2023,7 +2223,7 @@ def apply_query_overrides(keywords_map: dict[str, KeywordSet],
                 cleaned.append(text)
         kw.anchor_queries = cleaned[:MAX_QUERIES_PER_ISSUE]
         # Curated = STRICT: the user's list is the WHOLE query set for this
-        # issue. Contra queries are neither fetched (anchors_only) nor kept —
+        # issue. Contra queries are neither fetched nor kept —
         # leaving them in made the results page show system queries the user
         # never selected ("3 queries used" against one ticked box).
         kw.contra_queries = []
@@ -2039,6 +2239,9 @@ async def run_issue_search(session_id: str, context: CaseContext,
     no bypass. Keywords generated at analyze time are reused here, after
     the user's per-issue query selection (checkboxes + own queries) is
     applied on top."""
+    # Per-run Indian Kanoon spend meter — the fan-out's child tasks inherit
+    # this context; the tabular summary logs when the judgement completes.
+    ik_tracker = ik_cost_start()
     keywords_map: dict[str, KeywordSet] = {}
     session = sessions.load(session_id) or {}
     for issue_id, dump in (session.get("issueKeywords") or {}).items():
@@ -2048,10 +2251,38 @@ async def run_issue_search(session_id: str, context: CaseContext,
             logger.warning("[pipeline] stored keywords for issue %s invalid — regenerating", issue_id)
     keywords_map = apply_query_overrides(keywords_map, query_overrides)
     curated_ids = {str(issue_id) for issue_id in (query_overrides or {})}
+    # Page ledger, PER ISSUE per query: an issue advances only the pages it
+    # has itself used (Run #1 → pagenum 0, Run #2 → pagenum 1 …); an issue
+    # that never ran a query starts at page one even when another issue
+    # already used the same query — that repeat page comes from cache, free.
+    # (Entries from the older flat {wire: page} shape are skipped.)
+    page_map: dict[str, dict[str, int]] = {}
+    for issue_key, sub in (session.get("ikQueryPages") or {}).items():
+        if isinstance(sub, dict):
+            page_map[str(issue_key)] = {str(w): int(p) for w, p in sub.items()}
     fanout_results = await issue_fanout(issues, context, keywords_map,
                                         curated_ids=curated_ids,
-                                        query_style=session.get("queryStyle", "simple"))
-    return assemble_response(session_id, context, fanout_results)
+                                        query_style=session.get("queryStyle", "simple"),
+                                        page_map=page_map)
+    response = assemble_response(session_id, context, fanout_results)
+    # Fold this run into the session's cumulative ledger, but print THIS
+    # RUN's own bill as the table — the cumulative figures (analyze + every
+    # earlier run) read as "wrong API counts" when shown as the main table.
+    # The session lifetime total follows as one line.
+    cost_session = sessions.load(session_id) or {}
+    cost_session["ikQueryPages"] = page_map
+    cost_ledger = merge_cost_ledger(cost_session.get("costLedger"), ik_tracker)
+    cost_session["costLedger"] = cost_ledger
+    sessions.save(session_id, cost_session)
+    run_cost_log(ik_tracker,
+                 f"THIS SEARCH RUN — session {session_id[:8]} ({len(issues)} issue(s))")
+    ai_all, ik_all = cost_totals(cost_ledger)
+    logger.info("[cost] SESSION TOTAL so far (analyze + every run + reports): %.2f INR",
+                ai_all + ik_all)
+    # Per-user billing ledger (citation_usage_events) — priced by the DB.
+    await asyncio.to_thread(flush_usage_events, ik_tracker,
+                            session_id=session_id, stage="search_run")
+    return response
 
 
 async def run_search_pipeline(raw_text: str, source_text: str | None = None,

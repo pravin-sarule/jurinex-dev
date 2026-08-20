@@ -534,6 +534,39 @@ class PostgresStore:
 
         return self._run("session delete", _op, False)
 
+    # Columns the ENGINE owns on citation_usage_events — the pricing
+    # trigger owns cost_inr/cost_usd/rate_version/cost_source; id/created_at
+    # are automatic. producer_cost_inr is our own figure, drift signal only.
+    _USAGE_COLS = ("event_key", "session_id", "run_id", "step_no", "user_id",
+                   "case_id", "provider", "service", "operation", "stage",
+                   "model", "unit", "quantity", "calls", "input_tokens",
+                   "output_tokens", "cached_tokens", "cache_hit",
+                   "producer_cost_inr", "metadata", "occurred_at")
+
+    def usage_insert_events(self, rows: list[dict[str, Any]]) -> int:
+        """Append per-user usage events to the admin billing ledger
+        (citation_usage_events). Append-only by design; the partial unique
+        index on event_key makes retries idempotent (ON CONFLICT DO
+        NOTHING). metadata (JSONB, NOT NULL) carries e.g. which caching
+        method served the row. Never raises into the request path."""
+        if not rows:
+            return 0
+        from psycopg2.extras import Json
+        cols = self._USAGE_COLS
+        sql = (f"INSERT INTO citation_usage_events ({', '.join(cols)}) "
+               f"VALUES ({', '.join('%(' + c + ')s' for c in cols)}) "
+               "ON CONFLICT (event_key) WHERE event_key IS NOT NULL DO NOTHING")
+
+        def _op(conn) -> int:
+            with conn.cursor() as cur:
+                for row in rows:
+                    params = {c: row.get(c) for c in cols}
+                    params["metadata"] = Json(params.get("metadata") or {})
+                    cur.execute(sql, params)
+            return len(rows)
+
+        return self._run("usage events insert", _op, 0)
+
     def vault_upsert(self, rows: list[dict[str, Any]]) -> int:
         """Persist GREEN survivors. Called async after the response is sent —
         must never raise into the request path."""

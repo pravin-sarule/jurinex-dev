@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, Body, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -31,6 +31,7 @@ from agents.legal_case_management.agent import (
     get_case_processing_status,
     list_case_folders,
     list_cases_tool,
+    store_case_documents,
     update_case_tool,
 )
 from app.schemas.contracts import (
@@ -901,10 +902,14 @@ class CompleteUploadRequest(BaseModel):
     filename: str
     mimetype: str = "application/octet-stream"
     size: int = 0
+    # False → Case Storage upload: persist only, skip the processing pipeline.
+    process: bool = True
 
 
 class DriveImportRequest(BaseModel):
     file_ids: list[str]
+    # process=false → Case Storage import: keep the files, skip OCR/chunking/embeddings.
+    process: bool = True
 
 class InternalAnalyticsRequest(BaseModel):
     userIds: list[int | str] = []
@@ -2047,6 +2052,7 @@ async def upload_for_processing(
 async def upload_documents_to_folder(
     folder_name: str,
     files: list[UploadFile] = File(...),
+    process: str = Form(default="true"),
     x_user_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
@@ -2096,6 +2102,14 @@ async def upload_documents_to_folder(
         )
         for upload, file_bytes in files_data
     ])
+    # process=false → Case Storage upload: keep the file, skip OCR/chunking/embeddings.
+    if str(process).strip().lower() in {"false", "0", "no"}:
+        return await run_in_threadpool(
+            store_case_documents,
+            user_id=user_id,
+            folder_name=folder_name,
+            documents=[document.model_dump(mode="json") for document in documents],
+        )
     return await run_in_threadpool(
         enqueue_case_documents,
         user_id=user_id,
@@ -2178,11 +2192,19 @@ def import_google_drive_documents(
             detail={"message": "Failed to import files from Google Drive", "failed": failed},
         )
 
-    queue_result = enqueue_case_documents(
-        user_id=user_id,
-        folder_name=folder_name,
-        documents=[document.model_dump(mode="json") for document in documents],
-    )
+    if not request.process:
+        # Case Storage import: plain storage rows, no processing pipeline.
+        queue_result = store_case_documents(
+            user_id=user_id,
+            folder_name=folder_name,
+            documents=[document.model_dump(mode="json") for document in documents],
+        )
+    else:
+        queue_result = enqueue_case_documents(
+            user_id=user_id,
+            folder_name=folder_name,
+            documents=[document.model_dump(mode="json") for document in documents],
+        )
     queue_result["google_drive"] = {
         "requested_count": len(file_ids),
         "imported_count": len(documents),
@@ -2398,21 +2420,26 @@ def complete_upload_for_folder(
             except Exception as _size_exc:
                 logger.debug("[Route:complete_upload] GCS size lookup failed: %s", _size_exc)
 
+        document_payload = DocumentReference(
+            document_name=request.filename or f"upload-{uuid.uuid4().hex[:8]}",
+            mime_type=request.mimetype or "application/octet-stream",
+            document_uri=request.gcsPath,
+            metadata={
+                "size": real_size,
+                "original_name": request.filename or "",
+                "gcs_path": request.gcsPath,
+            },
+        ).model_dump(mode="json")
+        if not request.process:
+            return store_case_documents(
+                user_id=user_id,
+                folder_name=folder_name,
+                documents=[document_payload],
+            )
         payload = enqueue_case_documents(
             user_id=user_id,
             folder_name=folder_name,
-            documents=[
-                DocumentReference(
-                    document_name=request.filename or f"upload-{uuid.uuid4().hex[:8]}",
-                    mime_type=request.mimetype or "application/octet-stream",
-                    document_uri=request.gcsPath,
-                    metadata={
-                        "size": real_size,
-                        "original_name": request.filename or "",
-                        "gcs_path": request.gcsPath,
-                    },
-                ).model_dump(mode="json")
-            ],
+            documents=[document_payload],
         )
         return {
             "success": True,
@@ -2459,6 +2486,228 @@ def complete_upload_default(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# ── Case Storage: external editor documents (Google Docs / Zoho Writer) ─────
+# Implemented natively (no drafting-service/zoho-service dependency): Google via
+# per-user OAuth tokens held by authservice, Zoho via the Office Integrator API
+# against DOCX files in our own GCS bucket. See services/adapters/external_editors.py.
+from app.services.adapters import external_editors
+
+GOOGLE_DOC_MIMETYPE = external_editors.GOOGLE_DOC_MIMETYPE
+ZOHO_DOC_MIMETYPE = external_editors.DOCX_MIMETYPE
+
+
+class CreateStorageDocumentRequest(BaseModel):
+    provider: str  # 'google' | 'zoho'
+    title: str
+
+
+@router.post("/{folder_name}/create-document")
+def create_storage_document(
+    folder_name: str,
+    request: CreateStorageDocumentRequest,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    user_id = _resolve_user_id(x_user_id, authorization)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    provider = (request.provider or "").strip().lower()
+    title = (request.title or "").strip()
+    if provider not in {"google", "zoho"}:
+        raise HTTPException(status_code=400, detail="provider must be 'google' or 'zoho'")
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+
+    service = get_folder_service()
+
+    if provider == "google":
+        try:
+            created = external_editors.create_google_doc(user_id, title)
+        except PermissionError:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "GOOGLE_NOT_CONNECTED", "message": "Google Drive is not connected."},
+            ) from None
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Google Docs creation failed: {exc}") from exc
+        google_file_id = created["google_file_id"]
+        result = service.create_external_document(
+            user_id=user_id,
+            folder_name=folder_name,
+            provider="google",
+            external_id=str(google_file_id),
+            title=title,
+            mimetype=GOOGLE_DOC_MIMETYPE,
+            extra_metadata={"google_file_id": str(google_file_id)},
+        )
+        return {**result, "provider": "google"}
+
+    # zoho: blank DOCX in OUR bucket; editing sessions run against a signed URL of it.
+    file_name = title if title.lower().endswith(".docx") else f"{title}.docx"
+    try:
+        docx_bytes = external_editors.build_blank_docx()
+        storage_key = service._build_file_storage_key(str(user_id), folder_name, file_name)
+        gs_uri = gcs.upload_bytes(docx_bytes, storage_key, content_type=ZOHO_DOC_MIMETYPE)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not create blank document: {exc}") from exc
+    result = service.create_external_document(
+        user_id=user_id,
+        folder_name=folder_name,
+        provider="zoho",
+        external_id="",  # identity is the file row itself; sessions use gcs_path
+        title=file_name,
+        mimetype=ZOHO_DOC_MIMETYPE,
+        gcs_path=gs_uri,
+        size=len(docx_bytes),
+    )
+    return {**result, "provider": "zoho"}
+
+
+@router.post("/file/{file_id}/editor-session")
+def get_editor_session(
+    file_id: str,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    user_id = _resolve_user_id(x_user_id, authorization)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        record = get_folder_service().get_external_document(file_id, user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    metadata = record.get("metadata") or {}
+    provider = (metadata.get("provider") or "").lower()
+
+    if provider == "google":
+        google_file_id = metadata.get("google_file_id") or metadata.get("external_id")
+        if not google_file_id:
+            raise HTTPException(status_code=500, detail="Missing Google file id on document")
+        return {
+            "success": True,
+            "provider": "google",
+            "iframeUrl": f"https://docs.google.com/document/d/{google_file_id}/edit?embedded=true",
+        }
+
+    if provider == "zoho":
+        gcs_path = record.get("gcs_path") or ""
+        if not gcs_path.startswith("gs://"):
+            raise HTTPException(status_code=500, detail="Zoho document has no storage object")
+        try:
+            signed_url = gcs.signed_read_url(gcs_path, expiration_minutes=120)
+            save_url = (
+                f"{external_editors.public_base_url()}/api/files/storage/zoho-save-callback"
+                f"?fileId={record['id']}"
+            )
+            session = external_editors.create_zoho_writer_session(
+                signed_url=signed_url,
+                file_name=record.get("name") or "document.docx",
+                file_id=record["id"],
+                save_callback_url=save_url,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Zoho session failed: {exc}") from exc
+        return {"success": True, "provider": "zoho", **session}
+
+    raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'")
+
+
+@router.post("/storage/zoho-save-callback")
+async def zoho_save_callback(request: Request, fileId: str = Query(...)) -> dict:
+    """Public endpoint Zoho's servers POST the saved DOCX to (multipart).
+
+    Auth model mirrors zoho-service's public save-callback: the unguessable file
+    UUID scopes the write, and bytes only ever overwrite that row's own object.
+    """
+    try:
+        record = get_folder_service().get_external_document_by_id(fileId)
+    except ValueError:
+        return {"status": "received", "error": "document not found"}
+    gcs_path = (record.get("gcs_path") or "")
+    if not gcs_path.startswith("gs://"):
+        return {"status": "received", "error": "document has no storage object"}
+
+    form = await request.form()
+    file_bytes = b""
+    for value in form.values():
+        if hasattr(value, "read"):
+            file_bytes = await value.read()
+            break
+    if not file_bytes:
+        return {"status": "received", "warning": "empty file"}
+
+    destination = gcs_path.split("/", 3)[3]  # strip gs://bucket/
+    await run_in_threadpool(
+        gcs.upload_bytes, file_bytes, destination, ZOHO_DOC_MIMETYPE
+    )
+    await run_in_threadpool(
+        get_folder_service().update_external_document_content, fileId, len(file_bytes)
+    )
+    logger.info("[Route:zoho_save_callback] fileId=%s bytes=%d saved", fileId, len(file_bytes))
+    return {"status": "saved", "bytes": len(file_bytes)}
+
+
+@router.post("/file/{file_id}/chat-source")
+def prepare_chat_source(
+    file_id: str,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Return a chattable file id for an editor-backed document: exports the
+    CURRENT Google Doc as PDF / extracts the Zoho DOCX text into a hidden
+    snapshot row, refreshed on every call so answers reflect the latest edits."""
+    user_id = _resolve_user_id(x_user_id, authorization)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        return get_folder_service().prepare_chat_snapshot(file_id, user_id)
+    except PermissionError:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "GOOGLE_NOT_CONNECTED", "message": "Google Drive is not connected."},
+        ) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("[Route:prepare_chat_source] file=%s error=%s", file_id, exc)
+        raise HTTPException(status_code=502, detail=f"Could not prepare document for chat: {exc}") from exc
+
+
+@router.get("/storage/google-auth-status")
+def get_google_auth_status(
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    user_id = _resolve_user_id(x_user_id, authorization)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return external_editors.google_drive_status(user_id, authorization)
+
+
+class RenameStorageFolderRequest(BaseModel):
+    folderId: str
+    newName: str
+
+
+@router.post("/storage/rename-folder")
+def rename_storage_folder(
+    request: RenameStorageFolderRequest,
+    x_user_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    user_id = _resolve_user_id(x_user_id, authorization)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        return get_folder_service().rename_storage_folder(user_id, request.folderId, request.newName)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("[Route:rename_storage_folder] error=%s", exc)
+        raise HTTPException(status_code=500, detail="Failed to rename folder") from exc
+
+
 @router.post("/create-folder")
 def create_folder(
     request: CreateFolderRequest,
@@ -2487,12 +2736,13 @@ def create_case(
 
 @router.get("/folders")
 def list_folders(
+    scope: str = Query(default="cases"),
     x_user_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
     user_id = _resolve_user_id(x_user_id, authorization)
-    logger.info("[Route:list_folders] status=received user_id=%s", user_id)
-    return list_case_folders(user_id)
+    logger.info("[Route:list_folders] status=received user_id=%s scope=%s", user_id, scope)
+    return list_case_folders(user_id, scope="storage" if scope == "storage" else "cases")
 
 
 @router.get("/cases")

@@ -11,11 +11,14 @@ never originate a citation.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import logging
 import math
 import re
+import uuid
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -502,6 +505,33 @@ def to_ik_operators(query: str) -> str:
     return re.sub(r"\s+", " ", "".join(out)).strip()
 
 
+# ─── Per-run court scope (issues-step Advanced search boxes) ─────────────────
+# When the user restricts a search run to specific courts, the chosen
+# doctypes replace the env default for EVERY query of that run. ContextVar so
+# the fan-out's child tasks inherit it and concurrent runs never mix scopes.
+_court_scope: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
+    "court_scope", default=None)
+
+
+def set_court_scope(doctypes: str | None) -> None:
+    _court_scope.set(doctypes or None)
+
+
+def court_scope() -> str | None:
+    return _court_scope.get()
+
+
+# Date range for one search run (issues-step date pickers): ready-made
+# "fromdate:D-M-YYYY todate:D-M-YYYY" directives appended to every query of
+# the run. Same ContextVar pattern as the court scope.
+_date_scope: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
+    "date_scope", default=None)
+
+
+def set_date_scope(directives: str | None) -> None:
+    _date_scope.set(directives or None)
+
+
 def build_ik_query(term: str, exact: bool = False, doctypes: str | None = None) -> str:
     """Decorate one search term into a precise IK query.
 
@@ -512,14 +542,22 @@ def build_ik_query(term: str, exact: bool = False, doctypes: str | None = None) 
       (terms that already carry their own quotes are left alone).
     - Every query gets the configured `doctypes:` filter so statute pages,
       law-commission reports and district-court noise never enter the
-      candidate pool. Empty IK_DOCTYPES disables the filter.
+      candidate pool — the run's court scope (user's court boxes) replaces
+      the env default when set. Empty IK_DOCTYPES disables the filter.
     """
     query = to_ik_operators(term.strip())
     if exact and " " in query and '"' not in query:
         query = f'"{query}"'
-    dt = get_settings().ik_doctypes if doctypes is None else doctypes
+    if doctypes is None:
+        scope = _court_scope.get()
+        dt = scope if scope is not None else get_settings().ik_doctypes
+    else:
+        dt = doctypes
     if dt and "doctypes:" not in query:
         query = f"{query} doctypes:{dt}"
+    dates = _date_scope.get()
+    if dates and "fromdate:" not in query and "todate:" not in query:
+        query = f"{query} {dates}"
     return query
 
 
@@ -602,6 +640,7 @@ class IndianKanoonClient:
                     logger.warning("[IK] HTTP %s for %s: %s", resp.status_code, path, resp.text[:200])
                     return None
                 self.auth_failed = False
+                _ik_count_billed(path)
                 return resp.json()
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 if attempt < settings.ik_max_retries:
@@ -621,11 +660,33 @@ class IndianKanoonClient:
         cache_key = f"ik:search:{hashlib.sha1(norm.encode()).hexdigest()}:{pagenum}"
         cached = cache.get_json(cache_key)
         if cached is not None:
+            _ik_count_cached()
             return cached
-        data = await self._request("/search/", {"formInput": query, "pagenum": pagenum})
+        # maxpages=1 pins the bill to exactly ONE page (₹0.50) per call —
+        # IK bills per page returned, and pagenum jumps are free.
+        data = await self._request("/search/", {"formInput": query, "pagenum": pagenum,
+                                                "maxpages": 1})
         docs = (data or {}).get("docs") or []
         cache.set_json(cache_key, docs, ttl=86400)
         return docs
+
+    async def search_raw(self, query: str, pagenum: int = 0) -> dict[str, Any] | None:
+        """Raw /search/ call for the user-facing Advanced Search: preserves
+        IK's own response shape (docs + found + categories) instead of the
+        pipeline's docs-only view. None = the call itself failed (network /
+        token rejected), distinct from an honest zero-result response."""
+        norm = normalize_ws(query)
+        cache_key = f"ik:searchraw:{hashlib.sha1(norm.encode()).hexdigest()}:{pagenum}"
+        cached = cache.get_json(cache_key)
+        if cached is not None:
+            _ik_count_cached()
+            return cached
+        data = await self._request("/search/", {"formInput": query, "pagenum": pagenum,
+                                                "maxpages": 1})
+        if data is None:
+            return None
+        cache.set_json(cache_key, data, ttl=86400)
+        return data
 
     async def fetch_doc_bundle(self, doc_id: str) -> tuple[str | None, dict[str, Any]]:
         """One /doc call → (full text, info). info carries publish date and
@@ -636,6 +697,7 @@ class IndianKanoonClient:
         # v2 cache key: samples carry docId dicts, not bare title strings.
         info = cache.get_json(f"ik:docinfo2:{doc_id}")
         if text is not None and info is not None:
+            _ik_count_cached()
             return text or None, info
         # maxcites/maxcitedby are REQUIRED for IK to include citeList /
         # citedbyList in the response — without them both come back empty.
@@ -673,12 +735,52 @@ class IndianKanoonClient:
         text, _info = await self.fetch_doc_bundle(doc_id)
         return text
 
+    async def fetch_doc_raw(self, doc_id: str) -> dict[str, Any] | None:
+        """Full /doc response for the Advanced Search document viewer —
+        keeps IK's OWN HTML (headings, bold, pre-formatted orders) so the
+        in-app page renders like Indian Kanoon's doc page. Cached 7 days,
+        separate from the pipeline's stripped-text cache. None = the call
+        itself failed (network / token rejected)."""
+        cache_key = f"ik:docraw:{doc_id}"
+        cached = cache.get_json(cache_key)
+        if cached is not None:
+            _ik_count_cached()
+            return cached
+        data = await self._request(f"/doc/{doc_id}/", {"maxcites": 50, "maxcitedby": 50})
+        if not data:
+            return None
+
+        def _samples(items: Any) -> list[dict[str, str]]:
+            out = []
+            for item in items if isinstance(items, list) else []:
+                title = strip_html(str((item or {}).get("title") or "")).strip()
+                tid = str((item or {}).get("tid") or "").strip()
+                if title:
+                    out.append({"title": title, "docId": tid})
+            return out
+
+        cite_list = data.get("cites") or data.get("citeList") or []
+        citedby_list = data.get("citedby") or data.get("citedbyList") or []
+        raw = {
+            "title": strip_html(str(data.get("title") or "")).strip(),
+            "html": str(data.get("doc") or ""),
+            "publishdate": str(data.get("publishdate") or ""),
+            "docsource": strip_html(str(data.get("docsource") or "")).strip(),
+            "numcites": int(data.get("numcites") or 0) or len(cite_list),
+            "numcitedby": int(data.get("numcitedby") or 0) or len(citedby_list),
+            "casesCited": _samples(cite_list),
+            "citedBy": _samples(citedby_list),
+        }
+        cache.set_json(cache_key, raw, ttl=7 * 86400)
+        return raw
+
     async def fetch_doc_meta(self, doc_id: str) -> dict[str, Any]:
         """/docmeta/ — cheap metadata call (author, bench, publish date).
         Cached 7 days; returns {} when unavailable."""
         cache_key = f"ik:docmeta:{doc_id}"
         cached = cache.get_json(cache_key)
         if cached is not None:
+            _ik_count_cached()
             return cached
         data = await self._request(f"/docmeta/{doc_id}/") or {}
         meta = {k: strip_html(str(v)).strip() for k, v in data.items()
@@ -689,60 +791,45 @@ class IndianKanoonClient:
 
     async def fanout_and_fetch(self, keywords: KeywordSet, cap: int | None = None,
                                exclude: set[str] | None = None,
-                               forum_doctype: str | None = None,
-                               anchors_only: bool = False) -> list[Candidate]:
-        """Anchor queries first (full precision queries, double weight,
-        deeper take), then one IK query per axis term — doctrinal/outcome
-        phrases exact-quoted, statutory/factual left as AND-of-words. Union
-        results, dedupe by docId, cap the pool. Candidates that matched more
-        distinct queries rank earlier (they survive the cap first).
-        `exclude`: docIds already tried in a previous round (reformulation
-        retries never re-fetch what was already rejected).
-        `forum_doctype`: the client's own High Court's IK doctype — anchor
-        queries are ALSO run restricted to that court, so its (binding)
-        judgments enter the pool even when nationwide recall would have
-        crowded them out.
-        `anchors_only`: the user hand-picked this issue's queries — fetch
-        with EXACTLY those (plus their forum-restricted re-run); contra and
-        axis-term queries are NOT sent (axis terms still score/pinpoint)."""
+                               page_map: dict[str, int] | None = None) -> list[Candidate]:
+        """ONE Indian Kanoon search per display query — exactly the queries
+        the user sees (and curates) on the issue card, each carrying the
+        run's court filter (the user's court boxes, else the env default).
+        No forum/nationwide duplicate re-runs and no separate contra or
+        axis-term fetch calls (axis terms still score/pinpoint lexically):
+        50 displayed queries across a run = 50 search calls.
+        Fallback: a keyword set with NO anchor queries (degraded generation,
+        legacy sessions) fetches its axis terms instead — an issue never
+        silently fetches nothing.
+        `page_map`: wire query → last IK page THIS ISSUE fetched (the
+        caller passes each issue its own sub-ledger). A repeat run of the
+        SAME query fetches the NEXT page (Run #1 → pagenum 0, Run #2 →
+        pagenum 1 …, IK's 0-based pagenum), so re-running digs deeper
+        instead of re-buying page one — while an issue that never used a
+        query starts at page one (served from cache when another issue
+        already bought it). Mutated in place for session persistence.
+        `exclude`: docIds already fetched earlier (never re-fetched)."""
         settings = get_settings()
         cap = cap or settings.ik_candidate_cap
         per_query = settings.ik_results_per_query
         exclude = exclude or set()
+        page_map = page_map if page_map is not None else {}
 
-        exact_terms = {t.strip().lower() for t in (keywords.doctrinal + keywords.outcome)}
         # (label kept as the raw term for matched_terms/keyword_signal,
         #  wire = decorated query actually sent, weight, take)
         queries: list[tuple[str, str, float, int]] = []
         seen_wire: set[str] = set()
-        for anchor in keywords.anchor_queries[:4]:
+        # 8 = MAX_QUERIES_PER_ISSUE: curated selections may exceed the 4
+        # generated anchors.
+        for anchor in keywords.anchor_queries[:8]:
             if not anchor.strip():
                 continue
             wire = build_ik_query(anchor)
             if wire not in seen_wire:
                 seen_wire.add(wire)
                 queries.append((anchor.strip(), wire, 2.0, per_query + 5))
-        if forum_doctype:
-            # Forum focus: same anchors, restricted to the client's own High
-            # Court. Highest weight — these are the keep-it-top candidates.
-            for anchor in keywords.anchor_queries[:4]:
-                if not anchor.strip():
-                    continue
-                wire = build_ik_query(anchor, doctypes=forum_doctype)
-                if wire not in seen_wire:
-                    seen_wire.add(wire)
-                    queries.append((anchor.strip(), wire, 2.5, per_query + 5))
-        if not anchors_only:
-            # Contra queries widen the pool with the adverse line of
-            # authority; a result's final side comes from its VERIFIED
-            # outcome, not from which query found it.
-            for contra in keywords.contra_queries[:2]:
-                if not contra.strip():
-                    continue
-                wire = build_ik_query(contra)
-                if wire not in seen_wire:
-                    seen_wire.add(wire)
-                    queries.append((contra.strip(), wire, 1.0, per_query))
+        if not queries:
+            exact_terms = {t.strip().lower() for t in (keywords.doctrinal + keywords.outcome)}
             for term in keywords.all_terms():
                 wire = build_ik_query(term, exact=term.strip().lower() in exact_terms)
                 if wire not in seen_wire:
@@ -751,14 +838,28 @@ class IndianKanoonClient:
         if not queries:
             return []
 
-        results = await asyncio.gather(*(self.search(wire) for _, wire, _, _ in queries))
+        pages: list[int] = []
+        for _label, wire, _weight, _take in queries:
+            page = page_map.get(wire, -1) + 1
+            page_map[wire] = page
+            pages.append(page)
+        results = await asyncio.gather(
+            *(self.search(wire, pagenum=page)
+              for (_label, wire, _weight, _take), page in zip(queries, pages)))
 
         by_id: dict[str, Candidate] = {}
         hits: Counter[str] = Counter()
+        dropped_scope = 0
         for (label, _wire, weight, take), docs in zip(queries, results):
             for rank, doc in enumerate(docs[:take]):
                 doc_id = str(doc.get("tid") or "").strip()
                 if not doc_id or doc_id in exclude:
+                    continue
+                court = str(doc.get("docsource") or "").strip()
+                # Court-scoped run: enforce the user's court boxes
+                # deterministically, whatever IK returned.
+                if not scope_allows_court(court):
+                    dropped_scope += 1
                     continue
                 hits[doc_id] += weight * max(1, 10 - rank)  # earlier IK rank → more weight
                 if doc_id in by_id:
@@ -770,19 +871,459 @@ class IndianKanoonClient:
                 by_id[doc_id] = Candidate(
                     doc_id=doc_id,
                     title=title,
-                    court=str(doc.get("docsource") or "").strip(),
+                    court=court,
                     year=year_from_text(str(doc.get("publishdate") or ""), title),
                     headline=headline,
                     num_citedby=int(doc.get("numcitedby") or 0),
                     source_url=f"https://indiankanoon.org/doc/{doc_id}/",
                     matched_terms=[label],
                 )
+        if dropped_scope:
+            logger.info("[scope] dropped %d candidate(s) outside the selected courts",
+                        dropped_scope)
         pool = sorted(by_id.values(),
                       key=lambda c: (len(c.matched_terms), hits[c.doc_id]), reverse=True)
         return pool[:cap]
 
 
 ik_client = IndianKanoonClient()
+
+
+# ─── Indian Kanoon spend tracker (per search run) ────────────────────────────
+# Official rate card, INR per request — mirrored from the IK account page.
+IK_RATES_INR = {
+    "search": 0.50,       # /search/
+    "doc": 0.20,          # /doc/ (full judgment)
+    "docmeta": 0.02,      # /docmeta/
+    "docfragment": 0.05,  # /docfragment/ (unused by this pipeline)
+    "origdoc": 0.50,      # /origdoc/  (unused by this pipeline)
+}
+_IK_KIND_LABELS = [
+    ("search", "Search"),
+    ("doc", "Document"),
+    ("docmeta", "Document Metainfo"),
+    ("docfragment", "Document Fragment"),
+    ("origdoc", "Original Document"),
+]
+
+# LLM rates, INR per 1M tokens (input, output), matched by model-name prefix.
+# Values follow the citation-service pricing.py conventions (USD list price
+# × 96 INR/USD) — EDIT these to the rates you are actually billed.
+LLM_RATES_INR = [
+    ("gemini-3.1-pro", (120.00, 960.00)),   # pro class ≈ $1.25 / $10 per 1M
+    ("gemini-3.6-flash", (72.00, 360.00)),  # $0.75 / $3.75 per 1M × 96 (list, thru 31 Dec 2026)
+    ("gemini-2.5-flash", (28.80, 240.00)),  # $0.30 / $2.50 per 1M × 96 (list)
+    ("claude", (288.00, 1440.00)),          # ≈ $3 / $15 per 1M (only if re-enabled)
+]
+DEFAULT_LLM_RATE_INR = (28.80, 240.00)
+GEMINI_EMBED_PER_1M_INR = 14.40             # embeddings ≈ $0.15 per 1M × 96
+GEMINI_GROUNDING_PER_CALL_INR = 3.36        # Google-Search grounding ≈ $0.035/call × 96
+# Explicit context-cache STORAGE (the verifier's CachedContent): billed per
+# 1M tokens per HOUR the cache lives (Flash list $1.00/1M/hr × 96 INR/USD).
+# Implicit prefix caching has NO storage cost.
+GEMINI_CACHE_STORAGE_PER_1M_HR_INR = 96.00
+
+# ContextVar so concurrent runs never mix counts: child tasks (the per-issue
+# fan-out) inherit the context of the request that started the run.
+_ik_cost_tracker: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar(
+    "ik_cost_tracker", default=None)
+
+
+def ik_cost_start() -> dict:
+    """Begin tracking IK calls AND AI-model token usage for the current task
+    tree (fan-out child tasks — and asyncio.to_thread workers — inherit the
+    context, so a whole pipeline phase reports into one tracker)."""
+    tracker: dict = {"billed": Counter(), "cached": 0,
+                     "llm": {}, "embed_calls": 0, "embed_tokens_est": 0,
+                     "grounding_calls": 0, "cache_storage": {}}
+    _ik_cost_tracker.set(tracker)
+    return tracker
+
+
+def _ik_kind_for_path(path: str) -> str:
+    if path.startswith("/docmeta"):
+        return "docmeta"
+    if path.startswith("/docfragment"):
+        return "docfragment"
+    if path.startswith("/origdoc"):
+        return "origdoc"
+    if path.startswith("/doc"):
+        return "doc"
+    return "search"
+
+
+def _ik_count_billed(path: str) -> None:
+    tracker = _ik_cost_tracker.get()
+    if tracker is not None:
+        tracker["billed"][_ik_kind_for_path(path)] += 1
+
+
+def _ik_count_cached() -> None:
+    tracker = _ik_cost_tracker.get()
+    if tracker is not None:
+        tracker["cached"] += 1
+
+
+# Console labels per pipeline task (agent name → readable step).
+_TASK_LABELS = {
+    "doc_classify": "1 Document classification",
+    "context_extract": "2 Context extraction",
+    "grounds_extract": "3 Grounds extraction",
+    "issue_split": "3 Issue spotting",
+    "fresh_extract": "3 Fresh-matter grounds",
+    "keyword_extract": "4 Query generation",
+    "judgment_verifier": "5 Judgment verification",
+    "citation_analysis": "6 Report analysis",
+    "case_summary": "7 Judgment summary",
+    "good_law_check": "8 Good-law web check",
+}
+
+
+def llm_track_usage(model: str, usage: Any, task: str = "other",
+                    cache_method: str | None = None) -> None:
+    """Record one model call's token usage from an ADK event's / genai
+    response's usage_metadata, keyed by (task, model) so the bill shows
+    which pipeline step spent what on which model. Events without usage
+    (partials) are skipped. cached = tokens served from Gemini's context
+    cache — billed at 25% of the input rate. cache_method names WHICH
+    cache the call site rides ('explicit' = the verifier's CachedContent,
+    'implicit' = Gemini's automatic prefix cache); recorded on the row once
+    cached tokens are actually observed, and stored with the usage event."""
+    tracker = _ik_cost_tracker.get()
+    if tracker is None or usage is None:
+        return
+    prompt = getattr(usage, "prompt_token_count", 0) or 0
+    output = ((getattr(usage, "candidates_token_count", 0) or 0)
+              + (getattr(usage, "thoughts_token_count", 0) or 0))
+    cached = getattr(usage, "cached_content_token_count", 0) or 0
+    if not prompt and not output:
+        return
+    row = tracker["llm"].setdefault(f"{task}|{model}",
+                                    {"calls": 0, "in": 0, "out": 0, "cached": 0})
+    row["calls"] += 1
+    row["in"] += prompt
+    row["out"] += output
+    row["cached"] = row.get("cached", 0) + cached
+    if cached and cache_method:
+        row["cache_method"] = cache_method
+
+
+def embed_track(texts: list[str], tokens: int | None = None) -> None:
+    """Embedding spend. `tokens` = Gemini's own count_tokens result (exact);
+    without it, chars/4 estimate and the table row is labelled "est."."""
+    tracker = _ik_cost_tracker.get()
+    if tracker is None:
+        return
+    tracker["embed_calls"] += 1
+    if tokens is not None:
+        tracker["embed_tokens_est"] += int(tokens)
+    else:
+        tracker["embed_tokens_est"] += sum(len(t) for t in texts) // 4
+        tracker["embed_est"] = True
+
+
+def grounding_track() -> None:
+    tracker = _ik_cost_tracker.get()
+    if tracker is not None:
+        tracker["grounding_calls"] += 1
+
+
+def cache_storage_track(model: str, tokens: int, hours: float) -> None:
+    """One explicit context-cache CREATION: `tokens` stay stored for `hours`
+    (the cache TTL) and bill at the per-1M-per-hour storage rate. Recorded
+    on the run whose call created the cache — at one creation per hour, the
+    storage line appears once per hour of verifier traffic."""
+    tracker = _ik_cost_tracker.get()
+    if tracker is None or not tokens:
+        return
+    slot = tracker.setdefault("cache_storage", {}).setdefault(
+        model, {"count": 0, "tokens": 0, "cost": 0.0})
+    slot["count"] += 1
+    slot["tokens"] += int(tokens)
+    slot["cost"] += tokens / 1e6 * GEMINI_CACHE_STORAGE_PER_1M_HR_INR * hours
+
+
+def _llm_rate(model: str) -> tuple[float, float]:
+    for prefix, rate in LLM_RATES_INR:
+        if model.startswith(prefix):
+            return rate
+    return DEFAULT_LLM_RATE_INR
+
+
+def _llm_row_cost(model: str, row: dict) -> float:
+    """INR for one (task, model) usage row — cached input tokens (Gemini
+    context caching, implicit or explicit) bill at 25% of the input rate."""
+    rate_in, rate_out = _llm_rate(model)
+    cached = min(row.get("cached", 0), row.get("in", 0))
+    return ((row.get("in", 0) - cached) / 1e6 * rate_in
+            + cached / 1e6 * rate_in * 0.25
+            + row.get("out", 0) / 1e6 * rate_out)
+
+
+def merge_cost_ledger(ledger: dict | None, tracker: dict) -> dict:
+    """Fold one phase's tracker into the session's cumulative cost ledger
+    (JSON-safe plain dicts — persisted in the session payload, so the
+    end-to-end bill survives restarts and spans analyze → search → reports)."""
+    led = ledger or {}
+    out: dict = {
+        "llm": {model: dict(row) for model, row in (led.get("llm") or {}).items()},
+        "billed": dict(led.get("billed") or {}),
+        "cached": int(led.get("cached") or 0),
+        "embed_calls": int(led.get("embed_calls") or 0),
+        "embed_tokens_est": int(led.get("embed_tokens_est") or 0),
+        "grounding_calls": int(led.get("grounding_calls") or 0),
+    }
+    for model, row in tracker.get("llm", {}).items():
+        dst = out["llm"].setdefault(model, {"calls": 0, "in": 0, "out": 0})
+        for key in ("calls", "in", "out", "cached"):
+            dst[key] = dst.get(key, 0) + row.get(key, 0)
+    for kind, count in dict(tracker.get("billed") or {}).items():
+        out["billed"][kind] = out["billed"].get(kind, 0) + count
+    out["cached"] += tracker.get("cached", 0)
+    out["embed_calls"] += tracker.get("embed_calls", 0)
+    out["embed_tokens_est"] += tracker.get("embed_tokens_est", 0)
+    out["grounding_calls"] += tracker.get("grounding_calls", 0)
+    out["embed_est"] = bool(led.get("embed_est")) or bool(tracker.get("embed_est"))
+    out["cache_storage"] = {m: dict(s) for m, s in (led.get("cache_storage") or {}).items()}
+    for model, slot in (tracker.get("cache_storage") or {}).items():
+        dst = out["cache_storage"].setdefault(
+            model, {"count": 0, "tokens": 0, "cost": 0.0})
+        dst["count"] += slot.get("count", 0)
+        dst["tokens"] += slot.get("tokens", 0)
+        dst["cost"] += slot.get("cost", 0.0)
+    return out
+
+
+def cost_totals(tracker: dict) -> tuple[float, float]:
+    """Public (ai_total, ik_total) in INR for a tracker or cumulative
+    ledger — used for the one-line session total under the per-run bill."""
+    return _cost_totals(tracker)
+
+
+# ─── Usage events → citation_usage_events (per-user billing ledger) ─────────
+# The admin DB owns pricing: its BEFORE INSERT trigger reads
+# citation_rate_card and stamps cost_inr/cost_usd. The engine reports WHAT
+# was used — aggregate rows per (operation, model) per pipeline step — and
+# its own figure only as producer_cost_inr (drift signal). Caller identity
+# rides a ContextVar set by the API layer, like the court scope.
+
+_usage_identity: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar(
+    "usage_identity", default=None)
+
+
+def set_usage_identity(user_id: str | None, case_id: str | None = None) -> None:
+    _usage_identity.set({"user_id": str(user_id) if user_id else "anonymous",
+                         "case_id": str(case_id) if case_id else None})
+
+
+def _usage_rows(tracker: dict, session_id: str | None, stage: str) -> list[dict[str, Any]]:
+    ident = _usage_identity.get() or {}
+    run_id = uuid.uuid4().hex[:16]
+    base = {
+        "session_id": session_id,
+        "run_id": run_id,
+        "stage": stage,
+        "user_id": ident.get("user_id") or "anonymous",
+        "case_id": ident.get("case_id"),
+        "cache_hit": False,
+        "cached_tokens": 0,
+        "metadata": {"cache_method": "none"},
+        "occurred_at": datetime.now(timezone.utc),
+    }
+    rows: list[dict[str, Any]] = []
+    for key, r in (tracker.get("llm") or {}).items():
+        task, _, model = key.partition("|")
+        if not model:  # rows from before task-level tracking
+            task, model = "other", key
+        cached = int(min(r.get("cached", 0), r.get("in", 0)))
+        # Which cache served the cached tokens: 'explicit' (verifier
+        # CachedContent) / 'implicit' (Gemini prefix cache) / 'none'.
+        method = (r.get("cache_method") or "implicit") if cached else "none"
+        rows.append({**base,
+                     "provider": "claude" if model.startswith("claude") else "gemini",
+                     "service": "judgement_ai", "operation": task, "model": model,
+                     "unit": "tokens", "quantity": int(r["in"] + r["out"]),
+                     "calls": int(r["calls"]),
+                     "input_tokens": int(r["in"]), "output_tokens": int(r["out"]),
+                     "cached_tokens": cached,
+                     "metadata": {"cache_method": method},
+                     "producer_cost_inr": round(_llm_row_cost(model, r), 6)})
+    if tracker.get("embed_calls"):
+        tokens = int(tracker.get("embed_tokens_est") or 0)
+        rows.append({**base, "provider": "gemini", "service": "judgement_ai",
+                     "operation": "embedding_rerank", "model": "gemini-embedding-001",
+                     "unit": "tokens", "quantity": tokens,
+                     "calls": int(tracker["embed_calls"]),
+                     "input_tokens": tokens, "output_tokens": 0,
+                     "producer_cost_inr": round(tokens / 1e6 * GEMINI_EMBED_PER_1M_INR, 6)})
+    if tracker.get("grounding_calls"):
+        n = int(tracker["grounding_calls"])
+        rows.append({**base, "provider": "gemini", "service": "judgement_ai",
+                     "operation": "google_search_grounding", "model": None,
+                     "unit": "calls", "quantity": n, "calls": n,
+                     "input_tokens": 0, "output_tokens": 0,
+                     "producer_cost_inr": round(n * GEMINI_GROUNDING_PER_CALL_INR, 6)})
+    for model, slot in (tracker.get("cache_storage") or {}).items():
+        # Explicit context-cache storage — tokens held for the cache TTL.
+        rows.append({**base, "provider": "gemini", "service": "judgement_ai",
+                     "operation": "context_cache_storage", "model": model,
+                     "unit": "tokens", "quantity": int(slot.get("tokens", 0)),
+                     "calls": int(slot.get("count", 0)),
+                     "input_tokens": 0, "output_tokens": 0,
+                     "cached_tokens": int(slot.get("tokens", 0)),
+                     "metadata": {"cache_method": "explicit",
+                                  "rate_inr_per_1m_token_hour":
+                                      GEMINI_CACHE_STORAGE_PER_1M_HR_INR},
+                     "producer_cost_inr": round(slot.get("cost", 0.0), 6)})
+    for kind, count in dict(tracker.get("billed") or {}).items():
+        rows.append({**base, "provider": "indian_kanoon", "service": "indian_kanoon",
+                     "operation": kind, "model": None,
+                     "unit": "calls", "quantity": int(count), "calls": int(count),
+                     "input_tokens": 0, "output_tokens": 0,
+                     "producer_cost_inr": round(IK_RATES_INR[kind] * count, 6)})
+    if tracker.get("cached"):
+        n = int(tracker["cached"])
+        rows.append({**base, "provider": "indian_kanoon", "service": "indian_kanoon",
+                     "operation": "cache_hit", "model": None,
+                     "unit": "calls", "quantity": n, "calls": n,
+                     "input_tokens": 0, "output_tokens": 0,
+                     "cache_hit": True,
+                     "metadata": {"cache_method": "response_cache"},
+                     "producer_cost_inr": 0.0})
+    for step_no, row in enumerate(rows):
+        row["step_no"] = step_no
+        row["event_key"] = (f"jud:{run_id}:{step_no}:{row['operation']}:"
+                            f"{row.get('model') or 'ik'}")
+    return rows
+
+
+def flush_usage_events(tracker: dict, *, session_id: str | None, stage: str) -> int:
+    """Report one pipeline step's spend to citation_usage_events. Sync
+    (psycopg2) — call via asyncio.to_thread from async code. Never raises:
+    a billing-ledger outage must never break research."""
+    try:
+        rows = _usage_rows(tracker, session_id, stage)
+        if not rows:
+            return 0
+        from stores import postgres  # local import: stores must stay import-light
+        written = postgres.usage_insert_events(rows)
+        if written:
+            logger.info("[usage] %d event row(s) → citation_usage_events "
+                        "(stage=%s user=%s session=%s)",
+                        written, stage, rows[0]["user_id"], session_id or "-")
+        return written
+    except Exception as exc:
+        logger.warning("[usage] failed to record usage events: %s", exc)
+        return 0
+
+
+def _cost_totals(tracker: dict) -> tuple[float, float]:
+    """(ai_total, ik_total) in INR for one tracker/ledger."""
+    ai = 0.0
+    for key, row in tracker.get("llm", {}).items():
+        _task, _, model = key.partition("|")
+        ai += _llm_row_cost(model or key, row)
+    ai += tracker.get("embed_tokens_est", 0) / 1e6 * GEMINI_EMBED_PER_1M_INR
+    ai += tracker.get("grounding_calls", 0) * GEMINI_GROUNDING_PER_CALL_INR
+    ai += sum(slot.get("cost", 0.0)
+              for slot in (tracker.get("cache_storage") or {}).values())
+    ik = sum(IK_RATES_INR[kind] * count
+             for kind, count in dict(tracker.get("billed") or {}).items())
+    return ai, ik
+
+
+def run_cost_log(tracker: dict, tag: str, step: dict | None = None) -> None:
+    """ONE tabular console bill: every AI model's real token usage at
+    rate-card prices, plus every Indian Kanoon request. Pass the session's
+    cumulative ledger for the end-to-end bill; `step` (the phase's own
+    tracker) adds a "this step" line under the grand total. Sections appear
+    only when they saw traffic."""
+    sep = "=" * 92
+    dash = "-" * 92
+    logger.info("[cost] %s", sep)
+    logger.info("[cost] COMPLETE COST — %s", tag)
+
+    ai_total = 0.0
+    llm_rows = []
+    for key, row in tracker.get("llm", {}).items():
+        task, _, model = key.partition("|")
+        if not model:  # ledger rows from before task-level tracking
+            task, model = "other", key
+        llm_rows.append((_TASK_LABELS.get(task, task), model, row))
+    llm_rows.sort()
+    if (llm_rows or tracker.get("embed_calls") or tracker.get("grounding_calls")
+            or tracker.get("cache_storage")):
+        logger.info("[cost] %s", dash)
+        logger.info("[cost] %-27s %-24s %5s %11s %11s %8s",
+                    "Task / agent", "Model", "Calls", "Tokens in",
+                    "Tokens out", "Cost INR")
+        total_cached = 0
+        for label, model, row in llm_rows:
+            cost = _llm_row_cost(model, row)
+            ai_total += cost
+            total_cached += min(row.get("cached", 0), row.get("in", 0))
+            logger.info("[cost] %-27s %-24s %5d %11s %11s %8.2f",
+                        label[:27], model[:24], row["calls"],
+                        f"{row['in']:,}", f"{row['out']:,}", cost)
+        if llm_rows:
+            # Always printed — 0 means no call was served from a Gemini
+            # context cache (implicit prefix or the verifier's explicit one).
+            logger.info("[cost] %-27s %-24s %5s %11s %11s %8s",
+                        "  of which CACHED input", "(billed at 25%)", "",
+                        f"{total_cached:,}", "-", "")
+        if tracker.get("embed_calls"):
+            cost = tracker["embed_tokens_est"] / 1e6 * GEMINI_EMBED_PER_1M_INR
+            ai_total += cost
+            embed_label = ("5 Embedding rerank (est.)" if tracker.get("embed_est")
+                           else "5 Embedding rerank")
+            logger.info("[cost] %-27s %-24s %5d %11s %11s %8.2f",
+                        embed_label, "gemini-embedding-001",
+                        tracker["embed_calls"],
+                        f"{tracker['embed_tokens_est']:,}", "-", cost)
+        if tracker.get("grounding_calls"):
+            cost = tracker["grounding_calls"] * GEMINI_GROUNDING_PER_CALL_INR
+            ai_total += cost
+            logger.info("[cost] %-27s %-24s %5d %11s %11s %8.2f",
+                        "8 Google-search grounding", "per-call rate",
+                        tracker["grounding_calls"], "-", "-", cost)
+        for model, slot in (tracker.get("cache_storage") or {}).items():
+            # Explicit context-cache STORAGE (verifier prompt held for its
+            # TTL). Implicit prefix caching stores nothing and costs nothing.
+            ai_total += slot.get("cost", 0.0)
+            logger.info("[cost] %-27s %-24s %5d %11s %11s %8.2f",
+                        "5 Context cache storage", model[:24],
+                        slot.get("count", 0), f"{slot.get('tokens', 0):,}",
+                        "-", slot.get("cost", 0.0))
+        logger.info("[cost] %-27s %-24s %5s %11s %11s %8.2f",
+                    "AI subtotal", "", "", "", "", ai_total)
+
+    billed: Counter = tracker["billed"]
+    ik_total = sum(IK_RATES_INR[kind] * count for kind, count in billed.items())
+    if billed or tracker.get("cached"):
+        logger.info("[cost] %s", dash)
+        logger.info("[cost] %-28s %6s %12s %12s %9s",
+                    "Indian Kanoon", "Calls", "Rate", "", "Cost INR")
+        for kind, label in _IK_KIND_LABELS:
+            count = billed.get(kind, 0)
+            if count == 0 and kind in ("docfragment", "origdoc"):
+                continue  # endpoints this pipeline never calls
+            logger.info("[cost] %-28s %6d %12.2f %12s %9.2f",
+                        label, count, IK_RATES_INR[kind], "",
+                        IK_RATES_INR[kind] * count)
+        if tracker.get("cached"):
+            logger.info("[cost] %-28s %6d %12s %12s %9.2f",
+                        "Cache hits (free)", tracker["cached"], "-", "", 0.0)
+        logger.info("[cost] %-28s %6s %12s %12s %9.2f",
+                    "IK subtotal", "", "", "", ik_total)
+
+    logger.info("[cost] %s", dash)
+    logger.info("[cost] %-28s %6s %12s %12s %9.2f",
+                "GRAND TOTAL (INR)", "", "", "", ai_total + ik_total)
+    if step is not None:
+        step_ai, step_ik = _cost_totals(step)
+        logger.info("[cost] %-28s %6s %12s %12s %9.2f",
+                    "  of which THIS step", "", "", "", step_ai + step_ik)
+    logger.info("[cost] %s", sep)
 
 
 # ─── Embeddings + re-rank (Section 6) ────────────────────────────────────────
@@ -828,6 +1369,16 @@ class EmbeddingTool:
                     output_dimensionality=settings.embedding_dim,
                 ),
             )
+            tokens = None
+            try:
+                # Gemini's own token counter — exact billing tokens for the
+                # embedded input (the count endpoint itself is free).
+                counted = client.models.count_tokens(
+                    model=settings.gemini_embedding_model, contents=texts)
+                tokens = getattr(counted, "total_tokens", None)
+            except Exception:
+                tokens = None  # chars/4 fallback inside embed_track
+            embed_track(texts, tokens)
             return [self._l2(list(e.values)) for e in result.embeddings]
         except Exception as exc:
             logger.error("[embed] embedding call failed (%s)", exc)
@@ -1249,6 +1800,67 @@ _HC_PROFILES: tuple[tuple[tuple[str, ...], str, tuple[str, ...], str], ...] = (
 )
 
 
+# docsource substrings per selectable High-Court token — powers the
+# deterministic post-fetch guard for court-scoped runs (scope_allows_court).
+# Bench/variant doctypes IK offers that _HC_PROFILES doesn't carry directly
+# are mapped by hand; the profile table fills in the rest below.
+_COURT_TOKEN_MATCH: dict[str, tuple[str, ...]] = {
+    "jaipur": ("rajasthan",),
+    "jodhpur": ("rajasthan",),
+    "kolkata_app": ("calcutta",),
+    "delhiorders": ("delhi",),
+    "patna_orders": ("patna",),
+    "amravati": ("andhra", "amaravati", "amravati"),
+    "srinagar": ("jammu", "kashmir"),
+}
+for _kw, _doctype, _match, _label in _HC_PROFILES:
+    _COURT_TOKEN_MATCH.setdefault(_doctype, _match)
+
+
+def scope_allows_court(court: str) -> bool:
+    """Deterministic guard for a court-scoped run: does this candidate's
+    court (its IK docsource line) belong to one of the user's selected
+    courts? IK's own doctypes: filter already ran at fetch time — this
+    drops anything that still slips through (aggregates, odd doc indexing)
+    BEFORE the candidate is billed, verified or surfaced. Tokens with no
+    docsource mapping (tribunals, laws, aggregates) stay permissive for
+    non-court docsources — IK's filter remains the authority for them.
+    No active scope → everything passes."""
+    scope = _court_scope.get()
+    if scope is None:
+        return True
+    low = (court or "").lower()
+    permissive_other = False
+    for token in scope.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if token in ("supremecourt", "scorders"):
+            if "supreme court" in low:
+                return True
+            continue
+        if token in ("delhidc", "bangaloredc"):
+            if "district" in low:
+                return True
+            continue
+        if token == "highcourts":
+            if "high court" in low:
+                return True
+            continue
+        match = _COURT_TOKEN_MATCH.get(token)
+        if match is not None:
+            # An HC token must match its state AND actually be a High Court
+            # ('Bombay City Civil Court' never satisfies the bombay token).
+            if "high court" in low and any(m in low for m in match):
+                return True
+            continue
+        permissive_other = True
+    if permissive_other and ("high court" not in low and "supreme court" not in low
+                             and "district" not in low):
+        return True
+    return False
+
+
 def forum_court_profile(forum: str | None) -> dict[str, Any] | None:
     """Infer the client's own High Court from the forum text ('Bombay High
     Court, Aurangabad Bench', 'Sessions Court, Pune', 'Maharashtra'…).
@@ -1417,6 +2029,9 @@ async def grounded_good_law_check(title: str, court: str, year: int | None) -> d
             )
 
         resp = await asyncio.to_thread(_call)
+        llm_track_usage(settings.gemini_model, getattr(resp, "usage_metadata", None),
+                        task="good_law_check")
+        grounding_track()
         text = resp.text or ""
         m = re.search(r"\{.*\}", text, re.S)
         data = _json.loads(m.group(0)) if m else {}

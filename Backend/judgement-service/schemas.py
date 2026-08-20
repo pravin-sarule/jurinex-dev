@@ -502,6 +502,15 @@ class AnalyzeCaseFreshRequest(BaseModel):
     queryStyle: QueryStyle = "simple"
 
 
+class CourtScope(BaseModel):
+    """Court restriction for one search run (the issues-step Advanced search
+    boxes): any combination of the three. Nothing selected = the service's
+    default doctypes (env IK_DOCTYPES) — behaviour unchanged."""
+    supremeCourt: bool = False   # box 1 — Supreme Court judgments
+    caseCourt: bool = False      # box 2 — the case's own High Court (all HCs when undetectable)
+    courts: list[str] = Field(default_factory=list)  # box 3 — explicit IK doctype tokens
+
+
 class RunSearchRequest(BaseModel):
     """Phase 2: run retrieval for chosen issues. issueIds pick from the
     session's suggested issues (omit → all); customIssues are the user's
@@ -513,12 +522,34 @@ class RunSearchRequest(BaseModel):
     issueIds: list[int] | None = None
     customIssues: list[str] = Field(default_factory=list)
     queryOverrides: dict[str, list[str]] = Field(default_factory=dict)
+    courtScope: CourtScope | None = None
+    # Date range for this run — every query gets fromdate:/todate: when set.
+    fromdate: str = ""   # DD-MM-YYYY (YYYY-MM-DD also accepted)
+    todate: str = ""
 
 
 class AddIssueRequest(BaseModel):
     """A user-typed issue/ground added to an analysed session — it gets the
     same enrichment + query generation as system-suggested issues."""
     text: str
+
+
+class AdvancedSearchRequest(BaseModel):
+    """Direct Indian Kanoon advanced search — no agents, no verification
+    pipeline. Every criterion is optional; the filled ones are combined into
+    ONE formInput using IK's documented directives (title:, cite:, author:,
+    bench:, doctypes:, fromdate:, todate:, sortby:) and results come back
+    exactly as IK returns them, 10 per page."""
+    query: str = ""      # keywords / phrases anywhere in the document
+    title: str = ""      # words that must appear in the document title
+    cite: str = ""       # citation filter, e.g. "1993 AIR"
+    author: str = ""     # judge who authored the judgment
+    bench: str = ""      # judge who sat on the bench
+    doctypes: str = ""   # comma-separated IK doctype tokens
+    fromdate: str = ""   # DD-MM-YYYY (YYYY-MM-DD also accepted)
+    todate: str = ""     # DD-MM-YYYY (YYYY-MM-DD also accepted)
+    sortby: Literal["relevance", "mostrecent", "leastrecent"] = "relevance"
+    pagenum: int = 0
 
 
 # ─── Per-citation report (VIEW → Report tab) ────────────────────────────────

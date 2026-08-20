@@ -37,7 +37,9 @@ from app.services.llm_service import (
     _stream_round,
     supports_frequency_penalty,
     _stream_tail_delta,
+    _strip_continuation_preamble,
     _trim_overlap,
+    _trim_symbol_flood,
     build_model_list,
     build_recovery_prompt,
     continuation_attempts,
@@ -671,6 +673,14 @@ async def ask_with_context_cache(
             ),
         }
         finish_reason = None
+        # Trim a trailing punctuation flood (runaway table-separator dashes) from
+        # the stitched answer before continuing, and give recovery rewrites their
+        # own paragraph so they can't glue onto a broken table row mid-line
+        # (mirrors _stream_with_continuation).
+        full = _trim_symbol_flood(full)
+        if recovery and full:
+            yield {"type": "chunk", "text": "\n\n"}
+            full += "\n\n"
         full_before = full
         cont_guard = _RepetitionGuard()
         cont_stalls = 0
@@ -745,7 +755,11 @@ async def ask_with_context_cache(
                 )
             if direct_ok:
                 added = state["streamed"]
-                full += added
+                # ── CRITICAL: only stitch VALID text — a degenerate round's
+                # streamed tail is garbage and must not enter the final answer
+                # (mirrors _stream_with_continuation's only-append-if-valid).
+                if not (state.get("degenerate") or state.get("restarted")):
+                    full += added
                 if state["last_chunk"] is not None:
                     u = _normalize_usage(state["last_chunk"], len(added))
                     # Output is additive; Input/Cached are latest/max.
@@ -828,9 +842,11 @@ async def ask_with_context_cache(
                                 
                                 # Buffer the head until we have enough to detect overlap
                                 if len(round_raw) < _CONTINUATION_TRIM_WINDOW:
-                                    continue 
-                                
-                                head = _trim_overlap(full, round_raw)
+                                    continue
+
+                                # Strip courteous lead-ins first — a novel preamble
+                                # otherwise masks a full restart behind it.
+                                head = _trim_overlap(full, _strip_continuation_preamble(round_raw))
                                 if _looks_like_restart(full, head):
                                     round_restarted = True
                                     break
@@ -872,7 +888,7 @@ async def ask_with_context_cache(
                             round_raw, delta = _append_stream_piece(round_raw, out_text)
                             if delta:
                                 if not head_emitted:
-                                    head = _trim_overlap(full, round_raw)
+                                    head = _trim_overlap(full, _strip_continuation_preamble(round_raw))
                                     if not _looks_like_restart(full, head):
                                         yield {"type": "chunk", "text": head}
                                         head_emitted = True
@@ -893,7 +909,7 @@ async def ask_with_context_cache(
 
         # Post-round finalization: flush remaining buffered head if round was too short
         if not head_emitted and not round_restarted and not round_degenerate and not round_error:
-            head = _trim_overlap(full, round_raw)
+            head = _trim_overlap(full, _strip_continuation_preamble(round_raw))
             if _looks_like_restart(full, head):
                 round_restarted = True
             else:
@@ -1014,7 +1030,19 @@ async def ask_with_context_cache(
         "finishReason": finish_reason,
         "outputTruncated": _is_max_tokens_finish(finish_reason),
     }
-    yield {"type": "done", "answer": full}
+    full = _trim_symbol_flood(full)
+    if consec_degen > 0 and len(full.strip()) < 500:
+        # Generation ended in persistent degeneration with only a stub (e.g. a
+        # bare table header) — signal an empty answer so the orchestrator's
+        # direct-GCS fallback regenerates a real one instead of saving the stub.
+        logger.warning(
+            "Cache path ended degenerate with a %d-char stub — deferring to GCS fallback file=%s",
+            len(full.strip()),
+            file_id,
+        )
+        yield {"type": "done", "answer": ""}
+    else:
+        yield {"type": "done", "answer": full}
 
 
 async def _upsert_adk_cache_session(
