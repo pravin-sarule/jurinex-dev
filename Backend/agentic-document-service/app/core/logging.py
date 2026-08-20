@@ -239,18 +239,24 @@ def log_message_width() -> int:
 
 
 def _continuation_indent(msg: str) -> int:
-    """Pad wrapped log lines under MESSAGE, unless that would make a table wrap."""
+    """Pad wrapped log lines under MESSAGE, unless that would wrap an ASCII table.
+
+    Boxed reports (`+---+`, `| col |`) always start at column 0. Indenting them
+    under the MODEL column made Cursor wrap mid-border and scramble the table.
+    """
+    rest = (msg or '').split('\n')[1:]
+    if not rest:
+        return _S.prefix_len
+    if any(line.lstrip()[:1] in {'+', '|', '='} for line in rest):
+        return 0
     indent = _S.prefix_len
     try:
         term = shutil.get_terminal_size(fallback=(140, 40)).columns
     except Exception:
         term = 140
     term = _env_int('LOG_WIDTH', term)
-    rest = (msg or '').split('\n')[1:]
-    if not rest:
-        return indent
     widest = max(_visible_len(line) for line in rest)
-    if indent + widest >= term:
+    if indent + widest + 4 >= term:
         return 0
     return indent
 

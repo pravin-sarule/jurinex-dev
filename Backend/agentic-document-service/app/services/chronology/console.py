@@ -120,7 +120,10 @@ def grid_table(
     while len(preferred) < len(cols):
         preferred.append(8)
     mins = [4] * len(cols)
-    if len(cols) >= 3:
+    if [c.lower() for c in cols] == ["date", "phase", "event"]:
+        preferred = [11, 14, max(12, width - 10 - 11 - 14)]
+        mins = [11, 8, 10]
+    elif len(cols) >= 3:
         mins = [11, 8, 10][: len(cols)] + [4] * max(0, len(cols) - 3)
     widths = _fit_widths(preferred, width, mins)
     inner = sum(widths) + 3 * (len(widths) - 1)

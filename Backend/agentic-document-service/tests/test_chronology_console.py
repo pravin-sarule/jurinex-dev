@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from app.core.logging import _continuation_indent, configure_logging
 from app.schemas.chronology import ChronologyDateNode, ChronologyEvent, ChronologyPhaseNode, ChronologyTree
 from app.services.chronology.console import grid_table, kv_table, log_run_report, progress_bar, tree_diagram
 
@@ -64,6 +65,11 @@ class ConsoleTableTests(unittest.TestCase):
         self.assertIn("15 Jan 2019", diagram)
         self.assertIn("Agreement executed", diagram)
         self.assertTrue(all(len(line) <= 56 for line in diagram.splitlines()), diagram)
+
+    def test_boxed_tables_start_at_column_zero(self) -> None:
+        configure_logging("INFO")
+        table = kv_table("AUTO-FILL + CHRONOLOGY", [("case", "259")], max_width=48)
+        self.assertEqual(_continuation_indent("model=gemini-3.7-flash\n" + table), 0)
 
     def test_log_run_report_fits_narrow_message_column(self) -> None:
         node = ChronologyDateNode(
