@@ -49,8 +49,10 @@ from app.services.chronology import (
     load_or_empty,
     merge_into_tree,
     rebind_tree,
+    report_from_extraction,
     save_tree,
 )
+from app.services.chronology.console import log_progress, log_run_report
 
 
 logger = logging.getLogger("agentic_document_service.folder")

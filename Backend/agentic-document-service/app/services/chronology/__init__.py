@@ -11,6 +11,7 @@ from .service import (
     load_or_empty,
     merge_into_tree,
     rebind_tree,
+    report_from_extraction,
     save_tree,
 )
 
@@ -24,5 +25,6 @@ __all__ = [
     "merge_events",
     "merge_into_tree",
     "rebind_tree",
+    "report_from_extraction",
     "save_tree",
 ]

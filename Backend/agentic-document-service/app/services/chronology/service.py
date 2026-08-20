@@ -23,6 +23,19 @@ def events_from_extraction(
     )
 
 
+def report_from_extraction(
+    entities: dict[str, Any] | None,
+    *,
+    source_text: str,
+    document_name: str,
+):
+    return extract_grounded_report(
+        entities or {},
+        source_text=source_text,
+        document_name=document_name,
+    )
+
+
 def merge_into_tree(existing: ChronologyTree | None, events: list) -> ChronologyTree:
     if not events and existing is not None:
         return existing
