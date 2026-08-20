@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 
 from app.schemas.chronology import ChronologyDateNode, ChronologyEvent, ChronologyPhaseNode, ChronologyTree
-from app.services.chronology.console import grid_table, kv_table, progress_bar, tree_diagram
+from app.services.chronology.console import grid_table, kv_table, log_run_report, progress_bar, tree_diagram
+
+
+def _line_widths(block: str) -> list[int]:
+    return [len(line) for line in block.splitlines()]
 
 
 class ConsoleTableTests(unittest.TestCase):
@@ -13,15 +17,37 @@ class ConsoleTableTests(unittest.TestCase):
         self.assertIn("50%", line)
         self.assertIn("LLM extract", line)
 
-    def test_kv_table_is_boxed(self) -> None:
-        table = kv_table("TOKEN USAGE", [("model", "gemini-3.7-flash"), ("input_tokens", "12,345")])
+    def test_kv_table_is_boxed_and_aligned(self) -> None:
+        table = kv_table(
+            "AUTO-FILL + CHRONOLOGY",
+            [
+                ("model", "gemini-3.7-flash"),
+                ("document", "Ahmednagar forging _LT.pdf"),
+                ("fields", "caseType, caseNumber, filingDate, caseTitle, courtLevel, courtName"),
+            ],
+            max_width=56,
+        )
+        widths = _line_widths(table)
+        self.assertTrue(widths)
+        self.assertEqual(len(set(widths)), 1, table)
+        self.assertLessEqual(widths[0], 56, table)
         self.assertIn("gemini-3.7-flash", table)
-        self.assertIn("input_tokens", table)
-        self.assertIn("+", table)
-        self.assertIn("|", table)
+        self.assertIn("document", table)
+        self.assertTrue(table.startswith("+"))
 
-    def test_grid_and_tree(self) -> None:
-        grid = grid_table("UNIQUE DATES", ["date", "phase"], [["15 Jan 2019", "pre_litigation"]])
+    def test_grid_and_tree_stay_within_width(self) -> None:
+        grid = grid_table(
+            "UNIQUE DATES (earliest first)",
+            ["date", "phase", "event"],
+            [
+                ["15 Jan 2019", "pre_litigation", "Agreement executed between the parties"],
+                ["08 May 2014", "pleadings", "Statement of Claim Filed by Workman"],
+            ],
+            max_width=56,
+        )
+        widths = _line_widths(grid)
+        self.assertEqual(len(set(widths)), 1, grid)
+        self.assertLessEqual(widths[0], 56, grid)
         self.assertIn("15 Jan 2019", grid)
         node = ChronologyDateNode(
             date="2019-01-15",
@@ -33,10 +59,47 @@ class ConsoleTableTests(unittest.TestCase):
             dates=[node],
             phases=[ChronologyPhaseNode(id="pre_litigation", label="Pre-litigation", dates=[node])],
         )
-        diagram = tree_diagram(tree)
+        diagram = tree_diagram(tree, max_width=56)
         self.assertIn("Pre-litigation", diagram)
         self.assertIn("15 Jan 2019", diagram)
         self.assertIn("Agreement executed", diagram)
+        self.assertTrue(all(len(line) <= 56 for line in diagram.splitlines()), diagram)
+
+    def test_log_run_report_fits_narrow_message_column(self) -> None:
+        node = ChronologyDateNode(
+            date="2011-03-28",
+            displayDate="28 Mar 2011",
+            phase="pre_litigation",
+            events=[ChronologyEvent(title="Appointment of Respondent as Trainee")],
+        )
+        tree = ChronologyTree(
+            dates=[node],
+            phases=[ChronologyPhaseNode(id="pre_litigation", label="Pre-litigation", dates=[node])],
+            eventCount=1,
+        )
+        logs: list[str] = []
+        with self.assertLogs("agentic_document_service.chronology", level="INFO") as captured:
+            log_run_report(
+                stage="intake document",
+                case_id="temp-445afba97dad",
+                document_name="Ahmednagar forging _LT.pdf",
+                chars=519072,
+                elapsed_s=302.8,
+                fields_filled=8,
+                field_names=["caseType", "caseNumber", "filingDate", "caseTitle", "courtLevel", "courtName"],
+                kept_events=0,
+                dropped_events=0,
+                drop_reasons=None,
+                tree=tree,
+                usage={"model": "-", "provider": "-", "inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+            )
+            logs.extend(captured.output)
+        body = "\n".join(logs)
+        self.assertIn("AUTO-FILL + CHRONOLOGY", body)
+        self.assertIn("temp-445afba97dad", body)
+        for line in body.splitlines():
+            if line.startswith("+") or line.startswith("|"):
+                self.assertLessEqual(len(line.split(":", 1)[-1].lstrip()), 80)
 
 
 if __name__ == "__main__":

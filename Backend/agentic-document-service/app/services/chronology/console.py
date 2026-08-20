@@ -11,66 +11,139 @@ logger = logging.getLogger("agentic_document_service.chronology")
 
 _H = "-"
 _V = "|"
-_TL = _TR = _BL = _BR = "+"
-_ML = _MR = _TM = _BM = _C = "+"
+_CORNER = "+"
+
+
+def _message_width() -> int:
+    try:
+        from app.core.logging import log_message_width
+
+        return log_message_width()
+    except Exception:
+        return 56
 
 
 def _clip(text: Any, width: int) -> str:
     value = str(text if text is not None else "")
+    width = max(int(width), 0)
     if len(value) <= width:
         return value.ljust(width)
-    if width <= 1:
+    if width <= 3:
         return value[:width]
-    return value[: width - 1] + "…"
+    return value[: width - 3] + "..."
 
 
-def _rule(widths: Sequence[int], left: str, mid: str, right: str) -> str:
-    return left + mid.join(_H * (w + 2) for w in widths) + right
+def _wrap(text: Any, width: int) -> list[str]:
+    value = str(text if text is not None else "")
+    width = max(int(width), 1)
+    if not value:
+        return [""]
+    if len(value) <= width:
+        return [value]
+    parts: list[str] = []
+    rest = value
+    while rest:
+        if len(rest) <= width:
+            parts.append(rest)
+            break
+        cut = rest.rfind(" ", 0, width)
+        if cut < max(4, width // 3):
+            parts.append(rest[:width])
+            rest = rest[width:]
+        else:
+            parts.append(rest[:cut])
+            rest = rest[cut + 1 :]
+    return parts or [""]
 
 
-def kv_table(title: str, rows: Sequence[tuple[str, Any]]) -> str:
-    pairs = [(str(k), str(v if v is not None else "—")) for k, v in rows]
+def _rule(widths: Sequence[int]) -> str:
+    return _CORNER + _CORNER.join(_H * (w + 2) for w in widths) + _CORNER
+
+
+def _row(cells: Sequence[str], widths: Sequence[int]) -> str:
+    body = _V.join(f" {_clip(cells[i] if i < len(cells) else '', widths[i])} " for i in range(len(widths)))
+    return f"{_V}{body}{_V}"
+
+
+def _box_width(widths: Sequence[int]) -> int:
+    return sum(widths) + 3 * len(widths) + 1
+
+
+def _fit_widths(preferred: Sequence[int], max_width: int, mins: Sequence[int]) -> list[int]:
+    widths = [max(int(w), int(m)) for w, m in zip(preferred, mins)]
+    while _box_width(widths) > max_width and any(w > m for w, m in zip(widths, mins)):
+        i = max(range(len(widths)), key=lambda idx: widths[idx] - mins[idx])
+        if widths[i] <= mins[i]:
+            break
+        widths[i] -= 1
+    return widths
+
+
+def kv_table(title: str, rows: Sequence[tuple[str, Any]], *, max_width: int | None = None) -> str:
+    pairs = [(str(k), str(v if v is not None else "-")) for k, v in rows]
     if not pairs:
         pairs = [("status", "empty")]
-    label_w = max(len(k) for k, _ in pairs)
-    value_w = max(len(v) for _, v in pairs)
-    label_w = max(label_w, 8)
-    value_w = max(min(value_w, 72), 12)
-    widths = (label_w, value_w)
+    width = max(40, int(max_width or _message_width()))
+    label_w = min(max(max(len(k) for k, _ in pairs), 8), 16)
+    value_w = max(12, width - label_w - 7)
+    widths = _fit_widths((label_w, value_w), width, (8, 12))
+    label_w, value_w = widths
     lines = [
-        _rule(widths, _TL, _TM, _TR),
+        _rule(widths),
         f"{_V} {_clip(title, label_w + value_w + 3)} {_V}",
-        _rule(widths, _ML, _C, _MR),
+        _rule(widths),
     ]
     for key, value in pairs:
-        lines.append(f"{_V} {_clip(key, label_w)} {_V} {_clip(value, value_w)} {_V}")
-    lines.append(_rule(widths, _BL, _BM, _BR))
+        chunks = _wrap(value, value_w)
+        lines.append(_row([key, chunks[0]], widths))
+        for extra in chunks[1:]:
+            lines.append(_row(["", extra], widths))
+    lines.append(_rule(widths))
     return "\n".join(lines)
 
 
-def grid_table(title: str, headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
+def grid_table(
+    title: str,
+    headers: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    *,
+    max_width: int | None = None,
+) -> str:
     cols = [str(h) for h in headers]
     body = [[str(cell if cell is not None else "") for cell in row] for row in rows]
-    widths = [len(h) for h in cols]
+    width = max(40, int(max_width or _message_width()))
+    preferred = [len(h) for h in cols]
     for row in body:
         for i, cell in enumerate(row):
-            if i < len(widths):
-                widths[i] = min(max(widths[i], len(cell)), 36)
-    while len(widths) < len(cols):
-        widths.append(10)
+            if i < len(preferred):
+                preferred[i] = max(preferred[i], min(len(cell), 24))
+    while len(preferred) < len(cols):
+        preferred.append(8)
+    mins = [4] * len(cols)
+    if len(cols) >= 3:
+        mins = [11, 8, 10][: len(cols)] + [4] * max(0, len(cols) - 3)
+    widths = _fit_widths(preferred, width, mins)
+    inner = sum(widths) + 3 * (len(widths) - 1)
     lines = [
-        _rule(widths, _TL, _TM, _TR),
-        f"{_V} {_clip(title, sum(widths) + 3 * (len(widths) - 1))} {_V}",
-        _rule(widths, _ML, _C, _MR),
-        _V + _V.join(f" {_clip(cols[i], widths[i])} " for i in range(len(cols))) + _V,
-        _rule(widths, _ML, _C, _MR),
+        _rule(widths),
+        f"{_V} {_clip(title, inner)} {_V}",
+        _rule(widths),
+        _row(cols, widths),
+        _rule(widths),
     ]
     if not body:
-        lines.append(_V + _V.join(f" {_clip('—', widths[i])} " for i in range(len(cols))) + _V)
+        lines.append(_row(["-"] * len(widths), widths))
     for row in body:
         padded = list(row) + [""] * len(cols)
-        lines.append(_V + _V.join(f" {_clip(padded[i], widths[i])} " for i in range(len(cols))) + _V)
-    lines.append(_rule(widths, _BL, _BM, _BR))
+        first = _wrap(padded[0], widths[0]) if widths else [""]
+        # Only wrap the last column; keep other cells on the first line.
+        last_idx = len(widths) - 1
+        last_chunks = _wrap(padded[last_idx], widths[last_idx]) if last_idx > 0 else first
+        lead = [_clip(padded[i], widths[i]) for i in range(last_idx)]
+        lines.append(_row(lead + [last_chunks[0]], widths))
+        for extra in last_chunks[1:]:
+            lines.append(_row([""] * last_idx + [extra], widths))
+    lines.append(_rule(widths))
     return "\n".join(lines)
 
 
@@ -83,28 +156,29 @@ def progress_bar(step: int, total: int, label: str, width: int = 16) -> str:
     return f"[{bar}]  {step}/{total}  {pct:3d}%  {label}"
 
 
-def tree_diagram(tree: ChronologyTree, *, max_dates: int = 12) -> str:
+def tree_diagram(tree: ChronologyTree, *, max_dates: int = 12, max_width: int | None = None) -> str:
     if not tree.dates:
         return "  (no grounded dates yet)"
+    width = max(32, int(max_width or _message_width()))
     lines: list[str] = []
     phases = tree.phases or []
     shown = 0
     for p_i, phase in enumerate(phases):
         last_phase = p_i == len(phases) - 1
         phase_branch = "`-" if last_phase else "|-"
-        lines.append(f"  {phase_branch} {phase.label}")
+        lines.append(_clip(f"  {phase_branch} {phase.label}", width).rstrip())
         dates = phase.dates or []
         for d_i, node in enumerate(dates):
             if shown >= max_dates:
                 remaining = sum(len(p.dates) for p in phases[p_i:]) - d_i
                 pad = "   " if last_phase else "  |"
-                lines.append(f"{pad}  `- ... {remaining} more date(s)")
+                lines.append(_clip(f"{pad}  `- ... {remaining} more date(s)", width).rstrip())
                 return "\n".join(lines)
             last_date = d_i == len(dates) - 1
             pad = "   " if last_phase else "  |"
             date_branch = "`-" if last_date else "|-"
             title = node.events[0].title if node.events else node.summary
-            lines.append(f"{pad}  {date_branch} {node.displayDate}  {title}")
+            lines.append(_clip(f"{pad}  {date_branch} {node.displayDate}  {title}", width).rstrip())
             shown += 1
     return "\n".join(lines) if lines else "  (no grounded dates yet)"
 
@@ -133,16 +207,18 @@ def log_run_report(
     usage: dict[str, Any] | None = None,
 ) -> None:
     usage = usage or get_last_usage()
-    model = str(usage.get("model") or "—")
-    provider = str(usage.get("provider") or "—")
+    model = str(usage.get("model") or "-")
+    provider = str(usage.get("provider") or "-")
     input_tokens = int(usage.get("inputTokens") or 0)
     output_tokens = int(usage.get("outputTokens") or 0)
     total_tokens = int(usage.get("totalTokens") or (input_tokens + output_tokens))
     cost = _model_cost_usd(model, input_tokens, output_tokens)
+    width = _message_width()
 
     summary = kv_table(
-        f"AUTO-FILL + CHRONOLOGY  ·  {stage}",
+        "AUTO-FILL + CHRONOLOGY",
         [
+            ("stage", stage),
             ("case", case_id),
             ("document", document_name),
             ("ocr_chars", f"{chars:,}"),
@@ -150,41 +226,37 @@ def log_run_report(
             ("agent", "form_population_agent"),
             ("provider", provider),
             ("model", model),
-            ("input_tokens", _fmt_int(input_tokens)),
-            ("output_tokens", _fmt_int(output_tokens)),
-            ("total_tokens", _fmt_int(total_tokens)),
-            ("est_cost_usd", _fmt_usd(cost)),
-            ("form_fields", str(fields_filled)),
-            ("fields", ", ".join(field_names[:8]) or "—"),
-            ("events_kept", str(kept_events)),
-            ("events_dropped", str(dropped_events)),
-            ("unique_dates", str(len(tree.dates))),
+            ("in_tokens", _fmt_int(input_tokens)),
+            ("out_tokens", _fmt_int(output_tokens)),
+            ("tokens", _fmt_int(total_tokens)),
+            ("est_usd", _fmt_usd(cost)),
+            ("fields", f"{fields_filled}  {', '.join(field_names[:6]) or '-'}"),
+            ("events", f"kept {kept_events}  dropped {dropped_events}"),
+            ("dates", str(len(tree.dates))),
             ("phases", str(len(tree.phases))),
         ],
+        max_width=width,
     )
     reason_rows = [(k, v) for k, v in sorted((drop_reasons or {}).items()) if v]
     reason_table = ""
     if reason_rows:
         reason_table = "\n" + grid_table(
-            "UNVERIFIABLE EVENTS DROPPED",
+            "DROPPED EVENTS",
             ["reason", "count"],
             reason_rows,
+            max_width=width,
         )
     date_rows = [
-        [node.displayDate, node.phase, (node.events[0].title if node.events else "")[:36]]
+        [node.displayDate, node.phase, (node.events[0].title if node.events else "")]
         for node in tree.dates[:10]
     ]
     dates_table = "\n" + grid_table(
         "UNIQUE DATES (earliest first)",
         ["date", "phase", "event"],
-        date_rows or [["—", "—", "none"]],
+        date_rows or [["-", "-", "none"]],
+        max_width=width,
     )
-    diagram = (
-        "\n"
-        + kv_table("CHRONOLOGY TREE", [("shape", "phase → unique date → summary")])
-        + "\n"
-        + tree_diagram(tree)
-    )
+    diagram = "\nCHRONOLOGY  phase -> date -> summary\n" + tree_diagram(tree, max_width=width)
     logger.info(
         "[AutoFill] model=%s\n%s%s%s%s",
         model,
