@@ -1678,10 +1678,13 @@ class FolderWorkflowService:
                 if doc.text and len(doc.text) > 50
             )
             if combined_text:
+                started = time.perf_counter()
+                log_progress(1, 3, "Rebuild from combined OCR", case=case_id, chars=f"{len(combined_text):,}")
                 logger.info(
                     "[FolderService] task=extract_case_fields re-running Gemini extraction case_id=%s text_chars=%s chronology=%s",
                     case_id, len(combined_text), needs_chronology,
                 )
+                log_progress(2, 3, "LLM extract", agent="form_population_agent")
                 gemini_data = _call_gemini_for_extraction(combined_text)
                 if gemini_data:
                     normalized = self._normalize_entities(gemini_data)
@@ -1689,13 +1692,27 @@ class FolderWorkflowService:
                         if value and not extracted.get(key):
                             extracted[key] = value
                     self._extracted_by_case[case_id] = extracted
-                    extra_events = events_from_extraction(
+                    log_progress(3, 3, "Ground dates + merge unique dates")
+                    report = report_from_extraction(
                         gemini_data,
                         source_text=combined_text,
                         document_name="combined",
                     )
-                    tree = merge_into_tree(tree, extra_events)
+                    tree = merge_into_tree(tree, report.events)
                     self._store_chronology(case_id, tree, folder_name=folder_name)
+                    log_run_report(
+                        stage="extract-case-fields rebuild",
+                        case_id=case_id,
+                        document_name="combined",
+                        chars=len(combined_text),
+                        elapsed_s=time.perf_counter() - started,
+                        fields_filled=len([k for k in extracted if extracted.get(k) and k != "chronology"]),
+                        field_names=[k for k in extracted if extracted.get(k) and k != "chronology"],
+                        kept_events=report.kept,
+                        dropped_events=report.dropped,
+                        drop_reasons=report.reasons,
+                        tree=tree,
+                    )
 
         extracted = dict(extracted)
         extracted["chronology"] = tree.as_dict()
@@ -2598,25 +2615,45 @@ class FolderWorkflowService:
     def _merge_extracted_case_data(self, case_id: str, metadata: dict[str, Any], text: str) -> None:
         # Always run the form_population_agent call so chronology events are collected
         # from every intake document. Form fields stay first-wins; events always merge.
+        started = time.perf_counter()
         document_name = str(metadata.get("original_name") or metadata.get("document_name") or "document")
+        chars = len(text or "")
+        log_progress(1, 4, "Read OCR text", document=document_name, chars=f"{chars:,}")
+        log_progress(2, 4, "LLM extract", agent="form_population_agent")
         extraction = self._pipeline._document_ai.extract(
             DocumentReference(document_name=document_name, inline_text=text)
         )
+        log_progress(3, 4, "Ground dates / drop unverifiable")
         normalized = self._normalize_entities(extraction.entities)
-        events = events_from_extraction(
+        report = report_from_extraction(
             extraction.entities,
             source_text=text,
             document_name=document_name,
         )
+        log_progress(4, 4, "Merge unique dates + persist")
         with self._autofill_lock:
             extracted_data = self._extracted_by_case.setdefault(case_id, {})
             for key, value in normalized.items():
                 if value and not extracted_data.get(key):
                     extracted_data[key] = value
             existing = self._chronology_by_case.get(case_id)
-            tree = merge_into_tree(existing, events)
+            tree = merge_into_tree(existing, report.events)
             self._chronology_by_case[case_id] = tree
+            field_names = [k for k in extracted_data if extracted_data.get(k)]
         save_tree(case_id, tree, folder_name=case_id)
+        log_run_report(
+            stage="intake document",
+            case_id=case_id,
+            document_name=document_name,
+            chars=chars,
+            elapsed_s=time.perf_counter() - started,
+            fields_filled=len(field_names),
+            field_names=field_names,
+            kept_events=report.kept,
+            dropped_events=report.dropped,
+            drop_reasons=report.reasons,
+            tree=tree,
+        )
 
     @classmethod
     def _flatten_extract_value(cls, value: Any) -> Any:
