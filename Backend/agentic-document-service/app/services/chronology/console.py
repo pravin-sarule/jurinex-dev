@@ -9,10 +9,10 @@ from app.services.token_usage_log import _fmt_int, _fmt_usd, _model_cost_usd, ge
 
 logger = logging.getLogger("agentic_document_service.chronology")
 
-_H = "─"
-_V = "│"
-_TL, _TR, _BL, _BR = "┌", "┐", "└", "┘"
-_ML, _MR, _TM, _BM, _C = "├", "┤", "┬", "┴", "┼"
+_H = "-"
+_V = "|"
+_TL = _TR = _BL = _BR = "+"
+_ML = _MR = _TM = _BM = _C = "+"
 
 
 def _clip(text: Any, width: int) -> str:
@@ -91,18 +91,18 @@ def tree_diagram(tree: ChronologyTree, *, max_dates: int = 12) -> str:
     shown = 0
     for p_i, phase in enumerate(phases):
         last_phase = p_i == len(phases) - 1
-        phase_branch = "└─" if last_phase else "├─"
+        phase_branch = "`-" if last_phase else "|-"
         lines.append(f"  {phase_branch} {phase.label}")
         dates = phase.dates or []
         for d_i, node in enumerate(dates):
             if shown >= max_dates:
                 remaining = sum(len(p.dates) for p in phases[p_i:]) - d_i
-                pad = "   " if last_phase else "  │"
-                lines.append(f"{pad}  └─ … {remaining} more date(s)")
+                pad = "   " if last_phase else "  |"
+                lines.append(f"{pad}  `- ... {remaining} more date(s)")
                 return "\n".join(lines)
             last_date = d_i == len(dates) - 1
-            pad = "   " if last_phase else "  │"
-            date_branch = "└─" if last_date else "├─"
+            pad = "   " if last_phase else "  |"
+            date_branch = "`-" if last_date else "|-"
             title = node.events[0].title if node.events else node.summary
             lines.append(f"{pad}  {date_branch} {node.displayDate}  {title}")
             shown += 1

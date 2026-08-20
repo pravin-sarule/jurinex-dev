@@ -17,8 +17,8 @@ class ConsoleTableTests(unittest.TestCase):
         table = kv_table("TOKEN USAGE", [("model", "gemini-3.7-flash"), ("input_tokens", "12,345")])
         self.assertIn("gemini-3.7-flash", table)
         self.assertIn("input_tokens", table)
-        self.assertIn("┌", table)
-        self.assertIn("└", table)
+        self.assertIn("+", table)
+        self.assertIn("|", table)
 
     def test_grid_and_tree(self) -> None:
         grid = grid_table("UNIQUE DATES", ["date", "phase"], [["15 Jan 2019", "pre_litigation"]])
