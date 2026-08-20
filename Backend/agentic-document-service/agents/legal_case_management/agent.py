@@ -400,6 +400,30 @@ def extract_case_fields_from_case_folder(folder_name: str) -> dict[str, Any]:
         raise
 
 
+def get_case_chronology(folder_name: str) -> dict[str, Any]:
+    task = "folder_chronology"
+    _log_agent_start("form_population_agent", task, folder_name=folder_name)
+    try:
+        tree = FOLDER_SERVICE.get_chronology(folder_name, folder_name)
+        payload = {
+            "success": True,
+            "folderName": folder_name,
+            "case_id": folder_name,
+            "chronology": tree.as_dict(),
+            "message": "Chronology loaded." if tree.dates else "No grounded chronology events yet.",
+        }
+        _log_agent_success(
+            "form_population_agent",
+            task,
+            folder_name=folder_name,
+            date_count=len(tree.dates),
+        )
+        return payload
+    except Exception as exc:
+        _log_agent_error("form_population_agent", task, exc, folder_name=folder_name)
+        raise
+
+
 def create_case_folder(user_id: str, folder_name: str, parent_path: str = "") -> dict[str, Any]:
     task = "create_case_folder"
     _log_agent_start("document_processing_agent", task, user_id=user_id, folder_name=folder_name)
@@ -686,6 +710,7 @@ if SequentialAgent and LlmAgent:
         enqueue_case_documents,
         get_case_processing_status,
         extract_case_fields_from_case_folder,
+        get_case_chronology,
         process_case_documents,
         answer_case_question,
         answer_case_folder_chat,

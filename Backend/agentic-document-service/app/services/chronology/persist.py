@@ -5,9 +5,6 @@ import json
 import logging
 from typing import Any
 
-from app.schemas.chronology import ChronologyTree
-from app.services.db import get_db_connection, is_db_available
-
 logger = logging.getLogger("agentic_document_service.chronology.persist")
 
 _SAVE_SQL = """

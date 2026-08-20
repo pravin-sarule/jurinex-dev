@@ -26,6 +26,7 @@ from agents.legal_case_management.agent import (
     delete_case_tool,
     enqueue_case_documents,
     extract_case_fields_from_case_folder,
+    get_case_chronology,
     get_case_detail,
     list_documents_in_case_folder,
     get_case_processing_status,
@@ -2857,6 +2858,14 @@ def get_folder_status(
 def extract_case_fields(folder_name: str) -> dict:
     try:
         return extract_case_fields_from_case_folder(folder_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{folder_name}/chronology")
+def get_folder_chronology(folder_name: str) -> dict:
+    try:
+        return get_case_chronology(folder_name)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
