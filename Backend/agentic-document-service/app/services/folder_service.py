@@ -1302,6 +1302,9 @@ class FolderWorkflowService:
         if is_db_available():
             db_case = self._get_case_from_db(case_id, user_id)
             if db_case:
+                db_case["chronology"] = self.get_chronology(
+                    case_id, folder_name=str(db_case.get("folder_name") or "")
+                ).as_dict()
                 return db_case
         stored_case = self._pipeline._cases.get(case_id)
         if not stored_case:
@@ -1318,6 +1321,7 @@ class FolderWorkflowService:
             "petitioners": [{"fullName": item} for item in extracted.get("petitioners", [])],
             "respondents": [{"fullName": item} for item in extracted.get("respondents", [])],
             "status": self._get_case_status(case_id),
+            "chronology": self.get_chronology(case_id).as_dict(),
             "documents": [
                 {
                     "document_id": document.document_id,
@@ -1658,13 +1662,14 @@ class FolderWorkflowService:
         if not stored_case:
             raise ValueError(f"Case '{case_id}' does not exist.")
         extracted = dict(self._extracted_by_case.get(case_id, {}))
+        tree = self.get_chronology(case_id, folder_name=folder_name)
 
-        # If extraction is thin (< 3 meaningful fields), re-run Gemini on combined document text
         meaningful_fields = {"caseTitle", "caseNumber", "caseType", "courtName", "jurisdiction",
                              "filingDate", "petitioners", "respondents"}
         has_rich_data = len([k for k in extracted if k in meaningful_fields and extracted[k]]) >= 2
+        needs_chronology = not tree.dates
 
-        if not has_rich_data and stored_case.documents:
+        if (not has_rich_data or needs_chronology) and stored_case.documents:
             combined_text = "\n\n---\n\n".join(
                 f"[Document: {doc.document_name}]\n{doc.text}"
                 for doc in stored_case.documents
@@ -1672,8 +1677,8 @@ class FolderWorkflowService:
             )
             if combined_text:
                 logger.info(
-                    "[FolderService] task=extract_case_fields re-running Gemini extraction case_id=%s text_chars=%s",
-                    case_id, len(combined_text),
+                    "[FolderService] task=extract_case_fields re-running Gemini extraction case_id=%s text_chars=%s chronology=%s",
+                    case_id, len(combined_text), needs_chronology,
                 )
                 gemini_data = _call_gemini_for_extraction(combined_text)
                 if gemini_data:
@@ -1682,7 +1687,16 @@ class FolderWorkflowService:
                         if value and not extracted.get(key):
                             extracted[key] = value
                     self._extracted_by_case[case_id] = extracted
+                    extra_events = events_from_extraction(
+                        gemini_data,
+                        source_text=combined_text,
+                        document_name="combined",
+                    )
+                    tree = merge_into_tree(tree, extra_events)
+                    self._store_chronology(case_id, tree, folder_name=folder_name)
 
+        extracted = dict(extracted)
+        extracted["chronology"] = tree.as_dict()
         return ExtractCaseFieldsResponse(
             success=True,
             folderName=folder_name,
@@ -1690,8 +1704,46 @@ class FolderWorkflowService:
             extractedData=extracted,
             requiresReview=not bool(extracted.get("caseNumber") or extracted.get("caseType")),
             sourceDocuments=[document.document_name for document in stored_case.documents],
-            message="Extracted case fields generated from processed folder documents.",
+            chronology=tree.as_dict(),
+            message="Extracted case fields and chronology generated from processed folder documents.",
         )
+
+    def get_chronology(self, case_key: str, folder_name: str | None = None) -> Any:
+        key = str(case_key or "").strip()
+        folder = str(folder_name or key).strip()
+        tree = self._chronology_by_case.get(key) or self._chronology_by_case.get(folder)
+        if tree is not None and getattr(tree, "dates", None):
+            return tree
+        loaded = load_or_empty(key, folder)
+        if loaded.dates:
+            self._chronology_by_case[key] = loaded
+            return loaded
+        return tree or empty_tree()
+
+    def _store_chronology(self, case_key: str, tree: Any, folder_name: str | None = None) -> None:
+        self._chronology_by_case[case_key] = tree
+        if folder_name and folder_name != case_key:
+            self._chronology_by_case[folder_name] = tree
+        save_tree(case_key, tree, folder_name=folder_name or case_key)
+
+    def _rebind_intake_chronology(
+        self,
+        *,
+        temp_folder_name: str,
+        case_id: str,
+        folder_name: str | None,
+    ) -> None:
+        temp = str(temp_folder_name or "").strip().strip("/")
+        if not temp or not case_id:
+            return
+        tree = self._chronology_by_case.get(temp) or load_or_empty(temp, temp)
+        if tree.dates:
+            self._chronology_by_case[case_id] = tree
+            if folder_name:
+                self._chronology_by_case[folder_name] = tree
+            save_tree(case_id, tree, folder_name=folder_name or case_id)
+        rebind_tree(temp, case_id, folder_name=folder_name or case_id)
+        self._chronology_by_case.pop(temp, None)
 
     def _resolve_file_ids_for_folder_case(self, folder_name: str, user_id: str | None) -> list[str]:
         """
@@ -2542,24 +2594,27 @@ class FolderWorkflowService:
     )
 
     def _merge_extracted_case_data(self, case_id: str, metadata: dict[str, Any], text: str) -> None:
-        # First-wins merge means later documents only fill gaps — once enough key
-        # fields are collected, skip the (slow, billed) LLM extraction entirely.
-        # This is the difference between 1-2 extraction calls per batch and one
-        # per document.
-        with self._autofill_lock:
-            extracted_data = self._extracted_by_case.setdefault(case_id, {})
-            rich_count = sum(1 for key in self._AUTOFILL_KEY_FIELDS if extracted_data.get(key))
-        if rich_count >= 4:
-            return
+        # Always run the form_population_agent call so chronology events are collected
+        # from every intake document. Form fields stay first-wins; events always merge.
+        document_name = str(metadata.get("original_name") or metadata.get("document_name") or "document")
         extraction = self._pipeline._document_ai.extract(
-            DocumentReference(document_name=metadata.get("original_name", "document"), inline_text=text)
+            DocumentReference(document_name=document_name, inline_text=text)
         )
         normalized = self._normalize_entities(extraction.entities)
+        events = events_from_extraction(
+            extraction.entities,
+            source_text=text,
+            document_name=document_name,
+        )
         with self._autofill_lock:
             extracted_data = self._extracted_by_case.setdefault(case_id, {})
             for key, value in normalized.items():
                 if value and not extracted_data.get(key):
                     extracted_data[key] = value
+            existing = self._chronology_by_case.get(case_id)
+            tree = merge_into_tree(existing, events)
+            self._chronology_by_case[case_id] = tree
+        save_tree(case_id, tree, folder_name=case_id)
 
     @classmethod
     def _flatten_extract_value(cls, value: Any) -> Any:
