@@ -11,6 +11,7 @@ import {
 import FolderContent from "../components/FolderContent/FolderContent";
 import DocumentPreviewModal from "../components/DocumentPreviewModal";
 import ChatInterface from "../components/ChatInterface/ChatInterface";
+import { ChronologyModal } from "../components/Chronology";
 
 const FolderDetailPage = () => {
   const { folderName } = useParams();
@@ -21,6 +22,7 @@ const FolderDetailPage = () => {
     loadFoldersAndFiles,
   } = useContext(FileManagerContext);
   const [selectedDocument, setSelectedDocument] = useState(null);
+  const [isChronologyOpen, setIsChronologyOpen] = useState(false);
   const [isStarred, setIsStarred] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -45,6 +47,14 @@ const FolderDetailPage = () => {
 
   const handleClosePreview = () => {
     setSelectedDocument(null);
+  };
+
+  const handleOpenChronology = () => {
+    setIsChronologyOpen(true);
+  };
+
+  const handleCloseChronology = () => {
+    setIsChronologyOpen(false);
   };
 
   const handleToggleStar = () => {
@@ -146,13 +156,23 @@ const FolderDetailPage = () => {
                 <DocumentPreviewModal document={selectedDocument} onClose={handleClosePreview} />
               ) : (
                 <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-                  <FolderContent onDocumentClick={handleDocumentClick} />
+                  <FolderContent
+                    onDocumentClick={handleDocumentClick}
+                    onChronologyClick={handleOpenChronology}
+                  />
                 </div>
               )}
             </div>
           </div>
         </div>
       </div>
+      {isChronologyOpen && (
+        <ChronologyModal
+          folderName={folderName || selectedFolder}
+          caseTitle={selectedFolder || folderName}
+          onClose={handleCloseChronology}
+        />
+      )}
     </div>
   );
 };
