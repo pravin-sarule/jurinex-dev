@@ -11,7 +11,7 @@ import {
 import FolderContent from "../components/FolderContent/FolderContent";
 import DocumentPreviewModal from "../components/DocumentPreviewModal";
 import ChatInterface from "../components/ChatInterface/ChatInterface";
-import { ChronologyModal } from "../components/Chronology";
+import { ChronologyButton, ChronologyModal } from "../components/Chronology";
 
 const FolderDetailPage = () => {
   const { folderName } = useParams();
@@ -151,15 +151,15 @@ const FolderDetailPage = () => {
                   </span>
                 </div>
                 <h3 className="text-xs font-semibold text-gray-600">Files</h3>
+                <div className="ml-auto">
+                  <ChronologyButton onClick={handleOpenChronology} />
+                </div>
               </div>
               {selectedDocument ? (
                 <DocumentPreviewModal document={selectedDocument} onClose={handleClosePreview} />
               ) : (
                 <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-                  <FolderContent
-                    onDocumentClick={handleDocumentClick}
-                    onChronologyClick={handleOpenChronology}
-                  />
+                  <FolderContent onDocumentClick={handleDocumentClick} />
                 </div>
               )}
             </div>
