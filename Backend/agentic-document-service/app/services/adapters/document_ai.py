@@ -1534,10 +1534,10 @@ def _generation_config(
                 "temperature": float(cfg.temperature),
                 "max_output_tokens": max_tokens,
             }
-            # Intake auto-fill must send thinking_level=minimal on Gemini 3.x. If we omit
-            # ThinkingConfig, Flash still thinks by default — that hung upload at 80%.
+            # Intake auto-fill: Gemini 3.7 Flash rejects thinking_level=minimal (400).
+            # "low" is the fastest level that model accepts.
             if agent_name == _AGENT_EXTRACTION:
-                llm_params["thinking_level"] = "minimal"
+                llm_params["thinking_level"] = "low"
                 llm_params["thinking_mode"] = False
             logger.info(
                 "[DocumentAI] generation_config  agent_prompts=%s  tokens=from_agent_prompts  "
