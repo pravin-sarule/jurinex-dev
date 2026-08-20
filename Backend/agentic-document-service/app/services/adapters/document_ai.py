@@ -1534,15 +1534,21 @@ def _generation_config(
                 "temperature": float(cfg.temperature),
                 "max_output_tokens": max_tokens,
             }
+            # Intake auto-fill must send thinking_level=minimal on Gemini 3.x. If we omit
+            # ThinkingConfig, Flash still thinks by default — that hung upload at 80%.
+            if agent_name == _AGENT_EXTRACTION:
+                llm_params["thinking_level"] = "minimal"
+                llm_params["thinking_mode"] = False
             logger.info(
                 "[DocumentAI] generation_config  agent_prompts=%s  tokens=from_agent_prompts  "
                 "agent=%s  model=%s  temperature=%.2f  max_output_tokens=%s  "
-                "url_context=%s  grounding_search=%s  code_execution=%s",
+                "thinking_level=%s  url_context=%s  grounding_search=%s  code_execution=%s",
                 _describe_agent_prompts_origin(cfg),
                 agent_name,
                 cfg.model_name,
                 gen_kwargs["temperature"],
                 max_tokens,
+                llm_params.get("thinking_level") or "—",
                 llm_params.get("url_context", False),
                 llm_params.get("grounding_google_search", False),
                 llm_params.get("code_execution", False),
@@ -1829,18 +1835,33 @@ def _build_gemini_config(
         if tools:
             config_kwargs["tools"] = tools
 
-        # ── Thinking (Gemini 2.5+ only; 2.0 etc. reject ThinkingConfig) ─────────
-        if llm_params.get("thinking_mode"):
-            if _gemini_model_supports_thinking_config(model_name):
+        # ── Thinking (Gemini 2.5 numeric budget; Gemini 3.x thinking_level) ──
+        # Gemini 3 Flash thinks by default unless thinking_level is sent. "minimal"
+        # is the only way to keep auto-fill fast. Gemini 2.5 still uses thinking_budget
+        # and only when the admin thinking_mode toggle is on.
+        if _gemini_model_supports_thinking_config(model_name) and not _is_gemma_model(model_name):
+            raw_name = (model_name or "").strip().lower().rsplit("/", 1)[-1]
+            level = str(llm_params.get("thinking_level") or "").strip().lower()
+            if "gemini-3" in raw_name and level in ("minimal", "low", "medium", "high"):
+                try:
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=level)
+                    active_flags.append(f"thinking_level={level}")
+                except Exception as _tl_exc:
+                    logger.info(
+                        "[DocumentAI] gemini thinking_level=%s not applied: %s",
+                        level,
+                        _tl_exc,
+                    )
+            elif llm_params.get("thinking_mode"):
                 budget = _resolve_thinking_budget(llm_params, "gemini")
                 config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
                 active_flags.append(f"thinking(budget={budget})")
-            else:
-                logger.info(
-                    "[DocumentAI] thinking_mode set in llm_parameters but model=%s "
-                    "does not support Gemini ThinkingConfig — omitting",
-                    model_name or "(unknown)",
-                )
+        elif llm_params.get("thinking_mode"):
+            logger.info(
+                "[DocumentAI] thinking_mode set in llm_parameters but model=%s "
+                "does not support Gemini ThinkingConfig — omitting",
+                model_name or "(unknown)",
+            )
 
         # ── Media resolution ─────────────────────────────────────────────────
         media_res = str(llm_params.get("media_resolution") or "default").lower()

@@ -6,7 +6,7 @@ Create Case upload fills the intake form from OCR text using **one LLM call** pe
 
 Super Admin → **Agent Prompt Management** → **Summarization Agents** → **`form_population_agent`**.
 
-That row’s model is what `_generate_text(..., agent_name="form_population_agent")` uses. In this workspace it is **`gemini-3.7-flash`**.
+That row’s model is what `_generate_text(..., agent_name="form_population_agent")` uses. In this workspace it is **`gemini-3.7-flash`** at temperature **0.3**. Auto-fill always sends **`thinking_level=minimal`** for this agent only, so Gemini 3.x does not hang upload at 80% with default thinking.
 
 Resolution order if the row is missing:
 
