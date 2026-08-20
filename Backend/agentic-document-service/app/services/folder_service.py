@@ -45,7 +45,6 @@ from app.services.adapters.speech_to_text import is_audio_filename, is_audio_mim
 from app.services.chronology import (
     delete_tree,
     empty_tree,
-    events_from_extraction,
     load_or_empty,
     merge_into_tree,
     rebind_tree,
