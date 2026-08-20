@@ -15,7 +15,7 @@ class ChronologyEvent(BaseModel):
 
 
 class ChronologyDateNode(BaseModel):
-    """One calendar date. The same ISO date never appears twice in a tree."""
+    """One calendar date. The same date key never appears twice in a tree."""
 
     date: str
     displayDate: str
