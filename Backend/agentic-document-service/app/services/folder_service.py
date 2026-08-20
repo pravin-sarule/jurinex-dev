@@ -1071,6 +1071,11 @@ class FolderWorkflowService:
             folder_result = self.create_folder(user_id, case_title or "Untitled Case")
             case_id = str(uuid.uuid4())
             self._ensure_case(user_id, case_id)
+            self._rebind_intake_chronology(
+                temp_folder_name=str(case_data.get("temp_folder_name") or ""),
+                case_id=case_id,
+                folder_name=case_title,
+            )
             return {
                 "message": "Case created successfully with folder",
                 "case": {"id": case_id, "case_title": case_title, "user_id": user_id},
@@ -1116,6 +1121,12 @@ class FolderWorkflowService:
                 target_gcs_prefix=gcs_path,
             )
             conn.commit()
+
+        self._rebind_intake_chronology(
+            temp_folder_name=str(case_data.get("temp_folder_name") or ""),
+            case_id=case_id,
+            folder_name=safe_case_name,
+        )
 
         folder_dict = {
             "id": folder_id,
@@ -1478,8 +1489,11 @@ class FolderWorkflowService:
             self._pipeline._cases.pop(resolved_folder_name, None)
             self._extracted_by_case.pop(case_id, None)
             self._extracted_by_case.pop(resolved_folder_name, None)
+            self._chronology_by_case.pop(case_id, None)
+            self._chronology_by_case.pop(resolved_folder_name, None)
             self._sessions.pop(case_id, None)
             self._sessions.pop(resolved_folder_name, None)
+        delete_tree(case_id, resolved_folder_name)
 
         return {
             "success": True,
