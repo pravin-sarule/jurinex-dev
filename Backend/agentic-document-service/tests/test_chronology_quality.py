@@ -178,5 +178,117 @@ Policy period 8.12.2009 to 7.12.2010 hypothecated goods confirmed.
         self.assertTrue(refreshed.dates[0].events[0].sourcePage)
 
 
+class LandUnitAndPendingTests(unittest.TestCase):
+    SOURCE = (
+        "The Development Plan of 2001 was sanctioned by order dated 18.04.2001 "
+        "under section 31 of the MRTP Act. Joint measurement dated 26.12.2018 "
+        "recorded 39 R + 30 R = 69 R affected by the 18 metre road. "
+        "W.P. No. 553/2024. We have perused the order dated 16.01.2024. "
+        "Modifications were published in the Official Gazette on 22.02.2024."
+    )
+
+    def test_rewrites_decimal_ares_when_source_has_whole_ares(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "date": "26/12/2018",
+                    "title": "Joint measurement of 0.69 R",
+                    "particulars": "The affected area was recorded as 0.69 R.",
+                    "eventType": "other",
+                    "phase": "pre_litigation",
+                    "sourceQuote": "recorded 39 R + 30 R = 69 R affected by the 18 metre road",
+                }
+            ]
+        }
+        events = extract_grounded_events(
+            payload, source_text=self.SOURCE, document_name="wp.pdf"
+        )
+        self.assertEqual(len(events), 1)
+        self.assertIn("69 R", events[0].title)
+        self.assertNotIn("0.69 R", events[0].title)
+        self.assertIn("69 R", events[0].particulars)
+        self.assertNotIn("0.69 R", events[0].particulars)
+        self.assertIn("69 R", events[0].source_quote)
+
+    def test_does_not_rewrite_quote_or_true_decimal_ares(self) -> None:
+        source = "Reservation of 0.69 R was recorded on 26.12.2018 in the joint measurement."
+        payload = {
+            "events": [
+                {
+                    "date": "26/12/2018",
+                    "title": "Reservation of 0.69 R",
+                    "particulars": "The affected area was recorded as 0.69 R.",
+                    "eventType": "other",
+                    "phase": "pre_litigation",
+                    "sourceQuote": "Reservation of 0.69 R was recorded on 26.12.2018",
+                }
+            ]
+        }
+        events = extract_grounded_events(payload, source_text=source, document_name="wp.pdf")
+        self.assertEqual(len(events), 1)
+        self.assertIn("0.69 R", events[0].particulars)
+
+    def test_pre_litigation_after_writ_order_becomes_pending(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "date": "26/12/2018",
+                    "title": "Joint measurement",
+                    "particulars": "The affected area was recorded as 69 R.",
+                    "eventType": "other",
+                    "phase": "pre_litigation",
+                    "sourceQuote": "Joint measurement dated 26.12.2018 recorded 39 R + 30 R = 69 R",
+                },
+                {
+                    "date": "22/02/2024",
+                    "title": "Modifications published in Official Gazette",
+                    "particulars": "The modifications were published inviting objections.",
+                    "eventType": "notice",
+                    "phase": "pre_litigation",
+                    "sourceQuote": "published in the Official Gazette on 22.02.2024",
+                },
+            ]
+        }
+        events = extract_grounded_events(
+            payload, source_text=self.SOURCE, document_name="wp.pdf"
+        )
+        by_date = {event.date_key: event for event in events}
+        self.assertEqual(by_date["2018-12-26"].phase, "pre_litigation")
+        self.assertEqual(by_date["2024-02-22"].phase, "pending")
+
+    def test_dp_sanction_order_dated_is_not_writ_start(self) -> None:
+        source = (
+            "The Development Plan of 2001 was sanctioned by order dated 18.04.2001 "
+            "under section 31. Joint measurement dated 26.12.2018 recorded 69 R."
+        )
+        payload = {
+            "events": [
+                {
+                    "date": "26/12/2018",
+                    "title": "Joint measurement",
+                    "particulars": "The affected area was recorded as 69 R.",
+                    "eventType": "other",
+                    "phase": "pre_litigation",
+                    "sourceQuote": "Joint measurement dated 26.12.2018 recorded 69 R",
+                }
+            ]
+        }
+        events = extract_grounded_events(payload, source_text=source, document_name="wp.pdf")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].phase, "pre_litigation")
+
+    def test_prompt_requires_split_gazette_and_listed_representations(self) -> None:
+        from app.services.chronology.prompt import CHRONOLOGY_EXTRACTION_BLOCK
+
+        text = CHRONOLOGY_EXTRACTION_BLOCK.lower()
+        self.assertIn("10.08.2022", text)
+        self.assertIn("corrigendum", text)
+        self.assertIn("02.02.2024", text)
+        self.assertIn("one event per date", text)
+        self.assertIn("we have perused the order dated", text)
+        self.assertIn('"pending"', CHRONOLOGY_EXTRACTION_BLOCK)
+        self.assertIn("0.69 r", text)
+
+
 if __name__ == "__main__":
     unittest.main()

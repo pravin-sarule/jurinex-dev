@@ -62,9 +62,9 @@ One tree per **case/folder** (not per file). Unique calendar dates, grouped by l
 
 ### Phases
 
-`pre_litigation` → `correspondence` → `institution` → `pleadings` → `interim` → `evidence` → `hearing` → `order` → `appeal` → `execution` → `other`
+`pre_litigation` → `correspondence` → `institution` → `pending` → `pleadings` → `interim` → `evidence` → `hearing` → `order` → `appeal` → `execution` → `other`
 
-A letter between parties is `communication` + **`correspondence`**, never `pleadings`.
+A letter between parties is `communication` + **`correspondence`**, never `pleadings`. After a writ/suit is already before the court, later administrative steps (Gazette, objections, s.31 notification) are **`pending`** (“Pending litigation”), not `pre_litigation`. Python remaps that when the OCR contains a High Court / writ `order dated …` (or a grounded court-proceeding event) earlier than the administrative date.
 
 ## Anti-hallucination (grounding)
 
@@ -86,9 +86,11 @@ Python runs **after** the model, on the full OCR (not only what was packed for t
 2. **Extract window.** Budget is **900,000 characters** (~220k tokens; Gemini 3.7 Flash is 1M). Typical 100-page writs fit in full. Larger files keep dated and procedural pages, plus the opening and closing pages — not a first-80k prefix cut.
 3. **OCR majority vote.** Same day+month with conflicting years: the year that appears at least twice and more often than the others wins. Example: `07.12.2012` vs three `07.12.2010` readings → **7 Dec 2010**, and the quote is swapped for a verbatim span that contains the majority date. Different days (`21.04.2011` vs `24.4.2011`) are not merged. Invalid dates never win.
 4. **Procedural history** is requested in the same JSON: verbs such as *filed, transferred, renumbered, preferred, disposed, remanded*, including year-only entries.
-5. **Legal instruments stay un-collapsed.** A resolution date is not the Gazette publication date; a plan “dated 07.03.2024” is not “published inviting objections” unless the document says so that day. Sanction of an earlier DP, corrigenda, connected High Court orders, and “stand over to” listings are separate events.
+5. **Legal instruments stay un-collapsed.** A resolution date is not the Gazette publication date. If a resolution and a corrigendum sit a few days apart, look for a Gazette publication **between** them (e.g. 08.08 / 10.08 / 25.08.2022). A plan “dated 07.03.2024” is not “published inviting objections” unless the document says so that day. Sanction of an earlier DP, connected High Court orders (“We have perused the order dated X”), and “stand over to” listings are separate events. A sentence that lists several representation dates is one event per date.
 6. **Institution dates:** prefer `Received on` / `Registered on` over an advocate verification block (`DATE: … / Advocate for …` is “writ verified”, not “filed”).
 7. **Party role:** petition averments are `petitioner`; GRs/Gazettes are `official` (not `admitted`); court orders are `court`; the instrument under challenge is `impugned`. Python remaps over-labels (gazette tagged “admitted”, s.31 notification tagged “court finding”).
+8. **Land units:** copy 69 R as written. If the model emits `0.69 R` while OCR has `69 R` (ares), Python rewrites title/particulars only — the quote stays verbatim.
+9. **Pending litigation:** after the first grounded High Court / writ order (or an OCR `order dated` next to W.P. / High Court), later `pre_litigation` day-events become `pending`. DP/s.31 “order dated” lines are not treated as the start of the writ.
 
 `extract-case-fields` re-runs the LLM when the form is thin, the tree is empty, **or** events are missing pin cites while stamped OCR is available. After merge it also **refreshes** the stored tree (vote + pin cites) against current OCR with no extra LLM.
 

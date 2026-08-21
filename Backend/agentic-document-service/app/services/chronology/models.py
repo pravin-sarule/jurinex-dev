@@ -84,6 +84,7 @@ def normalize_phase(raw: str | None, event_type: str = "other") -> str:
         "pending_litigation": "pending",
         "during_pending": "pending",
         "during_pending_litigation": "pending",
+        "during_litigation": "pending",
     }
     value = aliases.get(value, value)
     if value in PHASE_LABELS:
