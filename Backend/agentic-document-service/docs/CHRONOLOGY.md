@@ -62,7 +62,7 @@ One tree per **case/folder** (not per file). Unique calendar dates, grouped by l
 
 ### Phases
 
-`pre_litigation` → `correspondence` → `institution` → `pending` → `pleadings` → `interim` → `evidence` → `hearing` → `order` → `appeal` → `execution` → `other`
+`pre_litigation` → `correspondence` → `institution` → `pending` → `pleadings` → `interim` → `evidence` → `listing` → `hearing` → `order` → `appeal` → `execution` → `other`
 
 A letter between parties is `communication` + **`correspondence`**, never `pleadings`. After a writ/suit is already before the court, later administrative steps (Gazette, objections, s.31 notification) are **`pending`** (“Pending litigation”), not `pre_litigation`. Python remaps that when the OCR contains a High Court / writ `order dated …` (or a grounded court-proceeding event) earlier than the administrative date.
 
@@ -91,6 +91,26 @@ Python runs **after** the model, on the full OCR (not only what was packed for t
 7. **Party role:** petition averments are `petitioner`; GRs/Gazettes are `official` (not `admitted`); court orders are `court`; the instrument under challenge is `impugned`. Python remaps over-labels (gazette tagged “admitted”, s.31 notification tagged “court finding”).
 8. **Land units:** copy 69 R as written. If the model emits `0.69 R` while OCR has `69 R` (ares), Python rewrites title/particulars only — the quote stays verbatim.
 9. **Pending litigation:** after the first grounded High Court / writ order (or an OCR `order dated` next to W.P. / High Court), later `pre_litigation` day-events become `pending`. DP/s.31 “order dated” lines are not treated as the start of the writ.
+10. **Place names:** a locality in title/particulars that is absent from the OCR is replaced with the spelling the OCR actually uses (`Himayatnagar` → `Himayat Baug`).
+11. **Stand-over vs hearing:** “stood over / next date / listed on” is phase `listing` (“Listing / stand-over”), never a hearing that is proved to have happened. A verification / “solemnly affirm” block is never phase `institution`.
+
+## OCR sweep — recall that does not drift
+
+The model's recall varies run to run: an impugned notification or a Gazette publication can be extracted on one call and skipped on the next. Statutory events are written in fixed language, so **Python finds them itself** in `app/services/chronology/sweep.py` and adds any whose date is not already on the tree.
+
+| Rule | Matches | Event |
+|---|---|---|
+| `impugned_notification` | `impugned … notification`, `section 31(1)` | Government notification under s.31 (role `impugned`) |
+| `court_order` | `order dated` / `perused the order` near W.P. / High Court | Order of the High Court |
+| `dp_sanction` | `sanction` + development plan / s.31 | Development Plan sanctioned |
+| `gazette_publication` | `Gazette` + `publish` / `notified` | Published in the Official Gazette |
+| `corrigendum` | `corrigendum` | Corrigendum issued |
+| `representation` | `representation … dated` | Representation submitted (one event per date in a list) |
+| `resolution` | `Resolution No.` | Resolution passed |
+
+The date is attributed to the **anchored date nearest the matched keyword**, so “Resolution 2648 dated 08.08.2022 … published in the Gazette on 10.08.2022” yields two events, not two copies of one date. A list (`02.02.2024, 09.07.2024 and 29.08.2024`) yields one event per date.
+
+Swept events are **not** model guesses: the title comes from the rule, and the particulars and quote are copied verbatim from the OCR sentence. They pass the same grounding gate and get the same pin cites. Dates the model already covered are skipped, so nothing is duplicated. The sweep also runs inside `refresh_tree_against_source`, so **`extract-case-fields` can add missing statutory dates to a stored tree with no LLM call**. Cost is ~12 ms per 150k characters.
 
 `extract-case-fields` re-runs the LLM when the form is thin, the tree is empty, **or** events are missing pin cites while stamped OCR is available. After merge it also **refreshes** the stored tree (vote + pin cites) against current OCR with no extra LLM.
 
@@ -169,6 +189,7 @@ On each extract:
 | `app/services/chronology/pack.py` | 900k budget; dated/procedural pages if larger |
 | `app/services/chronology/pages.py` | `[PAGE n]` stamps and pin cites |
 | `app/services/chronology/corroborate.py` | Majority vote on OCR date variants |
+| `app/services/chronology/sweep.py` | Statutory dates the model missed, found in the OCR |
 | `app/services/chronology/extract.py` | Coerce LLM JSON → grounded events; land-unit rewrite; pending-phase retag; refresh stored tree |
 | `app/services/chronology/merge.py` | Unique dates, summaries, phase tree |
 | `app/services/chronology/console.py` | Progress bars and boxed reports |
