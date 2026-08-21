@@ -102,10 +102,53 @@ class ConsoleTableTests(unittest.TestCase):
             logs.extend(captured.output)
         body = "\n".join(logs)
         self.assertIn("AUTO-FILL + CHRONOLOGY", body)
+        self.assertIn("IN PLAIN LANGUAGE", body)
+        self.assertIn("TIMELINE", body)
         self.assertIn("temp-445afba97dad", body)
         for line in body.splitlines():
             if line.startswith("+") or line.startswith("|"):
                 self.assertLessEqual(len(line.split(":", 1)[-1].lstrip()), 80)
+
+    def test_report_explains_ocr_vote_and_pin_cites(self) -> None:
+        node = ChronologyDateNode(
+            date="2010-12-07",
+            displayDate="07 Dec 2010",
+            phase="pre_litigation",
+            events=[ChronologyEvent(title="Expiry of second policy", sourcePage="100")],
+        )
+        tree = ChronologyTree(
+            dates=[node],
+            phases=[ChronologyPhaseNode(id="pre_litigation", label="Pre-litigation", dates=[node])],
+            eventCount=1,
+        )
+        with self.assertLogs("agentic_document_service.chronology", level="INFO") as captured:
+            log_run_report(
+                stage="intake document",
+                case_id="temp-test",
+                document_name="writ.pdf",
+                chars=12000,
+                elapsed_s=4.2,
+                fields_filled=2,
+                field_names=["caseTitle", "caseNumber"],
+                kept_events=1,
+                dropped_events=1,
+                drop_reasons={"quote_not_in_document": 1},
+                tree=tree,
+                proposed_events=2,
+                corrections=[{"from": "07 Dec 2012", "to": "07 Dec 2010", "title": "Expiry of second policy"}],
+                pages_cited=1,
+                pages_missing=0,
+                ocr_pages=4,
+                pack={"explain": "Sent every page (4 · 12,000 chars). Fits under the 900,000 character cap."},
+                usage={"model": "gemini-3.7-flash", "provider": "gemini", "inputTokens": 100, "outputTokens": 50, "totalTokens": 150},
+            )
+        body = "\n".join(captured.output)
+        self.assertIn("IN PLAIN LANGUAGE", body)
+        self.assertIn("quote not found in the OCR", body)
+        self.assertIn("OCR MAJORITY VOTE", body)
+        self.assertIn("07 Dec 2012", body)
+        self.assertIn("p.", body)
+        self.assertIn("100", body)
 
 
 if __name__ == "__main__":

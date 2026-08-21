@@ -119,17 +119,21 @@ Missing table does not fail upload; persist is best-effort and logged as a warni
 
 ## Console logs
 
-On each intake extract the document-service console prints:
+On each intake extract the document-service console prints (component **`AutoFill`**):
 
-1. Progress bars — `1/4` OCR → `2/4` LLM → `3/4` ground dates → `4/4` merge
-2. A boxed **model / input tokens / output tokens / cost** table
-3. Unverifiable events dropped (quote or date not in OCR)
-4. Unique-date table and an ASCII phase tree (`phase → date → event`)
+1. Progress bars — read OCR → send to the model → keep grounded dates → OCR vote + pin cites → merge
+2. A one-line note when `[PAGE n]` stamps are present, and what was sent (all pages vs packed)
+3. **IN PLAIN LANGUAGE** — chars, pages sent, kept/dropped, OCR year corrections, pin cites, date span
+4. Token / cost table
+5. Why events were dropped (human reasons, not raw keys)
+6. OCR majority-vote table when a year was corrected
+7. Timeline with **page** pin cites, then the phase tree
 
-Look for component **`AutoFill`**. Example progress line:
+Example:
 
 ```
-[AutoFill] [########--------]  2/4   50%  LLM extract  agent=form_population_agent
+[AutoFill] [########--------]  2/5   40%  Send OCR to form_population_agent
+[AutoFill] Sent every page (102 · 519,072 chars). Fits under the 900,000 character cap.
 ```
 
 ## Tests

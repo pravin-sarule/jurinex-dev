@@ -185,7 +185,9 @@ def tree_diagram(tree: ChronologyTree, *, max_dates: int = 12, max_width: int | 
             pad = "   " if last_phase else "  |"
             date_branch = "`-" if last_date else "|-"
             title = node.events[0].title if node.events else node.summary
-            lines.append(_clip(f"{pad}  {date_branch} {node.displayDate}  {title}", width).rstrip())
+            page = node.events[0].sourcePage if node.events and node.events[0].sourcePage else ""
+            cite = f"  p.{page}" if page else ""
+            lines.append(_clip(f"{pad}  {date_branch} {node.displayDate}{cite}  {title}", width).rstrip())
             shown += 1
     return "\n".join(lines) if lines else "  (no grounded dates yet)"
 
