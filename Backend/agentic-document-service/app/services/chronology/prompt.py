@@ -9,7 +9,7 @@ ALSO EXTRACT A GROUNDED CHRONOLOGY in the same JSON object under the key "events
   "title": "short factual heading of what happened (not the document name)",
   "particulars": "1 to 5 sentences of what happened. Facts only, past tense. Name the forum and case number if written. Copy land measures and amounts exactly as written (69 R is not 0.69 R). If this is a party's allegation, say so.",
   "eventType": "one of: agreement, notice, reply, payment, breach, filing, transfer, hearing, order, judgment, affidavit, evidence, communication, other",
-  "phase": "one of: pre_litigation, correspondence, institution, pleadings, interim, evidence, hearing, order, appeal, execution, other",
+  "phase": "one of: pre_litigation, correspondence, institution, pending, pleadings, interim, evidence, hearing, order, appeal, execution, other",
   "forum": "court or authority as written (e.g. Co-op Court Latur, Bombay High Court Aurangabad Bench). Empty string if not written.",
   "caseNumber": "proceeding number as written (Dispute 88/2012, CCB 230/2014, W.P. 8895/2014, A.O. 18/2012). Empty string if not written.",
   "sourcePage": "leave empty — Python stamps pages from OCR. Do not guess a page number.",
@@ -27,16 +27,20 @@ CHRONOLOGY RULES — ZERO TOLERANCE:
 5. sourceQuote MUST be copied character-for-character from the document (OCR spacing may stay). Copy from the page body, never from a [PAGE n] marker. If you cannot quote the event, omit it.
 6. Do not use today's date, do not infer a missing day, do not complete a partial date.
 7. Ignore signature-block dates that are blank or only "Date: ____".
-8. particulars: 1–5 sentences, facts only. No headings, no bullets, no markdown. Copy 69 R, hectares, and survey numbers as written — do not convert units.
+8. particulars: 1–5 sentences, facts only. No headings, no bullets, no markdown. Copy 69 R, hectares, and survey numbers as written — NEVER write "0.69 R". 0.69 hectare = 69 R (ares), not 0.69 R.
 
 DO NOT COLLAPSE RELATED DATES — each of these is a SEPARATE event when both dates are written:
-9. A municipal/government RESOLUTION date is not the Gazette PUBLICATION date. If Resolution 2648 is 08.08.2022 and the Official Gazette publishes on 10.08.2022, emit both.
+9. A municipal/government RESOLUTION date is not the Gazette PUBLICATION date. If Resolution 2648 is 08.08.2022 and the Official Gazette publishes on 10.08.2022, emit BOTH. If you extract a resolution AND a corrigendum a few days later, look for a Gazette publication BETWEEN them and emit that too.
 10. A CORRIGENDUM date is its own event (e.g. corrigendum 25.08.2022 to a Draft DP publication).
 11. The DATE OF A PLAN / instrument ("modified Draft Development Plan dated 07.03.2024") is not the date it was PUBLISHED inviting objections. If modifications were published in the Gazette on 23.02.2024, that publication is a separate event. Never attach "published inviting objections" to the plan-dated day unless the document says publication happened that day.
-12. Sanction of an earlier Development Plan (e.g. DP-2001 sanctioned 18.04.2001 under s.31) is a material event even if it sits in a synopsis. Do not skip it because a later draft DP is the main story.
-13. An earlier High Court order in the same or connected writ (notices issued, no stay, compensation noted) is an event. A later order that "refers back to" 16.01.2024 does not replace that date.
+12. MUST extract the first/earlier sanctioned Development Plan (e.g. DP-2001 sanctioned 18.04.2001 under s.31, original 18-metre road, 39 R + 30 R = 69 R) even if it sits only in the synopsis. Do not skip it because a later draft DP is the main story.
+13. An earlier High Court order in the same or connected writ is an event. If a later order says "We have perused the order dated 16.01.2024", emit 16.01.2024 as its own court-order event (notices issued / no stay / compensation noted — only what the document states).
 14. A REPORT forwarded for sanction (e.g. 07.08.2024 recommendations pending before Government) is an event distinct from the letter that forwards it (08.08.2024).
-15. "Stand over to [date]" / next listing is an event (phase hearing). Less central than orders, but include it when written.
+15. "Stand over to [date]" / next listing is an event (phase hearing). Title it as a listing/stand-over date, not as a hearing that is proved to have taken place.
+15a. If one sentence lists several representation/letter dates ("02.02.2024, 09.07.2024 and 29.08.2024"), emit ONE event per date. Do not keep only the last date in the list.
+
+PHASE AFTER A WRIT IS PENDING:
+15b. Once a writ/suit is already before the court (e.g. W.P. No. 553/2024 by 16.01.2024), later administrative steps (Gazette, objections, reports, s.31 notification) are phase "pending", NOT "pre_litigation".
 
 PROCEDURAL HISTORY (do not skip these even when the day is missing):
 16. Scan narrative paragraphs, synopses, and recap orders — not only lines that sit next to a formatted date. Extract: filed, instituted, registered, received, transferred, renumbered, preferred, challenged, disposed, dismissed, remanded, allowed, rejected, restrained, sanctioned, published, gazette, corrigendum, forwarded, stand over, notices issued.

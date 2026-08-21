@@ -7,6 +7,7 @@ PHASE_ORDER: tuple[str, ...] = (
     "pre_litigation",
     "correspondence",
     "institution",
+    "pending",
     "pleadings",
     "interim",
     "evidence",
@@ -21,6 +22,7 @@ PHASE_LABELS: dict[str, str] = {
     "pre_litigation": "Pre-litigation",
     "correspondence": "Correspondence",
     "institution": "Institution",
+    "pending": "Pending litigation",
     "pleadings": "Pleadings",
     "interim": "Interim",
     "evidence": "Evidence",
@@ -79,6 +81,9 @@ def normalize_phase(raw: str | None, event_type: str = "other") -> str:
         "judgment": "order",
         "writ": "appeal",
         "appellate": "appeal",
+        "pending_litigation": "pending",
+        "during_pending": "pending",
+        "during_pending_litigation": "pending",
     }
     value = aliases.get(value, value)
     if value in PHASE_LABELS:
