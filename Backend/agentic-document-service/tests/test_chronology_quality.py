@@ -256,6 +256,33 @@ class LandUnitAndPendingTests(unittest.TestCase):
         self.assertEqual(by_date["2018-12-26"].phase, "pre_litigation")
         self.assertEqual(by_date["2024-02-22"].phase, "pending")
 
+    def test_refresh_rewrites_units_and_pending_phase(self) -> None:
+        from app.schemas.chronology import ChronologyDateNode, ChronologyEvent, ChronologyTree
+        from app.services.chronology.extract import refresh_tree_against_source
+
+        tree = ChronologyTree(
+            dates=[
+                ChronologyDateNode(
+                    date="2024-02-22",
+                    displayDate="22 Feb 2024",
+                    precision="day",
+                    phase="pre_litigation",
+                    events=[
+                        ChronologyEvent(
+                            title="Gazette publication",
+                            particulars="Modifications covering 0.69 R were published.",
+                            sourceQuote="published in the Official Gazette on 22.02.2024",
+                        )
+                    ],
+                )
+            ],
+            eventCount=1,
+        )
+        refreshed = refresh_tree_against_source(tree, self.SOURCE)
+        self.assertEqual(refreshed.dates[0].phase, "pending")
+        self.assertIn("69 R", refreshed.dates[0].events[0].particulars)
+        self.assertNotIn("0.69 R", refreshed.dates[0].events[0].particulars)
+
     def test_dp_sanction_order_dated_is_not_writ_start(self) -> None:
         source = (
             "The Development Plan of 2001 was sanctioned by order dated 18.04.2001 "
