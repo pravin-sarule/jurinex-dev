@@ -1785,6 +1785,7 @@ class FolderWorkflowService:
                     pages_cited=report.pages_cited,
                     pages_missing=report.pages_missing,
                     ocr_pages=report.ocr_pages,
+                    swept_events=report.swept,
                 )
 
         if not did_rebuild:
@@ -2776,6 +2777,7 @@ class FolderWorkflowService:
             pages_cited=report.pages_cited,
             pages_missing=report.pages_missing,
             ocr_pages=report.ocr_pages,
+            swept_events=report.swept,
         )
 
     @classmethod

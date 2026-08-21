@@ -251,6 +251,7 @@ def _plain_language(
     pages_cited: int,
     pages_missing: int,
     ocr_pages: int,
+    swept_events: int = 0,
 ) -> list[tuple[str, str]]:
     first = tree.dates[0].displayDate if tree.dates else "-"
     last = tree.dates[-1].displayDate if tree.dates else "-"
@@ -270,10 +271,17 @@ def _plain_language(
         cites = f"{pages_cited} events have p. N · {pages_missing} still uncited"
     else:
         cites = "no pin cites yet (OCR had no [PAGE n] stamps, or quotes did not match)"
+    model_kept = max(0, kept_events - swept_events)
     rows = [
         ("read", f"{chars:,} chars" + (f" · {ocr_pages} stamped pages" if ocr_pages else "")),
         ("sent", sent),
-        ("model", f"{proposed} event(s) proposed · kept {kept_events} · dropped {dropped_events}"),
+        ("model", f"{proposed} event(s) proposed · kept {model_kept} · dropped {dropped_events}"),
+        (
+            "ocr_sweep",
+            f"{swept_events} statutory date(s) the model missed, found in the OCR by Python"
+            if swept_events
+            else "nothing extra to add; the model covered every statutory date found",
+        ),
         ("ocr_vote", vote),
         ("pin_cites", cites),
         ("timeline", f"{len(tree.dates)} unique date(s) · {first} → {last}" if tree.dates else "no grounded dates yet"),
@@ -310,6 +318,7 @@ def log_run_report(
     pages_missing: int | None = None,
     ocr_pages: int = 0,
     pack: dict[str, Any] | None = None,
+    swept_events: int = 0,
 ) -> None:
     usage = usage or get_last_usage()
     model = str(usage.get("model") or "-")
@@ -346,6 +355,7 @@ def log_run_report(
             pages_cited=int(pages_cited),
             pages_missing=int(pages_missing),
             ocr_pages=ocr_pages or int((pack or {}).get("pages_total") or 0),
+            swept_events=int(swept_events),
         ),
         max_width=width,
     )
@@ -365,7 +375,7 @@ def log_run_report(
             ("tokens", _fmt_int(total_tokens)),
             ("est_usd", _fmt_usd(cost)),
             ("fields", f"{fields_filled}  {', '.join(field_names[:6]) or '-'}"),
-            ("events", f"kept {kept_events}  dropped {dropped_events}"),
+            ("events", f"kept {kept_events}  dropped {dropped_events}  swept {swept_events}"),
             ("dates", str(len(tree.dates))),
             ("phases", str(len(tree.phases))),
         ],

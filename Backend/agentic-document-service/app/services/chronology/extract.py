@@ -32,7 +32,8 @@ _OFFICIAL_MARK = re.compile(
 )
 _COURT_MARK = re.compile(
     r"\bhigh court\b|\bthis court\b|status quo|stand over|it is ordered|"
-    r"ordered that|writ petition no|notice of motion",
+    r"ordered that|writ petition no|notice of motion|perused the order|"
+    r"\bw\.?\s*p\.?\s*(?:no|\d)",
     re.I,
 )
 _IMPUGNED_MARK = re.compile(
@@ -62,7 +63,7 @@ _STANDOVER_MARK = re.compile(
     r"(?:re)?list(?:ed)?\s+on|adjourn",
     re.I,
 )
-_PROPER_NOUN = re.compile(r"\b[A-Z][a-z]{5,}(?:nagar|bagh|baug|pur|wadi|gaon|abad)\b")
+_PROPER_NOUN = re.compile(r"\b([A-Z][a-z]{4,}?)(nagar|bagh|baug|pur|wadi|gaon|abad)\b")
 
 
 def _blob(event: GroundedEvent) -> str:
@@ -86,16 +87,49 @@ def refine_characterization(event: GroundedEvent) -> GroundedEvent:
         event.source_role = "petitioner" if not _OFFICIAL_MARK.search(blob) else "official"
 
     title = event.title
-    if re.search(r"\bfiled\b", title, re.I) and _VERIFY_MARK.search(event.source_quote) and not _REGISTRY_MARK.search(
+    verified_only = _VERIFY_MARK.search(event.source_quote) and not _REGISTRY_MARK.search(
         event.source_quote
-    ):
-        cleaned = re.sub(r"(?i)\s*and\s+filed\b", "", title)
-        cleaned = re.sub(r"(?i)\bfiled\b", "verified", cleaned)
-        event.title = cleaned[:240] or "Writ petition verified"
+    )
+    if verified_only:
+        if re.search(r"\bfiled\b", title, re.I):
+            cleaned = re.sub(r"(?i)\s*and\s+filed\b", "", title)
+            cleaned = re.sub(r"(?i)\bfiled\b", "verified", cleaned)
+            event.title = cleaned[:240] or "Writ petition verified"
+        # A verification/affirmation block never proves the registry date.
         if event.phase == "institution":
             event.phase = "pleadings"
             event.event_type = "affidavit"
+
+    if _STANDOVER_MARK.search(_blob(event)) and event.phase in {"hearing", "listing", "order"}:
+        event.phase = "listing"
+        if not _STANDOVER_MARK.search(event.title):
+            event.title = f"Next listing / stand-over date: {event.title}"[:240]
     return event
+
+
+def correct_place_names(text: str, source_text: str) -> str:
+    """A locality written by the model must exist in the OCR; else use the OCR's form."""
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if re.search(rf"\b{re.escape(token)}\b", source_text or "", re.I):
+            return token
+        stem = match.group(1)
+        if len(stem) < 5:
+            return token
+        found = re.findall(
+            rf"\b{re.escape(stem)}[a-z]*(?:\s+[A-Z][a-z]+)?",
+            source_text or "",
+        )
+        if not found:
+            return token
+        counts: dict[str, int] = {}
+        for item in found:
+            counts[item] = counts.get(item, 0) + 1
+        best = sorted(counts.items(), key=lambda pair: (-pair[1], -len(pair[0])))[0][0]
+        return best
+
+    return _PROPER_NOUN.sub(_replace, str(text or ""))
 
 
 def correct_land_units(text: str, source_text: str) -> str:
@@ -181,11 +215,45 @@ def litigation_start_key(events: list[GroundedEvent], source_text: str) -> str |
     return min(keys, key=_date_parts)
 
 
+def append_swept_events(
+    events: list[GroundedEvent],
+    source_text: str,
+    *,
+    document_name: str,
+) -> int:
+    """Add statutory dates the model skipped. Same grounding gate as model events."""
+    known = {event.date_key for event in events}
+    added = 0
+    for event in sweep_events(
+        source_text,
+        document_name=document_name,
+        known_date_keys=known,
+    ):
+        parsed = parse_date(event.date_key)
+        if not parsed:
+            continue
+        if not quote_in_source(event.source_quote, source_text):
+            continue
+        if not date_in_source(parsed, source_text):
+            continue
+        located = pages_for_quote(event.source_quote, source_text, date_key=event.date_key)
+        if located:
+            event.source_page = located
+        refine_characterization(event)
+        events.append(event)
+        added += 1
+    return added
+
+
 def refine_event_list(events: list[GroundedEvent], source_text: str) -> list[GroundedEvent]:
     """Python-only fixes on the full grounded list: land units, then pending-phase retag."""
     for event in events:
-        event.title = correct_land_units(event.title, source_text)[:240]
-        event.particulars = correct_land_units(event.particulars, source_text)
+        event.title = correct_place_names(
+            correct_land_units(event.title, source_text), source_text
+        )[:240]
+        event.particulars = correct_place_names(
+            correct_land_units(event.particulars, source_text), source_text
+        )
     start = litigation_start_key(events, source_text)
     if not start:
         return events
@@ -291,6 +359,7 @@ class GroundingReport:
     pages_cited: int = 0
     pages_missing: int = 0
     ocr_pages: int = 0
+    swept: int = 0
 
 
 def extract_grounded_report(
@@ -370,6 +439,8 @@ def extract_grounded_report(
                     "quote_replaced": event.source_quote != before_quote,
                 }
             )
+    from_model = len(out)
+    swept = append_swept_events(out, source_text, document_name=document_name)
     refine_event_list(out, source_text)
     dropped = sum(reasons.values())
     cited = sum(1 for event in out if event.source_page)
@@ -378,11 +449,12 @@ def extract_grounded_report(
         kept=len(out),
         dropped=dropped,
         reasons=reasons,
-        proposed=len(out) + dropped,
+        proposed=from_model + dropped,
         corrections=corrections,
         pages_cited=cited,
         pages_missing=len(out) - cited,
         ocr_pages=len(split_into_pages(source_text)),
+        swept=swept,
     )
 
 
@@ -420,6 +492,11 @@ def refresh_tree_against_source(tree: Any, source_text: str) -> Any:
                 event.source_page = located
             refine_characterization(event)
             grounded.append(event)
+    append_swept_events(
+        grounded,
+        source_text,
+        document_name=(tree.sourceDocuments[0] if tree.sourceDocuments else "combined"),
+    )
     refine_event_list(grounded, source_text)
     return merge_events(None, grounded)
 
