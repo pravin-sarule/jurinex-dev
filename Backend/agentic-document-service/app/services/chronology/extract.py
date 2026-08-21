@@ -41,6 +41,22 @@ _IMPUGNED_MARK = re.compile(
 _VERIFY_MARK = re.compile(r"\bverif(?:y|ied|ication)\b|solemnly affirm", re.I)
 _REGISTRY_MARK = re.compile(r"received on|registered on|filed on|lodged on", re.I)
 _ADMIT_MARK = re.compile(r"\badmit(?:s|ted|ting)\b|written statement", re.I)
+_DECIMAL_ARE = re.compile(r"\b0\.(\d{2,})\s*[Rr]\b")
+_LITIGATION_MARK = re.compile(
+    r"\bwrit petition\b|\bw\.?\s*p\.?\s*(?:no\.?)?|\bhigh court\b|\bthis court\b|"
+    r"notices issued|notice of motion|status quo|"
+    r"filed (?:the )?(?:present )?(?:writ|petition)",
+    re.I,
+)
+_ORDER_DATED = re.compile(
+    r"order dated\s+(\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4})",
+    re.I,
+)
+_DP_INSTRUMENT = re.compile(
+    r"under section\s*31|sanctioning the|development plan|official gazette|"
+    r"corrigendum|government resolution",
+    re.I,
+)
 
 
 def _blob(event: GroundedEvent) -> str:
@@ -74,6 +90,102 @@ def refine_characterization(event: GroundedEvent) -> GroundedEvent:
             event.phase = "pleadings"
             event.event_type = "affidavit"
     return event
+
+
+def correct_land_units(text: str, source_text: str) -> str:
+    """Rewrite 0.69 R → 69 R when the OCR uses ares, not a 0.n R measure."""
+
+    def _replace(match: re.Match[str]) -> str:
+        digits = match.group(1)
+        try:
+            whole = int(digits)
+        except ValueError:
+            return match.group(0)
+        whole_pat = re.compile(rf"(?<![\d.]){whole}\s*[Rr]\b")
+        decimal_pat = re.compile(rf"\b0\.{digits}\s*[Rr]\b")
+        whole_n = len(whole_pat.findall(source_text or ""))
+        decimal_n = len(decimal_pat.findall(source_text or ""))
+        if whole_n and whole_n >= decimal_n:
+            return f"{whole} R"
+        return match.group(0)
+
+    return _DECIMAL_ARE.sub(_replace, str(text or ""))
+
+
+def _date_parts(date_key: str) -> tuple[int, int, int]:
+    parts = [int(p) for p in str(date_key or "").split("-") if p.isdigit()]
+    while len(parts) < 3:
+        parts.append(0)
+    return (parts[0], parts[1], parts[2])
+
+
+def _looks_like_court_proceeding(event: GroundedEvent) -> bool:
+    if event.precision != "day":
+        return False
+    blob = f"{event.title} {event.particulars} {event.source_quote} {event.forum} {event.case_number}"
+    if not _LITIGATION_MARK.search(blob):
+        return False
+    if _OFFICIAL_MARK.search(event.title) and not _LITIGATION_MARK.search(
+        f"{event.title} {event.forum} {event.case_number}"
+    ):
+        return False
+    return event.phase in {
+        "institution",
+        "pending",
+        "pleadings",
+        "interim",
+        "hearing",
+        "order",
+        "appeal",
+    } or event.event_type in {"filing", "order", "hearing", "judgment", "affidavit"}
+
+
+def _litigation_start_from_source(source_text: str) -> str | None:
+    """Earliest High Court / writ *order dated* in the OCR — not a DP/s.31 sanction."""
+    keys: list[str] = []
+    text = source_text or ""
+    for match in _ORDER_DATED.finditer(text):
+        after = text[match.end() : match.end() + 90]
+        if _DP_INSTRUMENT.search(after):
+            continue
+        window = text[max(0, match.start() - 140) : min(len(text), match.end() + 90)]
+        if not _LITIGATION_MARK.search(window):
+            continue
+        parsed = parse_date(match.group(1))
+        if parsed and parsed.precision == "day":
+            keys.append(parsed.key)
+    if not keys:
+        return None
+    return min(keys, key=_date_parts)
+
+
+def litigation_start_key(events: list[GroundedEvent], source_text: str) -> str | None:
+    keys = [event.date_key for event in events if _looks_like_court_proceeding(event)]
+    from_source = _litigation_start_from_source(source_text)
+    if from_source:
+        keys.append(from_source)
+    if not keys:
+        return None
+    return min(keys, key=_date_parts)
+
+
+def refine_event_list(events: list[GroundedEvent], source_text: str) -> list[GroundedEvent]:
+    """Python-only fixes on the full grounded list: land units, then pending-phase retag."""
+    for event in events:
+        event.title = correct_land_units(event.title, source_text)[:240]
+        event.particulars = correct_land_units(event.particulars, source_text)
+    start = litigation_start_key(events, source_text)
+    if not start:
+        return events
+    start_parts = _date_parts(start)
+    for event in events:
+        if event.phase != "pre_litigation":
+            continue
+        if event.precision != "day":
+            continue
+        if _date_parts(event.date_key) > start_parts:
+            event.phase = "pending"
+    return events
 
 
 def _as_str(value: Any) -> str:
