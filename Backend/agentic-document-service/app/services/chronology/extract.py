@@ -53,8 +53,7 @@ _ORDER_DATED = re.compile(
     re.I,
 )
 _DP_INSTRUMENT = re.compile(
-    r"under section\s*31|sanctioning the|development plan|official gazette|"
-    r"corrigendum|government resolution",
+    r"under section\s*31|sanctioning the|development plan",
     re.I,
 )
 
@@ -145,7 +144,9 @@ def _litigation_start_from_source(source_text: str) -> str | None:
     keys: list[str] = []
     text = source_text or ""
     for match in _ORDER_DATED.finditer(text):
-        after = text[match.end() : match.end() + 90]
+        remainder = text[match.end() :]
+        stop = re.search(r"[.!?]", remainder)
+        after = remainder[: stop.start()] if stop else remainder[:90]
         if _DP_INSTRUMENT.search(after):
             continue
         window = text[max(0, match.start() - 140) : min(len(text), match.end() + 90)]
