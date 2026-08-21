@@ -145,6 +145,8 @@ def extract_grounded_report(
         disputed = _as_bool(item.get("disputed"))
         event_type = normalize_event_type(item.get("eventType") or item.get("event_type"))
         phase = normalize_phase(item.get("phase"), event_type)
+        if event_type == "communication" and phase == "pleadings":
+            phase = "correspondence"
         out.append(
             GroundedEvent(
                 date_key=parsed.key,
