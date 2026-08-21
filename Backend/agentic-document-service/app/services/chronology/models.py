@@ -68,7 +68,7 @@ EVENT_TYPE_TO_PHASE: dict[str, str] = {
 }
 
 SOURCE_ROLES: frozenset[str] = frozenset(
-    {"petitioner", "respondent", "court", "admitted", "disputed"}
+    {"petitioner", "respondent", "court", "official", "impugned", "admitted", "disputed"}
 )
 
 
@@ -100,11 +100,20 @@ def normalize_source_role(raw: str | None, *, disputed: bool = False) -> str:
         "applicant": "petitioner",
         "plaintiff": "petitioner",
         "disputant": "petitioner",
+        "petitioners_case": "petitioner",
         "defendant": "respondent",
         "opponent": "respondent",
         "finding": "court",
         "judge": "court",
         "bench": "court",
+        "court_order": "court",
+        "court_recorded": "court",
+        "gazette": "official",
+        "government": "official",
+        "official_record": "official",
+        "notification": "official",
+        "impugned_notification": "impugned",
+        "challenged": "impugned",
     }
     value = aliases.get(value, value)
     if value in SOURCE_ROLES:

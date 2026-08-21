@@ -23,6 +23,57 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _MAX_SUMMARY_SENTENCES = 5
 _BLANK_DATES = frozenset({"", "undated", "unknown", "n/a", "na", "none", "null"})
 _PAGE_MARK = re.compile(r"^(?:p(?:age)?\.?\s*)?(\d{1,4})$", re.I)
+_OFFICIAL_MARK = re.compile(
+    r"gazette|government resolution|\bg\.?r\.?\b|official gazette|notification|"
+    r"section\s*31|section\s*28|development plan|corrigendum|town planning|"
+    r"assistant director|municipal|joint measurement|resolution no",
+    re.I,
+)
+_COURT_MARK = re.compile(
+    r"\bhigh court\b|\bthis court\b|status quo|stand over|it is ordered|"
+    r"ordered that|writ petition no|notice of motion",
+    re.I,
+)
+_IMPUGNED_MARK = re.compile(
+    r"\bimpugned\b|under challenge|challenged by|section\s*31\s*\(\s*1\s*\)",
+    re.I,
+)
+_VERIFY_MARK = re.compile(r"\bverif(?:y|ied|ication)\b|solemnly affirm", re.I)
+_REGISTRY_MARK = re.compile(r"received on|registered on|filed on|lodged on", re.I)
+_ADMIT_MARK = re.compile(r"\badmit(?:s|ted|ting)\b|written statement", re.I)
+
+
+def _blob(event: GroundedEvent) -> str:
+    return f"{event.title} {event.particulars} {event.source_quote}"
+
+
+def refine_characterization(event: GroundedEvent) -> GroundedEvent:
+    """Stop treating gazette/GRs as admissions and verification as filing."""
+    blob = _blob(event)
+    role = event.source_role
+    if _IMPUGNED_MARK.search(blob) and not _COURT_MARK.search(event.title):
+        if role in {"court", "admitted", "disputed", ""}:
+            event.source_role = "impugned"
+            event.disputed = False
+            role = "impugned"
+    if role in {"admitted", "court"} and _OFFICIAL_MARK.search(blob) and not _COURT_MARK.search(blob):
+        if not _ADMIT_MARK.search(blob):
+            event.source_role = "official"
+            role = "official"
+    if role == "admitted" and not _ADMIT_MARK.search(blob):
+        event.source_role = "petitioner" if not _OFFICIAL_MARK.search(blob) else "official"
+
+    title = event.title
+    if re.search(r"\bfiled\b", title, re.I) and _VERIFY_MARK.search(event.source_quote) and not _REGISTRY_MARK.search(
+        event.source_quote
+    ):
+        cleaned = re.sub(r"(?i)\s*and\s+filed\b", "", title)
+        cleaned = re.sub(r"(?i)\bfiled\b", "verified", cleaned)
+        event.title = cleaned[:240] or "Writ petition verified"
+        if event.phase == "institution":
+            event.phase = "pleadings"
+            event.event_type = "affidavit"
+    return event
 
 
 def _as_str(value: Any) -> str:
@@ -176,6 +227,7 @@ def extract_grounded_report(
                 disputed=disputed,
             )
         )
+        refine_characterization(out[-1])
     hits = index_numeric_dates(source_text)
     corrections: list[dict[str, Any]] = []
     for event in out:
@@ -241,6 +293,7 @@ def refresh_tree_against_source(tree: Any, source_text: str) -> Any:
             located = pages_for_quote(event.source_quote, source_text, date_key=event.date_key)
             if located:
                 event.source_page = located
+            refine_characterization(event)
             grounded.append(event)
     return merge_events(None, grounded)
 

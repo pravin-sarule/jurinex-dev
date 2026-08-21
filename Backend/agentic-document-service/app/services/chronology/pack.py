@@ -17,7 +17,8 @@ _DATE_HIT = re.compile(
 _PROC_HIT = re.compile(
     r"\b(?:filed|instituted|transferred|renumbered|preferred|challenged|disposed|"
     r"dismissed|remanded|registered|received\s+on|restrained|allowed|rejected|"
-    r"writ\s+petition|appeal\s+no)\b",
+    r"writ\s+petition|appeal\s+no|gazette|corrigendum|sanctioned|"
+    r"published|stand\s+over|notices?\s+issued|forwarded)\b",
     re.I,
 )
 _GAP = "\n\n[PAGES OMITTED]\n\n"
