@@ -9,7 +9,7 @@ ALSO EXTRACT A GROUNDED CHRONOLOGY in the same JSON object under the key "events
   "title": "short factual heading of what happened (not the document name)",
   "particulars": "1 to 5 sentences of what happened. Facts only, past tense. Name the forum and case number if written. Copy land measures and amounts exactly as written (69 R is not 0.69 R). If this is a party's allegation, say so.",
   "eventType": "one of: agreement, notice, reply, payment, breach, filing, transfer, hearing, order, judgment, affidavit, evidence, communication, other",
-  "phase": "one of: pre_litigation, correspondence, institution, pending, pleadings, interim, evidence, hearing, order, appeal, execution, other",
+  "phase": "one of: pre_litigation, correspondence, institution, pending, pleadings, interim, evidence, listing, hearing, order, appeal, execution, other",
   "forum": "court or authority as written (e.g. Co-op Court Latur, Bombay High Court Aurangabad Bench). Empty string if not written.",
   "caseNumber": "proceeding number as written (Dispute 88/2012, CCB 230/2014, W.P. 8895/2014, A.O. 18/2012). Empty string if not written.",
   "sourcePage": "leave empty — Python stamps pages from OCR. Do not guess a page number.",
@@ -36,11 +36,18 @@ DO NOT COLLAPSE RELATED DATES — each of these is a SEPARATE event when both da
 12. MUST extract the first/earlier sanctioned Development Plan (e.g. DP-2001 sanctioned 18.04.2001 under s.31, original 18-metre road, 39 R + 30 R = 69 R) even if it sits only in the synopsis. Do not skip it because a later draft DP is the main story.
 13. An earlier High Court order in the same or connected writ is an event. If a later order says "We have perused the order dated 16.01.2024", emit 16.01.2024 as its own court-order event (notices issued / no stay / compensation noted — only what the document states).
 14. A REPORT forwarded for sanction (e.g. 07.08.2024 recommendations pending before Government) is an event distinct from the letter that forwards it (08.08.2024).
-15. "Stand over to [date]" / next listing is an event (phase hearing). Title it as a listing/stand-over date, not as a hearing that is proved to have taken place.
+15. "Stand over to [date]" / next listing is an event with phase "listing". Title it as a listing/stand-over date, not as a hearing that is proved to have taken place.
 15a. If one sentence lists several representation/letter dates ("02.02.2024, 09.07.2024 and 29.08.2024"), emit ONE event per date. Do not keep only the last date in the list.
+
+15c. NEVER skip the IMPUGNED instrument. The notification/order/resolution that the petition challenges (e.g. the Section 31(1) notification dated 15.04.2025) is the single most important event in the chronology. Extract it first, mark sourceRole "impugned".
+15d. Publication of MODIFICATIONS in the Gazette (e.g. 23.02.2024) is separate from the resolution deciding those modifications (22.02.2024) and from the date of the modified plan (07.03.2024). All three are events when all three dates are written.
 
 PHASE AFTER A WRIT IS PENDING:
 15b. Once a writ/suit is already before the court (e.g. W.P. No. 553/2024 by 16.01.2024), later administrative steps (Gazette, objections, reports, s.31 notification) are phase "pending", NOT "pre_litigation".
+
+DO NOT OVERSTATE WHAT THE DOCUMENT SAYS:
+15e. Only say a thing was "approved", "sanctioned", "cancelled", "rejected", "allowed" or "dismissed" if that word (or its plain equivalent) is in the span you quote. If the document says only that a party relied on or produced a layout/annexure, write that — do not upgrade it into an approval or a cancellation.
+15f. Copy place names, plot numbers and survey numbers exactly as the document spells them (Himayat Baug is not Himayatnagar).
 
 PROCEDURAL HISTORY (do not skip these even when the day is missing):
 16. Scan narrative paragraphs, synopses, and recap orders — not only lines that sit next to a formatted date. Extract: filed, instituted, registered, received, transferred, renumbered, preferred, challenged, disposed, dismissed, remanded, allowed, rejected, restrained, sanctioned, published, gazette, corrigendum, forwarded, stand over, notices issued.
