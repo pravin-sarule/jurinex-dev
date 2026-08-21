@@ -317,5 +317,192 @@ class LandUnitAndPendingTests(unittest.TestCase):
         self.assertIn("0.69 r", text)
 
 
+class OcrSweepTests(unittest.TestCase):
+    """The model's recall drifts between runs; these dates must land every time."""
+
+    SOURCE = """
+[PAGE 3]
+SYNOPSIS: The Development Plan of 2001 was sanctioned under Section 31 of the MRTP
+Act on 18.04.2001, showing an 18 metre road through Survey Nos. 1 and 3 admeasuring
+39 R + 30 R = 69 R at Himayat Baug.
+
+[PAGE 21]
+By Resolution No. 2648 dated 08.08.2022 the Corporation decided to publish the Draft
+Development Plan. The Draft Development Plan was published in the Official Gazette on
+10.08.2022 under Section 26(1) of the said Act. A corrigendum dated 25.08.2022 was
+thereafter issued.
+
+[PAGE 34]
+The modifications were published in the Official Gazette on 23.02.2024 inviting
+objections from the public.
+
+[PAGE 47]
+The petitioners submitted representations dated 02.02.2024, 09.07.2024 and 29.08.2024
+to Respondent No. 4 in respect of the road alignment.
+
+[PAGE 58]
+We have perused the order dated 16.01.2024 passed in W.P. No. 553/2024 by which
+notices were issued to the respondents.
+
+[PAGE 71]
+The State Government issued the impugned notification dated 15.04.2025 under Section
+31(1) of the MRTP Act granting part sanction to the Development Plan.
+"""
+
+    def _swept(self, known: set[str] | None = None):
+        from app.services.chronology.sweep import sweep_events
+
+        return sweep_events(
+            self.SOURCE,
+            document_name="wp.pdf",
+            known_date_keys=known or set(),
+        )
+
+    def test_finds_every_statutory_date_the_model_missed(self) -> None:
+        keys = {event.date_key for event in self._swept()}
+        for expected in (
+            "2001-04-18",
+            "2022-08-10",
+            "2024-01-16",
+            "2024-02-02",
+            "2024-02-23",
+            "2024-07-09",
+            "2025-04-15",
+        ):
+            self.assertIn(expected, keys, f"{expected} was not swept from the OCR")
+
+    def test_swept_events_are_quoted_and_pin_cited(self) -> None:
+        from app.services.chronology.grounding import date_in_source, quote_in_source
+        from app.services.chronology.dates import parse_date
+
+        for event in self._swept():
+            parsed = parse_date(event.date_key)
+            assert parsed is not None
+            self.assertTrue(quote_in_source(event.source_quote, self.SOURCE), event.title)
+            self.assertTrue(date_in_source(parsed, self.SOURCE), event.title)
+            self.assertNotIn("[PAGE", event.source_quote)
+
+    def test_impugned_notification_keeps_its_role(self) -> None:
+        by_date = {event.date_key: event for event in self._swept()}
+        notification = by_date["2025-04-15"]
+        self.assertEqual(notification.source_role, "impugned")
+        self.assertIn("31", notification.title)
+
+    def test_dates_already_extracted_are_not_duplicated(self) -> None:
+        keys = {event.date_key for event in self._swept(known={"2025-04-15", "2024-01-16"})}
+        self.assertNotIn("2025-04-15", keys)
+        self.assertNotIn("2024-01-16", keys)
+
+    def test_extract_adds_missing_dates_alongside_model_events(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "date": "08/08/2022",
+                    "title": "Resolution No. 2648 to publish Draft DP",
+                    "particulars": "The Corporation resolved to publish the Draft Development Plan.",
+                    "eventType": "other",
+                    "phase": "pre_litigation",
+                    "sourceQuote": "Resolution No. 2648 dated 08.08.2022 the Corporation decided to publish",
+                }
+            ]
+        }
+        events = extract_grounded_events(
+            payload, source_text=self.SOURCE, document_name="wp.pdf"
+        )
+        keys = {event.date_key for event in events}
+        self.assertIn("2022-08-08", keys)
+        self.assertIn("2025-04-15", keys)
+        self.assertIn("2001-04-18", keys)
+        self.assertIn("2024-01-16", keys)
+
+    def test_refresh_adds_missing_dates_without_an_llm_call(self) -> None:
+        from app.schemas.chronology import ChronologyDateNode, ChronologyEvent, ChronologyTree
+        from app.services.chronology.extract import refresh_tree_against_source
+
+        tree = ChronologyTree(
+            dates=[
+                ChronologyDateNode(
+                    date="2022-08-08",
+                    displayDate="08 Aug 2022",
+                    precision="day",
+                    phase="pre_litigation",
+                    events=[
+                        ChronologyEvent(
+                            title="Resolution No. 2648 to publish Draft DP",
+                            particulars="The Corporation resolved to publish the Draft DP.",
+                            sourceQuote="Resolution No. 2648 dated 08.08.2022 the Corporation decided to publish",
+                        )
+                    ],
+                )
+            ],
+            sourceDocuments=["wp.pdf"],
+            eventCount=1,
+        )
+        refreshed = refresh_tree_against_source(tree, self.SOURCE)
+        keys = {node.date for node in refreshed.dates}
+        self.assertIn("2025-04-15", keys)
+        self.assertIn("2022-08-10", keys)
+
+
+class WordingCorrectionTests(unittest.TestCase):
+    SOURCE = (
+        "The land admeasuring 69 R at Himayat Baug was affected. "
+        "The matter is stood over to 11.11.2024 for further consideration. "
+        "I solemnly affirm and verify that the contents of this petition are true. "
+        "DATE: 26.05.2025."
+    )
+
+    def test_place_name_absent_from_ocr_is_replaced_with_the_ocr_form(self) -> None:
+        from app.services.chronology.extract import correct_place_names
+
+        fixed = correct_place_names("69 R land at Himayatnagar", self.SOURCE)
+        self.assertIn("Himayat Baug", fixed)
+        self.assertNotIn("Himayatnagar", fixed)
+
+    def test_place_name_present_in_ocr_is_left_alone(self) -> None:
+        from app.services.chronology.extract import correct_place_names
+
+        source = "The property at Ahmednagar was surveyed."
+        self.assertEqual(
+            correct_place_names("Property at Ahmednagar", source),
+            "Property at Ahmednagar",
+        )
+
+    def test_stand_over_is_not_reported_as_a_hearing(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "date": "11/11/2024",
+                    "title": "Hearing before the High Court",
+                    "particulars": "The matter was taken up.",
+                    "eventType": "hearing",
+                    "phase": "hearing",
+                    "sourceQuote": "The matter is stood over to 11.11.2024 for further consideration",
+                }
+            ]
+        }
+        events = extract_grounded_events(payload, source_text=self.SOURCE, document_name="wp.pdf")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].phase, "listing")
+        self.assertIn("stand-over", events[0].title.lower())
+
+    def test_verification_is_not_institution_even_without_filed_in_title(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "date": "26/05/2025",
+                    "title": "Writ petition verified",
+                    "particulars": "The petition was verified by the petitioner.",
+                    "eventType": "filing",
+                    "phase": "institution",
+                    "sourceQuote": "solemnly affirm and verify that the contents of this petition are true. DATE: 26.05.2025",
+                }
+            ]
+        }
+        events = extract_grounded_events(payload, source_text=self.SOURCE, document_name="wp.pdf")
+        self.assertEqual(len(events), 1)
+        self.assertNotEqual(events[0].phase, "institution")
+
+
 if __name__ == "__main__":
     unittest.main()
