@@ -15,7 +15,7 @@ SOURCE = (
 )
 
 
-def _event(**kwargs: str) -> GroundedEvent:
+def _event(**kwargs: object) -> GroundedEvent:
     defaults = {
         "date_key": "2019-01-15",
         "display_date": "15 Jan 2019",
