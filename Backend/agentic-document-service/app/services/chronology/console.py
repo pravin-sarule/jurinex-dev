@@ -198,6 +198,102 @@ def log_progress(step: int, total: int, label: str, **detail: Any) -> None:
     logger.info("[AutoFill] %s", message)
 
 
+def log_note(message: str) -> None:
+    logger.info("[AutoFill] %s", message)
+
+
+_DROP_REASON = {
+    "missing_date_or_title": "no date or title",
+    "quote_not_in_document": "quote not found in the OCR",
+    "date_not_in_document": "date not written in the OCR",
+}
+
+
+def _phase_label(phase: str) -> str:
+    try:
+        from .models import PHASE_LABELS
+
+        return PHASE_LABELS.get(str(phase or ""), str(phase or "").replace("_", " ") or "-")
+    except Exception:
+        return str(phase or "").replace("_", " ") or "-"
+
+
+def _event_label(event: Any) -> str:
+    title = str(getattr(event, "title", "") or "event")
+    flags = []
+    if getattr(event, "disputed", False) or getattr(event, "sourceRole", "") == "disputed":
+        flags.append("disputed")
+    role = str(getattr(event, "sourceRole", "") or "")
+    if role and role not in {"disputed", ""}:
+        flags.append(role)
+    if flags:
+        return f"{title} ({', '.join(flags)})"
+    return title
+
+
+def _cite_stats(tree: ChronologyTree) -> tuple[int, int]:
+    cited = 0
+    missing = 0
+    for node in tree.dates:
+        for event in node.events:
+            if event.sourcePage:
+                cited += 1
+            else:
+                missing += 1
+    return cited, missing
+
+
+def _plain_language(
+    *,
+    chars: int,
+    tree: ChronologyTree,
+    kept_events: int,
+    dropped_events: int,
+    proposed_events: int,
+    corrections: Sequence[dict[str, Any]],
+    pack: dict[str, Any],
+    pages_cited: int,
+    pages_missing: int,
+    ocr_pages: int,
+) -> list[tuple[str, str]]:
+    first = tree.dates[0].displayDate if tree.dates else "-"
+    last = tree.dates[-1].displayDate if tree.dates else "-"
+    sent = str(pack.get("explain") or f"{chars:,} characters sent to the model")
+    proposed = proposed_events or (kept_events + dropped_events)
+    if corrections:
+        sample = corrections[0]
+        vote = (
+            f"{len(corrections)} OCR year(s) corrected — "
+            f"{sample.get('from')} became {sample.get('to')}"
+        )
+    else:
+        vote = "no conflicting years; majority vote left dates as written"
+    if pages_cited and not pages_missing:
+        cites = f"{pages_cited}/{pages_cited + pages_missing} events have a real page number"
+    elif pages_cited:
+        cites = f"{pages_cited} events have p. N · {pages_missing} still uncited"
+    else:
+        cites = "no pin cites yet (OCR had no [PAGE n] stamps, or quotes did not match)"
+    rows = [
+        ("read", f"{chars:,} chars" + (f" · {ocr_pages} stamped pages" if ocr_pages else "")),
+        ("sent", sent),
+        ("model", f"{proposed} event(s) proposed · kept {kept_events} · dropped {dropped_events}"),
+        ("ocr_vote", vote),
+        ("pin_cites", cites),
+        ("timeline", f"{len(tree.dates)} unique date(s) · {first} → {last}" if tree.dates else "no grounded dates yet"),
+    ]
+    return rows
+
+
+def log_pack_decision(meta: dict[str, Any] | None) -> None:
+    if not meta:
+        return
+    explain = str(meta.get("explain") or "")
+    if not explain:
+        return
+    logger.info("[AutoFill] %s", explain)
+
+
 def log_run_report(
     *,
     stage: str,
@@ -212,6 +308,12 @@ def log_run_report(
     drop_reasons: dict[str, int] | None,
     tree: ChronologyTree,
     usage: dict[str, Any] | None = None,
+    proposed_events: int = 0,
+    corrections: Sequence[dict[str, Any]] | None = None,
+    pages_cited: int | None = None,
+    pages_missing: int | None = None,
+    ocr_pages: int = 0,
+    pack: dict[str, Any] | None = None,
 ) -> None:
     usage = usage or get_last_usage()
     model = str(usage.get("model") or "-")
@@ -221,7 +323,36 @@ def log_run_report(
     total_tokens = int(usage.get("totalTokens") or (input_tokens + output_tokens))
     cost = _model_cost_usd(model, input_tokens, output_tokens)
     width = _message_width()
+    corrections = list(corrections or [])
+    if pack is None:
+        try:
+            from .pack import last_pack_meta
 
+            pack = last_pack_meta()
+        except Exception:
+            pack = {}
+    tree_cited, tree_missing = _cite_stats(tree)
+    if pages_cited is None:
+        pages_cited = tree_cited
+    if pages_missing is None:
+        pages_missing = tree_missing
+
+    story = kv_table(
+        "IN PLAIN LANGUAGE",
+        _plain_language(
+            chars=chars,
+            tree=tree,
+            kept_events=kept_events,
+            dropped_events=dropped_events,
+            proposed_events=proposed_events,
+            corrections=corrections,
+            pack=pack or {},
+            pages_cited=int(pages_cited),
+            pages_missing=int(pages_missing),
+            ocr_pages=ocr_pages or int((pack or {}).get("pages_total") or 0),
+        ),
+        max_width=width,
+    )
     summary = kv_table(
         "AUTO-FILL + CHRONOLOGY",
         [
@@ -244,31 +375,54 @@ def log_run_report(
         ],
         max_width=width,
     )
-    reason_rows = [(k, v) for k, v in sorted((drop_reasons or {}).items()) if v]
+    reason_rows = [
+        [_DROP_REASON.get(k, k.replace("_", " ")), v]
+        for k, v in sorted((drop_reasons or {}).items())
+        if v
+    ]
     reason_table = ""
     if reason_rows:
         reason_table = "\n" + grid_table(
-            "DROPPED EVENTS",
+            "WHY EVENTS WERE DROPPED",
             ["reason", "count"],
             reason_rows,
             max_width=width,
         )
-    date_rows = [
-        [node.displayDate, node.phase, (node.events[0].title if node.events else "")]
-        for node in tree.dates[:10]
-    ]
+    correction_table = ""
+    if corrections:
+        correction_table = "\n" + grid_table(
+            "OCR MAJORITY VOTE (year conflicts)",
+            ["from", "to", "event"],
+            [
+                [item.get("from"), item.get("to"), item.get("title")]
+                for item in corrections[:8]
+            ],
+            max_width=width,
+        )
+    date_rows = []
+    for node in tree.dates[:20]:
+        event = node.events[0] if node.events else None
+        page = (event.sourcePage if event else "") or "-"
+        title = _event_label(event) if event else (node.summary or "")
+        date_rows.append([node.displayDate, page, title])
     dates_table = "\n" + grid_table(
-        "UNIQUE DATES (earliest first)",
-        ["date", "phase", "event"],
+        "TIMELINE (earliest first, with pin cites)",
+        ["date", "page", "event"],
         date_rows or [["-", "-", "none"]],
         max_width=width,
     )
-    diagram = "\nCHRONOLOGY  phase -> date -> summary\n" + tree_diagram(tree, max_width=width)
+    extra = ""
+    if len(tree.dates) > 20:
+        extra = f"\n  ... {len(tree.dates) - 20} more date(s) in the stored tree"
+    diagram = "\nCHRONOLOGY  phase -> date -> event\n" + tree_diagram(tree, max_width=width)
     logger.info(
-        "[AutoFill] model=%s\n%s%s%s%s",
+        "[AutoFill] model=%s\n%s\n%s%s%s%s%s%s",
         model,
+        story,
         summary,
         reason_table,
+        correction_table,
         dates_table,
+        extra,
         diagram,
     )
