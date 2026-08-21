@@ -23,26 +23,70 @@ _PROC_HIT = re.compile(
 _GAP = "\n\n[PAGES OMITTED]\n\n"
 
 
+_LAST_PACK: dict[str, object] = {}
+_PAGE_HEADER = re.compile(r"\[PAGE\s+\d{1,4}\]", re.I)
+
+
+def last_pack_meta() -> dict[str, object]:
+    return dict(_LAST_PACK)
+
+
+def _remember(meta: dict[str, object]) -> dict[str, object]:
+    global _LAST_PACK
+    _LAST_PACK = dict(meta)
+    return meta
+
+
 def pack_for_extraction(text: str, *, budget: int = EXTRACTION_CHAR_BUDGET) -> tuple[str, dict[str, object]]:
     """Return text the LLM should read, plus pack metadata for logs."""
     raw = text or ""
+    pages = split_into_pages(raw)
     meta: dict[str, object] = {
         "packed": False,
         "mode": "full",
         "source_chars": len(raw),
         "chars": len(raw),
         "budget": budget,
+        "pages_total": len(pages),
+        "pages_sent": len(pages),
+        "pages_omitted": 0,
+        "explain": (
+            f"Sent every page ({len(pages) or 'unstamped'} · {len(raw):,} chars). "
+            f"Fits under the {budget:,} character cap."
+            if len(raw) <= budget
+            else f"File is larger than the {budget:,} character cap."
+        ),
     }
     if len(raw) <= budget:
-        return raw, meta
-    pages = split_into_pages(raw)
+        return raw, _remember(meta)
     if len(pages) >= 2:
         packed = _pack_pages(pages, budget)
-        meta.update(packed=True, mode="pages", chars=len(packed))
-        return packed, meta
+        sent = len(_PAGE_HEADER.findall(packed))
+        omitted = max(0, len(pages) - sent)
+        meta.update(
+            packed=True,
+            mode="pages",
+            chars=len(packed),
+            pages_sent=sent,
+            pages_omitted=omitted,
+            explain=(
+                f"File too large to send whole. Sent {sent} of {len(pages)} pages "
+                f"({len(packed):,} of {len(raw):,} chars) — dated and procedural pages first, "
+                f"plus the opening and closing pages. Dropped {omitted} page(s) with no dates."
+            ),
+        )
+        return packed, _remember(meta)
     packed = _pack_windows(raw, budget)
-    meta.update(packed=True, mode="windows", chars=len(packed))
-    return packed, meta
+    meta.update(
+        packed=True,
+        mode="windows",
+        chars=len(packed),
+        explain=(
+            f"No page stamps, so sent the start, the end, and every window around a date "
+            f"({len(packed):,} of {len(raw):,} chars)."
+        ),
+    )
+    return packed, _remember(meta)
 
 
 def _page_score(page: PageSlice, *, total: int) -> int:

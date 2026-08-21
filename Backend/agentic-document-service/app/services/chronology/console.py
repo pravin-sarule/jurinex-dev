@@ -120,7 +120,11 @@ def grid_table(
     while len(preferred) < len(cols):
         preferred.append(8)
     mins = [4] * len(cols)
-    if [c.lower() for c in cols] == ["date", "phase", "event"]:
+    lowered = [c.lower() for c in cols]
+    if lowered == ["date", "page", "event"]:
+        preferred = [11, 8, max(12, width - 10 - 11 - 8)]
+        mins = [11, 6, 10]
+    elif lowered == ["date", "phase", "event"]:
         preferred = [11, 14, max(12, width - 10 - 11 - 14)]
         mins = [11, 8, 10]
     elif len(cols) >= 3:

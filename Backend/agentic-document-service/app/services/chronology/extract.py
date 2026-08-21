@@ -15,7 +15,7 @@ from .models import (
     normalize_phase,
     normalize_source_role,
 )
-from .pages import pages_for_quote
+from .pages import pages_for_quote, split_into_pages
 
 logger = logging.getLogger("agentic_document_service.chronology.extract")
 
@@ -111,6 +111,11 @@ class GroundingReport:
     kept: int
     dropped: int
     reasons: dict[str, int] = field(default_factory=dict)
+    proposed: int = 0
+    corrections: list[dict[str, Any]] = field(default_factory=list)
+    pages_cited: int = 0
+    pages_missing: int = 0
+    ocr_pages: int = 0
 
 
 def extract_grounded_report(
@@ -172,20 +177,36 @@ def extract_grounded_report(
             )
         )
     hits = index_numeric_dates(source_text)
+    corrections: list[dict[str, Any]] = []
     for event in out:
+        before_date = event.display_date
+        before_quote = event.source_quote
         corroborate_event(event, source_text, hits)
         located = pages_for_quote(event.source_quote, source_text, date_key=event.date_key)
         if located:
             event.source_page = located
+        if event.display_date != before_date or event.source_quote != before_quote:
+            corrections.append(
+                {
+                    "title": event.title,
+                    "from": before_date,
+                    "to": event.display_date,
+                    "quote_replaced": event.source_quote != before_quote,
+                }
+            )
     dropped = sum(reasons.values())
-    if dropped or out:
-        logger.info(
-            "[Chronology] document=%s  kept=%d  dropped=%d  model=form_population_agent",
-            document_name,
-            len(out),
-            dropped,
-        )
-    return GroundingReport(events=out, kept=len(out), dropped=dropped, reasons=reasons)
+    cited = sum(1 for event in out if event.source_page)
+    return GroundingReport(
+        events=out,
+        kept=len(out),
+        dropped=dropped,
+        reasons=reasons,
+        proposed=len(out) + dropped,
+        corrections=corrections,
+        pages_cited=cited,
+        pages_missing=len(out) - cited,
+        ocr_pages=len(split_into_pages(source_text)),
+    )
 
 
 def refresh_tree_against_source(tree: Any, source_text: str) -> Any:
