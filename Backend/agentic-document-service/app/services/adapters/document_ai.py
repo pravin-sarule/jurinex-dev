@@ -3252,14 +3252,9 @@ def _call_gemini_for_extraction(text: str) -> dict:
     """Use Gemini to extract all case fields from document text (uses form_population_agent config)."""
     try:
         packed, pack_meta = pack_for_extraction(text)
-        if pack_meta.get("packed"):
-            logger.info(
-                "[DocumentAI] extraction packed mode=%s chars=%s/%s budget=%s",
-                pack_meta.get("mode"),
-                pack_meta.get("chars"),
-                pack_meta.get("source_chars"),
-                pack_meta.get("budget"),
-            )
+        from app.services.chronology.console import log_pack_decision
+
+        log_pack_decision(pack_meta)
         prompt = _EXTRACTION_PROMPT + packed
         raw = _generate_text(prompt, agent_name=_AGENT_EXTRACTION)
         if not raw:

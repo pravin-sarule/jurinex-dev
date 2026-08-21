@@ -1737,12 +1737,14 @@ class FolderWorkflowService:
 
         if (not has_rich_data or needs_chronology) and combined_text:
             started = time.perf_counter()
-            log_progress(1, 3, "Rebuild from combined OCR", case=case_id, chars=f"{len(combined_text):,}")
-            logger.info(
-                "[FolderService] task=extract_case_fields re-running Gemini extraction case_id=%s text_chars=%s chronology=%s",
-                case_id, len(combined_text), needs_chronology,
+            from app.services.chronology.console import log_note
+
+            log_progress(1, 5, "Rebuild from combined OCR", case=case_id, chars=f"{len(combined_text):,}")
+            log_note(
+                "[FolderService] extract-case-fields will re-read the full OCR "
+                f"({len(combined_text):,} chars) so later pages are not missed"
             )
-            log_progress(2, 3, "LLM extract", agent="form_population_agent")
+            log_progress(2, 5, "Send OCR to form_population_agent")
             gemini_data = _call_gemini_for_extraction(combined_text)
             if gemini_data:
                 normalized = self._normalize_entities(gemini_data)
@@ -1750,16 +1752,22 @@ class FolderWorkflowService:
                     if value and not extracted.get(key):
                         extracted[key] = value
                 self._extracted_by_case[case_id] = extracted
-                log_progress(3, 3, "Ground dates + merge unique dates")
+                log_progress(3, 5, "Keep only dates and quotes that appear in the OCR")
                 report = report_from_extraction(
                     gemini_data,
                     source_text=combined_text,
                     document_name="combined",
                 )
+                log_progress(
+                    4, 5, "OCR majority vote + pin cites",
+                    corrected=len(report.corrections),
+                    cited=f"{report.pages_cited}/{report.kept}",
+                )
                 tree = merge_into_tree(tree, report.events)
                 tree = refresh_tree(tree, combined_text)
                 self._store_chronology(case_id, tree, folder_name=folder_name)
                 did_rebuild = True
+                log_progress(5, 5, "Merge unique dates + persist")
                 log_run_report(
                     stage="extract-case-fields rebuild",
                     case_id=case_id,
@@ -1772,6 +1780,11 @@ class FolderWorkflowService:
                     dropped_events=report.dropped,
                     drop_reasons=report.reasons,
                     tree=tree,
+                    proposed_events=report.proposed,
+                    corrections=report.corrections,
+                    pages_cited=report.pages_cited,
+                    pages_missing=report.pages_missing,
+                    ocr_pages=report.ocr_pages,
                 )
 
         if not did_rebuild:
@@ -2704,19 +2717,38 @@ class FolderWorkflowService:
         started = time.perf_counter()
         document_name = str(metadata.get("original_name") or metadata.get("document_name") or "document")
         chars = len(text or "")
-        log_progress(1, 4, "Read OCR text", document=document_name, chars=f"{chars:,}")
-        log_progress(2, 4, "LLM extract", agent="form_population_agent")
+        from app.services.chronology.console import log_note
+        from app.services.chronology.pages import split_into_pages
+
+        pages = split_into_pages(text or "")
+        log_progress(
+            1, 5, "Read OCR text",
+            document=document_name,
+            chars=f"{chars:,}",
+            pages=len(pages) or "unstamped",
+        )
+        if pages:
+            log_note(
+                f"Page stamps present: [PAGE {pages[0].number}] … [PAGE {pages[-1].number}] "
+                "(pin cites use these numbers, not model guesses)"
+            )
+        log_progress(2, 5, "Send OCR to form_population_agent")
         extraction = self._pipeline._document_ai.extract(
             DocumentReference(document_name=document_name, inline_text=text)
         )
-        log_progress(3, 4, "Ground dates / drop unverifiable")
+        log_progress(3, 5, "Keep only dates and quotes that appear in the OCR")
         normalized = self._normalize_entities(extraction.entities)
         report = report_from_extraction(
             extraction.entities,
             source_text=text,
             document_name=document_name,
         )
-        log_progress(4, 4, "Merge unique dates + persist")
+        log_progress(
+            4, 5, "OCR majority vote + pin cites",
+            corrected=len(report.corrections),
+            cited=f"{report.pages_cited}/{report.kept}",
+        )
+        log_progress(5, 5, "Merge unique dates + persist")
         with self._autofill_lock:
             extracted_data = self._extracted_by_case.setdefault(case_id, {})
             for key, value in normalized.items():
@@ -2739,6 +2771,11 @@ class FolderWorkflowService:
             dropped_events=report.dropped,
             drop_reasons=report.reasons,
             tree=tree,
+            proposed_events=report.proposed,
+            corrections=report.corrections,
+            pages_cited=report.pages_cited,
+            pages_missing=report.pages_missing,
+            ocr_pages=report.ocr_pages,
         )
 
     @classmethod
