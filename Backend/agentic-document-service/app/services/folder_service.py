@@ -1656,6 +1656,53 @@ class FolderWorkflowService:
             updated_at=updated_at,
         )
 
+    def _ocr_structured_pages(self, file_id: str) -> dict[str, Any] | None:
+        if not file_id or not is_db_available():
+            return None
+        try:
+            with get_db_connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT structured_schema, raw_response
+                    FROM document_ai_extractions
+                    WHERE file_id::text = %s
+                    ORDER BY processed_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    [file_id],
+                )
+                row = cur.fetchone()
+        except Exception:
+            return None
+        if not row:
+            return None
+        for key in ("structured_schema", "raw_response"):
+            payload = row.get(key) if isinstance(row, dict) else None
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    payload = None
+            if isinstance(payload, dict) and payload.get("pages"):
+                return payload
+        return None
+
+    def _paged_document_text(self, doc: Any) -> str:
+        from app.services.chronology.pages import split_into_pages, text_with_page_markers
+
+        text = str(getattr(doc, "text", "") or "")
+        if split_into_pages(text):
+            return text
+        metadata = getattr(doc, "metadata", None) or {}
+        file_id = str(
+            metadata.get("db_file_id")
+            or metadata.get("file_id")
+            or getattr(doc, "document_id", "")
+            or ""
+        )
+        marked = text_with_page_markers(self._ocr_structured_pages(file_id))
+        return marked or text
+
     def extract_case_fields(self, folder_name: str) -> ExtractCaseFieldsResponse:
         from app.services.adapters.document_ai import _call_gemini_for_extraction
         case_id = folder_name
@@ -1671,49 +1718,59 @@ class FolderWorkflowService:
         needs_chronology = not tree.dates
         did_rebuild = False
 
-        if (not has_rich_data or needs_chronology) and stored_case.documents:
-            combined_text = "\n\n---\n\n".join(
-                f"[Document: {doc.document_name}]\n{doc.text}"
-                for doc in stored_case.documents
-                if doc.text and len(doc.text) > 50
+        parts = []
+        for doc in stored_case.documents:
+            body = self._paged_document_text(doc)
+            if body and len(body) > 50:
+                parts.append(f"[Document: {doc.document_name}]\n{body}")
+        combined_text = "\n\n---\n\n".join(parts)
+        missing_pages = any(
+            not event.sourcePage
+            for node in tree.dates
+            for event in node.events
+        )
+        from app.services.chronology.pages import split_into_pages
+
+        if combined_text and split_into_pages(combined_text) and missing_pages:
+            needs_chronology = True
+
+        if (not has_rich_data or needs_chronology) and combined_text:
+            started = time.perf_counter()
+            log_progress(1, 3, "Rebuild from combined OCR", case=case_id, chars=f"{len(combined_text):,}")
+            logger.info(
+                "[FolderService] task=extract_case_fields re-running Gemini extraction case_id=%s text_chars=%s chronology=%s",
+                case_id, len(combined_text), needs_chronology,
             )
-            if combined_text:
-                started = time.perf_counter()
-                log_progress(1, 3, "Rebuild from combined OCR", case=case_id, chars=f"{len(combined_text):,}")
-                logger.info(
-                    "[FolderService] task=extract_case_fields re-running Gemini extraction case_id=%s text_chars=%s chronology=%s",
-                    case_id, len(combined_text), needs_chronology,
+            log_progress(2, 3, "LLM extract", agent="form_population_agent")
+            gemini_data = _call_gemini_for_extraction(combined_text)
+            if gemini_data:
+                normalized = self._normalize_entities(gemini_data)
+                for key, value in normalized.items():
+                    if value and not extracted.get(key):
+                        extracted[key] = value
+                self._extracted_by_case[case_id] = extracted
+                log_progress(3, 3, "Ground dates + merge unique dates")
+                report = report_from_extraction(
+                    gemini_data,
+                    source_text=combined_text,
+                    document_name="combined",
                 )
-                log_progress(2, 3, "LLM extract", agent="form_population_agent")
-                gemini_data = _call_gemini_for_extraction(combined_text)
-                if gemini_data:
-                    normalized = self._normalize_entities(gemini_data)
-                    for key, value in normalized.items():
-                        if value and not extracted.get(key):
-                            extracted[key] = value
-                    self._extracted_by_case[case_id] = extracted
-                    log_progress(3, 3, "Ground dates + merge unique dates")
-                    report = report_from_extraction(
-                        gemini_data,
-                        source_text=combined_text,
-                        document_name="combined",
-                    )
-                    tree = merge_into_tree(tree, report.events)
-                    self._store_chronology(case_id, tree, folder_name=folder_name)
-                    did_rebuild = True
-                    log_run_report(
-                        stage="extract-case-fields rebuild",
-                        case_id=case_id,
-                        document_name="combined",
-                        chars=len(combined_text),
-                        elapsed_s=time.perf_counter() - started,
-                        fields_filled=len([k for k in extracted if extracted.get(k) and k != "chronology"]),
-                        field_names=[k for k in extracted if extracted.get(k) and k != "chronology"],
-                        kept_events=report.kept,
-                        dropped_events=report.dropped,
-                        drop_reasons=report.reasons,
-                        tree=tree,
-                    )
+                tree = merge_into_tree(tree, report.events)
+                self._store_chronology(case_id, tree, folder_name=folder_name)
+                did_rebuild = True
+                log_run_report(
+                    stage="extract-case-fields rebuild",
+                    case_id=case_id,
+                    document_name="combined",
+                    chars=len(combined_text),
+                    elapsed_s=time.perf_counter() - started,
+                    fields_filled=len([k for k in extracted if extracted.get(k) and k != "chronology"]),
+                    field_names=[k for k in extracted if extracted.get(k) and k != "chronology"],
+                    kept_events=report.kept,
+                    dropped_events=report.dropped,
+                    drop_reasons=report.reasons,
+                    tree=tree,
+                )
 
         if not did_rebuild:
             log_progress(4, 4, "Using stored chronology", dates=len(tree.dates), fields=len(extracted))
