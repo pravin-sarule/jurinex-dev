@@ -1796,7 +1796,7 @@ class FolderWorkflowService:
                 stage="extract-case-fields cached",
                 case_id=case_id,
                 document_name="(stored)",
-                chars=0,
+                chars=len(combined_text),
                 elapsed_s=0.0,
                 fields_filled=len([k for k in extracted if extracted.get(k)]),
                 field_names=[k for k in extracted if extracted.get(k)],
