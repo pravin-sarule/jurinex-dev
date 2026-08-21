@@ -49,13 +49,6 @@ def majority_date(parsed: ParsedDate, hits: list[DateHit]) -> ParsedDate:
     return voted or parsed
 
 
-def preferred_spelling(parsed: ParsedDate, hits: list[DateHit]) -> str:
-    forms = [hit.raw for hit in hits if hit.parsed.key == parsed.key]
-    if not forms:
-        return parsed.display
-    return Counter(forms).most_common(1)[0][0]
-
-
 def corroborate_event(event: GroundedEvent, source_text: str, hits: list[DateHit] | None = None) -> GroundedEvent:
     """Correct minority OCR years on the event date and, when possible, the quote."""
     indexed = hits if hits is not None else index_numeric_dates(source_text)
