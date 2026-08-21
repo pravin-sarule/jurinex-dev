@@ -209,15 +209,6 @@ _DROP_REASON = {
 }
 
 
-def _phase_label(phase: str) -> str:
-    try:
-        from .models import PHASE_LABELS
-
-        return PHASE_LABELS.get(str(phase or ""), str(phase or "").replace("_", " ") or "-")
-    except Exception:
-        return str(phase or "").replace("_", " ") or "-"
-
-
 def _event_label(event: Any) -> str:
     title = str(getattr(event, "title", "") or "event")
     flags = []
