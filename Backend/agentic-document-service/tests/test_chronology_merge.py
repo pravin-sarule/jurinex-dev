@@ -136,6 +136,24 @@ class ExtractGroundingTests(unittest.TestCase):
         self.assertEqual(events[0].phase, "correspondence")
         self.assertEqual(events[0].event_type, "communication")
 
+    def test_communication_tagged_pleadings_is_reclassified(self) -> None:
+        source = "The bank's reply letter dated 01 March 2012 denied liability for the insurance."
+        payload = {
+            "events": [
+                {
+                    "date": "01/03/2012",
+                    "title": "Bank reply denying insurance liability",
+                    "particulars": "The bank wrote to the borrower denying liability.",
+                    "eventType": "communication",
+                    "phase": "pleadings",
+                    "sourceQuote": "The bank's reply letter dated 01 March 2012 denied liability",
+                }
+            ]
+        }
+        events = extract_grounded_events(payload, source_text=source, document_name="writ.pdf")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].phase, "correspondence")
+
 
 class MergeUniqueDateTests(unittest.TestCase):
     def test_same_date_appears_once_with_combined_summary(self) -> None:
