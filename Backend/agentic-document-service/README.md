@@ -70,6 +70,7 @@ Important:
 - `POST /api/v1/intake`
 - `POST /api/files/{folderName}/extract-case-fields` (form fields + chronology)
 - `GET /api/files/{folderName}/chronology`
+- `GET /api/files/cases/{caseId}` (case payload includes `chronology`)
 - `POST /api/v1/cases/{case_id}/documents:process`
 - `POST /api/v1/cases/{case_id}/query`
 - `GET /api/v1/presets`
@@ -105,5 +106,5 @@ Important:
 - In the frontend, set `VITE_APP_AGENTIC_DOCUMENT_SERVICE_URL` to this service URL to make it the default document backend entrypoint.
 - The settings loader understands existing `document-service` variable names such as `DATABASE_URL`, `GCLOUD_PROJECT_ID`, `GCS_BUCKET_NAME`, `GCS_BUCKET`, `DOCUMENT_AI_LOCATION`, `GEMINI_API_KEY`, `JWT_SECRET`, `REDIS_URL`, `AUTH_SERVICE_URL`, and `PAYMENT_SERVICE_URL`.
 - The ADK agents default to `gemini-2.5-pro` through the shared `ADK_MODEL` setting unless you explicitly override it.
-- Intake auto-fill + chronology use `form_population_agent` (admin-selected model; currently `gemini-3.7-flash`). Details: [`docs/AUTO_FILL.md`](docs/AUTO_FILL.md) and [`docs/CHRONOLOGY.md`](docs/CHRONOLOGY.md).
+- Intake auto-fill + chronology use `form_population_agent` (admin-selected model; currently `gemini-3.7-flash`, `thinking_level=low`). OCR is stamped `[PAGE n]`, extract budget is 900k characters, and pin cites / OCR year votes run in Python. Details: [`docs/AUTO_FILL.md`](docs/AUTO_FILL.md) and [`docs/CHRONOLOGY.md`](docs/CHRONOLOGY.md).
 - The embedding model default is `gemini-embedding-001`, and chunk metadata records both the embedding model and vector backend used during indexing.
