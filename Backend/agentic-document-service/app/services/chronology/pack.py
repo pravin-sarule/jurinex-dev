@@ -54,40 +54,54 @@ def _page_score(page: PageSlice, *, total: int) -> int:
 
 def _pack_pages(pages: list[PageSlice], budget: int) -> str:
     total = len(pages)
-    must: set[int] = set()
-    for page in pages[:12]:
-        must.add(page.number)
-    for page in pages[-8:]:
-        must.add(page.number)
+    by_number = {page.number: page for page in pages}
+    selected: list[int] = []
+    used = 0
 
-    ranked = sorted(pages, key=lambda item: _page_score(item, total=total), reverse=True)
-    selected: set[int] = set(must)
-    used = sum(len(page.text) + 16 for page in pages if page.number in selected)
-    for page in ranked:
-        if page.number in selected:
-            continue
-        cost = len(page.text) + 16
-        if used + cost > budget:
-            continue
-        selected.add(page.number)
+    def _try_add(number: int) -> None:
+        nonlocal used
+        page = by_number.get(number)
+        if page is None or page.number in selected:
+            return
+        cost = len(page.text) + 24
+        if selected and used + cost > budget:
+            return
+        if not selected and cost > budget:
+            selected.append(page.number)
+            used = min(cost, budget)
+            return
+        selected.append(page.number)
         used += cost
 
+    dated = sorted(pages, key=lambda item: _page_score(item, total=total), reverse=True)
+    for page in dated:
+        if _DATE_HIT.search(page.text) or _PROC_HIT.search(page.text):
+            _try_add(page.number)
+    for page in pages[:12]:
+        _try_add(page.number)
+    for page in pages[-8:]:
+        _try_add(page.number)
+    for page in dated:
+        _try_add(page.number)
+
+    chosen = set(selected)
     chunks: list[str] = []
     skipped = 0
     for page in pages:
-        if page.number not in selected:
+        if page.number not in chosen:
             skipped += 1
             continue
         if skipped:
             chunks.append(f"[PAGES OMITTED: {skipped} page(s) with no dated or procedural content]")
             skipped = 0
-        chunks.append(f"[PAGE {page.number}]\n{page.text}")
+        body = page.text
+        if used > budget and page.number == selected[0] and len(body) > budget - 24:
+            body = body[: max(0, budget - 24)]
+        chunks.append(f"[PAGE {page.number}]\n{body}")
     if skipped:
         chunks.append(f"[PAGES OMITTED: {skipped} page(s) with no dated or procedural content]")
     packed = "\n\n".join(chunks)
-    if len(packed) <= budget:
-        return packed
-    return packed[:budget]
+    return packed if len(packed) <= budget else packed[:budget]
 
 
 def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:

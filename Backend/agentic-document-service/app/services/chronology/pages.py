@@ -64,12 +64,8 @@ def pages_for_quote(quote: str, source: str, *, date_key: str = "") -> str:
         # Short OCR quotes sometimes only match once the page stamp is ignored;
         # fall back to a word-overlap scan of each page.
         hits = [page for page in pages if _quote_words_on_page(quote, page.text)]
-    if date_key and len(hits) > 2:
-        dated = [
-            page
-            for page in hits
-            if _page_has_date(page.text, date_key)
-        ]
+    if date_key and len(hits) > 1:
+        dated = [page for page in hits if _page_has_date(page.text, date_key)]
         if dated:
             hits = dated
     numbers = []
