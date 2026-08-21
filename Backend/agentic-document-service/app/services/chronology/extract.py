@@ -128,15 +128,19 @@ def _looks_like_court_proceeding(event: GroundedEvent) -> bool:
         f"{event.title} {event.forum} {event.case_number}"
     ):
         return False
-    return event.phase in {
-        "institution",
-        "pending",
-        "pleadings",
-        "interim",
-        "hearing",
-        "order",
-        "appeal",
-    } or event.event_type in {"filing", "order", "hearing", "judgment", "affidavit"}
+    return (
+        event.phase
+        in {
+            "institution",
+            "pending",
+            "pleadings",
+            "interim",
+            "hearing",
+            "order",
+            "appeal",
+        }
+        or event.event_type in {"filing", "order", "hearing", "judgment", "affidavit"}
+    )
 
 
 def _litigation_start_from_source(source_text: str) -> str | None:

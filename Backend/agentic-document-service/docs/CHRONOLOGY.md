@@ -169,7 +169,7 @@ On each extract:
 | `app/services/chronology/pack.py` | 900k budget; dated/procedural pages if larger |
 | `app/services/chronology/pages.py` | `[PAGE n]` stamps and pin cites |
 | `app/services/chronology/corroborate.py` | Majority vote on OCR date variants |
-| `app/services/chronology/extract.py` | Coerce LLM JSON → grounded events; refresh stored tree |
+| `app/services/chronology/extract.py` | Coerce LLM JSON → grounded events; land-unit rewrite; pending-phase retag; refresh stored tree |
 | `app/services/chronology/merge.py` | Unique dates, summaries, phase tree |
 | `app/services/chronology/console.py` | Progress bars and boxed reports |
 | `app/services/chronology/persist.py` | `case_chronology` table |
