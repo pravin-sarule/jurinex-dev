@@ -60,10 +60,12 @@ There is still **no second agent** and no second read of the PDF. The extra chro
 
 - Procedural verbs in narrative paragraphs (`filed`, `transferred`, `renumbered`, `disposed`, `preferred`, …), including year-only entries
 - Forum and case number when written
-- Pin cites (`sourcePage`, `exhibit`) when the OCR actually shows them
-- `sourceRole` + `disputed` so pleaded allegations are not flattened as findings
+- Pin cites (`sourcePage`) are attached in Python from `[PAGE n]` OCR stamps, not guessed by the model
+- Repeated dates with OCR year conflicts are majority-voted in Python (e.g. `07.12.2012` vs three `07.12.2010` readings)
 - Court-register dates over advocate signature/verification dates
 - `correspondence` for letters between parties (not `pleadings`)
+
+Full OCR is sent when it fits (~900k characters, well inside Gemini 3.7 Flash’s 1M-token window). If a file is larger, dated and procedural pages are packed in document order; the first and last pages are always kept.
 
 ## No repeat dates
 
@@ -82,6 +84,9 @@ Month-only (`2019-01`) and year-only (`2019`) keys stay separate from a full day
 | `app/services/chronology/prompt.py` | Extra JSON instructions appended to auto-fill |
 | `app/services/chronology/dates.py` | Parse / unique keys / source variants |
 | `app/services/chronology/grounding.py` | Quote + date must exist in OCR |
+| `app/services/chronology/pack.py` | Fit later pages into the extract window |
+| `app/services/chronology/pages.py` | `[PAGE n]` stamps and pin cites |
+| `app/services/chronology/corroborate.py` | Majority vote on OCR date variants |
 | `app/services/chronology/extract.py` | Coerce LLM JSON → grounded events |
 | `app/services/chronology/merge.py` | Unique dates, summaries, phase tree |
 | `app/services/chronology/persist.py` | `case_chronology` table |
@@ -131,5 +136,5 @@ Look for component **`AutoFill`**. Example progress line:
 
 ```bash
 cd Backend/agentic-document-service
-python -m unittest tests.test_chronology_dates tests.test_chronology_merge tests.test_chronology_console
+python -m unittest tests.test_chronology_dates tests.test_chronology_merge tests.test_chronology_console tests.test_chronology_quality
 ```

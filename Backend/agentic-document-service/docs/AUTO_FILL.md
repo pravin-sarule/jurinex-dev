@@ -19,7 +19,7 @@ Resolution order if the row is missing:
 1. Google **Document AI** OCRs the file (not an LLM).
 2. Text is chunked and embedded (`gemini-embedding-001`).
 3. For intake folders (`temp-*`), `FolderWorkflowService._merge_extracted_case_data` calls `DocumentAIAdapter.extract`.
-4. Extract sends `_EXTRACTION_PROMPT` + up to 80k characters of text through `form_population_agent`.
+4. Extract sends `_EXTRACTION_PROMPT` plus OCR text through `form_population_agent`. Typical paper books fit in one call (budget 900k characters). Larger files keep dated and procedural pages instead of truncating after the first 80k.
 5. JSON form fields are first-wins merged into `_extracted_by_case`.
 6. The same JSON’s `events` array is grounded and merged into the chronology tree (see [CHRONOLOGY.md](CHRONOLOGY.md)).
 7. `POST /api/files/{folderName}/extract-case-fields` returns `extractedData` (form fields + `chronology`).

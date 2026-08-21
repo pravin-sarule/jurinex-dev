@@ -18,6 +18,7 @@ from app.services.prompt_orchestration import (
     format_instruction_for_query,
     is_custom_template_question as _is_custom_template_question_orch,
 )
+from app.services.chronology.pack import pack_for_extraction
 from app.services.chronology.prompt import CHRONOLOGY_EXTRACTION_BLOCK
 from app.services.token_usage_log import log_token_usage_table
 
@@ -3250,8 +3251,16 @@ def _generate_text(
 def _call_gemini_for_extraction(text: str) -> dict:
     """Use Gemini to extract all case fields from document text (uses form_population_agent config)."""
     try:
-        limited_text = text[:80000]  # stay within token limits
-        prompt = _EXTRACTION_PROMPT + limited_text
+        packed, pack_meta = pack_for_extraction(text)
+        if pack_meta.get("packed"):
+            logger.info(
+                "[DocumentAI] extraction packed mode=%s chars=%s/%s budget=%s",
+                pack_meta.get("mode"),
+                pack_meta.get("chars"),
+                pack_meta.get("source_chars"),
+                pack_meta.get("budget"),
+            )
+        prompt = _EXTRACTION_PROMPT + packed
         raw = _generate_text(prompt, agent_name=_AGENT_EXTRACTION)
         if not raw:
             return {}

@@ -12,7 +12,7 @@ ALSO EXTRACT A GROUNDED CHRONOLOGY in the same JSON object under the key "events
   "phase": "one of: pre_litigation, correspondence, institution, pleadings, interim, evidence, hearing, order, appeal, execution, other",
   "forum": "court or authority as written (e.g. Co-op Court Latur, Bombay High Court Aurangabad Bench). Empty string if not written.",
   "caseNumber": "proceeding number as written (Dispute 88/2012, CCB 230/2014, W.P. 8895/2014, A.O. 18/2012). Empty string if not written.",
-  "sourcePage": "page number if the OCR or heading shows one (p. 54). Empty string if unknown. Never guess.",
+  "sourcePage": "leave empty — Python stamps pages from OCR. Do not guess a page number.",
   "exhibit": "exhibit mark if written (Exh. 63). Empty string if none.",
   "sourceRole": "one of: petitioner, respondent, court, admitted, disputed",
   "disputed": false,
@@ -24,7 +24,7 @@ CHRONOLOGY RULES — ZERO TOLERANCE:
 2. Extract the EVENT, not the document. "Plaint filed" is an event; "this PDF" is not.
 3. Do NOT emit two objects for the same happening. Same calendar day with two DISTINCT happenings is allowed (Python merges the day).
 4. Recital dates ("whereas on …") and procedural dates (filing, listing, order) are both events if the date is written.
-5. sourceQuote MUST be copied character-for-character from the document (OCR spacing may stay). If you cannot quote the event, omit it.
+5. sourceQuote MUST be copied character-for-character from the document (OCR spacing may stay). Copy from the page body, never from a [PAGE n] marker. If you cannot quote the event, omit it.
 6. Do not use today's date, do not infer a missing day, do not complete a partial date.
 7. Ignore signature-block dates that are blank or only "Date: ____".
 8. particulars: 1–5 sentences, facts only. No headings, no bullets, no markdown.
@@ -46,6 +46,8 @@ PARTY ROLE AND CONTRADICTION:
 STAGE AND RANGE:
 17. A letter between parties is eventType communication and phase correspondence — never pleadings.
 18. Insurance and other periods: if you split start and expiry into two point-events, each title must name the same policy (amount / exhibit) so they stay linked. Do not retitle the expiry as a different subject.
+19. The OCR is stamped with [PAGE n] markers. Use them only to know where you are; Python attaches pin cites from the quote.
+20. When the same calendar day is written with conflicting years (OCR), quote the cleaner majority reading if that span is in the document.
 
 Keep the case-form fields AND "events" in the SAME JSON object. Return ONLY that JSON.
 """.strip()

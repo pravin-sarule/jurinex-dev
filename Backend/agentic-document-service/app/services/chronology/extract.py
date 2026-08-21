@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .corroborate import corroborate_event, index_numeric_dates
 from .dates import ParsedDate, parse_date
 from .grounding import date_in_source, quote_in_source
 from .models import (
@@ -14,6 +15,7 @@ from .models import (
     normalize_phase,
     normalize_source_role,
 )
+from .pages import pages_for_quote
 
 logger = logging.getLogger("agentic_document_service.chronology.extract")
 
@@ -169,6 +171,12 @@ def extract_grounded_report(
                 disputed=disputed,
             )
         )
+    hits = index_numeric_dates(source_text)
+    for event in out:
+        corroborate_event(event, source_text, hits)
+        located = pages_for_quote(event.source_quote, source_text, date_key=event.date_key)
+        if located:
+            event.source_page = located
     dropped = sum(reasons.values())
     if dropped or out:
         logger.info(
