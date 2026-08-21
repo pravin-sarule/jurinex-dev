@@ -358,6 +358,7 @@ def extract_grounded_report(
                     "quote_replaced": event.source_quote != before_quote,
                 }
             )
+    refine_event_list(out, source_text)
     dropped = sum(reasons.values())
     cited = sum(1 for event in out if event.source_page)
     return GroundingReport(
@@ -407,6 +408,7 @@ def refresh_tree_against_source(tree: Any, source_text: str) -> Any:
                 event.source_page = located
             refine_characterization(event)
             grounded.append(event)
+    refine_event_list(grounded, source_text)
     return merge_events(None, grounded)
 
 
