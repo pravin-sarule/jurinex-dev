@@ -1775,6 +1775,9 @@ class FolderWorkflowService:
                 )
 
         if not did_rebuild:
+            if combined_text and tree.dates:
+                tree = refresh_tree(tree, combined_text)
+                self._store_chronology(case_id, tree, folder_name=folder_name)
             log_progress(4, 4, "Using stored chronology", dates=len(tree.dates), fields=len(extracted))
             log_run_report(
                 stage="extract-case-fields cached",

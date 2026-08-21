@@ -151,6 +151,32 @@ Policy period 8.12.2009 to 7.12.2010 hypothecated goods confirmed.
         self.assertNotIn("61", events[0].source_page.split(", "))
         self.assertNotIn("2012", events[0].source_quote)
 
+    def test_refresh_rewrites_stored_tree(self) -> None:
+        from app.schemas.chronology import ChronologyDateNode, ChronologyEvent, ChronologyTree
+        from app.services.chronology.extract import refresh_tree_against_source
+
+        tree = ChronologyTree(
+            dates=[
+                ChronologyDateNode(
+                    date="2012-12-07",
+                    displayDate="07 Dec 2012",
+                    precision="day",
+                    phase="pre_litigation",
+                    events=[
+                        ChronologyEvent(
+                            title="Expiry of second insurance cover",
+                            particulars="The additional policy expired.",
+                            sourceQuote="08.12.2009 to 07.12.2012",
+                        )
+                    ],
+                )
+            ],
+            eventCount=1,
+        )
+        refreshed = refresh_tree_against_source(tree, self.SOURCE)
+        self.assertEqual(refreshed.dates[0].date, "2010-12-07")
+        self.assertTrue(refreshed.dates[0].events[0].sourcePage)
+
 
 if __name__ == "__main__":
     unittest.main()
