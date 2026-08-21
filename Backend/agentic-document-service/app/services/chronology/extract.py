@@ -188,6 +188,42 @@ def extract_grounded_report(
     return GroundingReport(events=out, kept=len(out), dropped=dropped, reasons=reasons)
 
 
+def refresh_tree_against_source(tree: Any, source_text: str) -> Any:
+    """Re-vote OCR years and attach pin cites on an already-stored tree. No LLM."""
+    from app.schemas.chronology import ChronologyTree
+    from .merge import merge_events
+
+    if not isinstance(tree, ChronologyTree) or not tree.dates or not source_text:
+        return tree
+    grounded: list[GroundedEvent] = []
+    hits = index_numeric_dates(source_text)
+    for node in tree.dates:
+        for item in node.events:
+            event = GroundedEvent(
+                date_key=node.date,
+                display_date=node.displayDate,
+                precision=node.precision,
+                title=item.title,
+                particulars=item.particulars,
+                event_type=item.eventType or "other",
+                phase=node.phase or "other",
+                source_document=item.sourceDocument,
+                source_quote=item.sourceQuote,
+                forum=item.forum,
+                case_number=item.caseNumber,
+                source_page=item.sourcePage,
+                exhibit=item.exhibit,
+                source_role=item.sourceRole,
+                disputed=bool(item.disputed),
+            )
+            corroborate_event(event, source_text, hits)
+            located = pages_for_quote(event.source_quote, source_text, date_key=event.date_key)
+            if located:
+                event.source_page = located
+            grounded.append(event)
+    return merge_events(None, grounded)
+
+
 def extract_grounded_events(
     payload: Any,
     *,

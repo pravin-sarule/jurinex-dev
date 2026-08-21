@@ -5,7 +5,7 @@ from typing import Any
 
 from app.schemas.chronology import ChronologyTree
 
-from .extract import extract_grounded_events, extract_grounded_report
+from .extract import extract_grounded_events, extract_grounded_report, refresh_tree_against_source
 from .merge import empty_tree, merge_events
 from . import persist
 
@@ -42,6 +42,10 @@ def merge_into_tree(existing: ChronologyTree | None, events: list) -> Chronology
     if not events:
         return empty_tree()
     return merge_events(existing, events)
+
+
+def refresh_tree(tree: ChronologyTree, source_text: str) -> ChronologyTree:
+    return refresh_tree_against_source(tree, source_text)
 
 
 def load_or_empty(case_key: str, folder_name: str | None = None) -> ChronologyTree:
