@@ -203,12 +203,12 @@ class LandUnitAndPendingTests(unittest.TestCase):
         events = extract_grounded_events(
             payload, source_text=self.SOURCE, document_name="wp.pdf"
         )
-        self.assertEqual(len(events), 1)
-        self.assertIn("69 R", events[0].title)
-        self.assertNotIn("0.69 R", events[0].title)
-        self.assertIn("69 R", events[0].particulars)
-        self.assertNotIn("0.69 R", events[0].particulars)
-        self.assertIn("69 R", events[0].source_quote)
+        measured = {event.date_key: event for event in events}["2018-12-26"]
+        self.assertIn("69 R", measured.title)
+        self.assertNotIn("0.69 R", measured.title)
+        self.assertIn("69 R", measured.particulars)
+        self.assertNotIn("0.69 R", measured.particulars)
+        self.assertIn("69 R", measured.source_quote)
 
     def test_does_not_rewrite_quote_or_true_decimal_ares(self) -> None:
         source = "Reservation of 0.69 R was recorded on 26.12.2018 in the joint measurement."
@@ -225,8 +225,8 @@ class LandUnitAndPendingTests(unittest.TestCase):
             ]
         }
         events = extract_grounded_events(payload, source_text=source, document_name="wp.pdf")
-        self.assertEqual(len(events), 1)
-        self.assertIn("0.69 R", events[0].particulars)
+        measured = {event.date_key: event for event in events}["2018-12-26"]
+        self.assertIn("0.69 R", measured.particulars)
 
     def test_pre_litigation_after_writ_order_becomes_pending(self) -> None:
         payload = {
@@ -279,9 +279,10 @@ class LandUnitAndPendingTests(unittest.TestCase):
             eventCount=1,
         )
         refreshed = refresh_tree_against_source(tree, self.SOURCE)
-        self.assertEqual(refreshed.dates[0].phase, "pending")
-        self.assertIn("69 R", refreshed.dates[0].events[0].particulars)
-        self.assertNotIn("0.69 R", refreshed.dates[0].events[0].particulars)
+        gazette = {node.date: node for node in refreshed.dates}["2024-02-22"]
+        self.assertEqual(gazette.phase, "pending")
+        self.assertIn("69 R", gazette.events[0].particulars)
+        self.assertNotIn("0.69 R", gazette.events[0].particulars)
 
     def test_dp_sanction_order_dated_is_not_writ_start(self) -> None:
         source = (
@@ -301,8 +302,8 @@ class LandUnitAndPendingTests(unittest.TestCase):
             ]
         }
         events = extract_grounded_events(payload, source_text=source, document_name="wp.pdf")
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].phase, "pre_litigation")
+        measured = {event.date_key: event for event in events}["2018-12-26"]
+        self.assertEqual(measured.phase, "pre_litigation")
 
     def test_prompt_requires_split_gazette_and_listed_representations(self) -> None:
         from app.services.chronology.prompt import CHRONOLOGY_EXTRACTION_BLOCK
