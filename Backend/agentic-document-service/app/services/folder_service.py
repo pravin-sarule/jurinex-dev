@@ -48,6 +48,7 @@ from app.services.chronology import (
     load_or_empty,
     merge_into_tree,
     rebind_tree,
+    refresh_tree,
     report_from_extraction,
     save_tree,
 )
@@ -1756,6 +1757,7 @@ class FolderWorkflowService:
                     document_name="combined",
                 )
                 tree = merge_into_tree(tree, report.events)
+                tree = refresh_tree(tree, combined_text)
                 self._store_chronology(case_id, tree, folder_name=folder_name)
                 did_rebuild = True
                 log_run_report(
