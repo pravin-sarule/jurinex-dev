@@ -16,6 +16,7 @@ from .models import (
     normalize_source_role,
 )
 from .pages import pages_for_quote, split_into_pages
+from .sweep import sweep_events
 
 logger = logging.getLogger("agentic_document_service.chronology.extract")
 
