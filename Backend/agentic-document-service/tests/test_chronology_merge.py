@@ -154,6 +154,75 @@ class ExtractGroundingTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].phase, "correspondence")
 
+    def test_gazette_is_official_record_not_admitted(self) -> None:
+        source = (
+            "The declaration was published in the Official Gazette on 15.12.2017 "
+            "pursuant to Resolution No. 1850 dated 24.07.2017."
+        )
+        payload = {
+            "events": [
+                {
+                    "date": "15/12/2017",
+                    "title": "Declaration published in Official Gazette",
+                    "particulars": "The declaration was published in the Official Gazette.",
+                    "eventType": "notice",
+                    "phase": "pre_litigation",
+                    "sourceRole": "admitted",
+                    "sourceQuote": "published in the Official Gazette on 15.12.2017",
+                }
+            ]
+        }
+        events = extract_grounded_events(payload, source_text=source, document_name="wp.pdf")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].source_role, "official")
+
+    def test_section_31_notification_is_impugned_not_court_finding(self) -> None:
+        source = (
+            "The State Government issued the impugned notification dated 15.04.2025 "
+            "under Section 31(1) of the MRTP Act sanctioning the modified Draft Development Plan."
+        )
+        payload = {
+            "events": [
+                {
+                    "date": "15/04/2025",
+                    "title": "Government notification under Section 31(1)",
+                    "particulars": "The notification is challenged in this writ petition.",
+                    "eventType": "order",
+                    "phase": "order",
+                    "sourceRole": "court",
+                    "disputed": True,
+                    "sourceQuote": "impugned notification dated 15.04.2025 under Section 31(1)",
+                }
+            ]
+        }
+        events = extract_grounded_events(payload, source_text=source, document_name="wp.pdf")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].source_role, "impugned")
+
+    def test_verification_is_not_treated_as_filing(self) -> None:
+        source = (
+            "I, Mirza Ashraf Ali Baig, do hereby solemnly affirm and verify "
+            "that the contents of this petition are true. DATE: 26.05.2025."
+        )
+        payload = {
+            "events": [
+                {
+                    "date": "26/05/2025",
+                    "title": "Verified and Filed",
+                    "particulars": "The writ petition was verified and filed.",
+                    "eventType": "filing",
+                    "phase": "institution",
+                    "sourceRole": "petitioner",
+                    "sourceQuote": "solemnly affirm and verify that the contents of this petition are true. DATE: 26.05.2025",
+                }
+            ]
+        }
+        events = extract_grounded_events(payload, source_text=source, document_name="wp.pdf")
+        self.assertEqual(len(events), 1)
+        self.assertNotIn("filed", events[0].title.lower())
+        self.assertIn("verif", events[0].title.lower())
+        self.assertNotEqual(events[0].phase, "institution")
+
 
 class MergeUniqueDateTests(unittest.TestCase):
     def test_same_date_appears_once_with_combined_summary(self) -> None:
