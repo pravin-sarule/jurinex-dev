@@ -57,6 +57,12 @@ _DP_INSTRUMENT = re.compile(
     r"under section\s*31|sanctioning the|development plan",
     re.I,
 )
+_STANDOVER_MARK = re.compile(
+    r"stand\s*over|stood\s*over|next\s+(?:date|listing|hearing)|"
+    r"(?:re)?list(?:ed)?\s+on|adjourn",
+    re.I,
+)
+_PROPER_NOUN = re.compile(r"\b[A-Z][a-z]{5,}(?:nagar|bagh|baug|pur|wadi|gaon|abad)\b")
 
 
 def _blob(event: GroundedEvent) -> str:
