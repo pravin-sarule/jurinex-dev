@@ -124,6 +124,9 @@ def grid_table(
     if lowered == ["date", "page", "event"]:
         preferred = [11, 8, max(12, width - 10 - 11 - 8)]
         mins = [11, 6, 10]
+    elif lowered == ["reason", "count"]:
+        preferred = [max(22, width - 14), 6]
+        mins = [18, 5]
     elif lowered == ["date", "phase", "event"]:
         preferred = [11, 14, max(12, width - 10 - 11 - 14)]
         mins = [11, 8, 10]
