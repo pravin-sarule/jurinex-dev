@@ -12,6 +12,12 @@ class ChronologyEvent(BaseModel):
     eventType: str = "other"
     sourceDocument: str = ""
     sourceQuote: str = ""
+    forum: str = ""
+    caseNumber: str = ""
+    sourcePage: str = ""
+    exhibit: str = ""
+    sourceRole: str = ""
+    disputed: bool = False
 
 
 class ChronologyDateNode(BaseModel):

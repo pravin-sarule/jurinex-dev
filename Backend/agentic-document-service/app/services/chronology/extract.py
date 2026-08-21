@@ -6,22 +6,21 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .dates import parse_date
+from .dates import ParsedDate, parse_date
 from .grounding import date_in_source, quote_in_source
-from .models import GroundedEvent, normalize_event_type, normalize_phase
+from .models import (
+    GroundedEvent,
+    normalize_event_type,
+    normalize_phase,
+    normalize_source_role,
+)
 
 logger = logging.getLogger("agentic_document_service.chronology.extract")
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _MAX_SUMMARY_SENTENCES = 5
-
-
-@dataclass(slots=True)
-class GroundingReport:
-    events: list[GroundedEvent]
-    kept: int
-    dropped: int
-    reasons: dict[str, int] = field(default_factory=dict)
+_BLANK_DATES = frozenset({"", "undated", "unknown", "n/a", "na", "none", "null"})
+_PAGE_MARK = re.compile(r"^(?:p(?:age)?\.?\s*)?(\d{1,4})$", re.I)
 
 
 def _as_str(value: Any) -> str:
@@ -30,6 +29,13 @@ def _as_str(value: Any) -> str:
     if isinstance(value, (str, int, float)):
         return str(value).strip()
     return ""
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = _as_str(value).lower()
+    return text in {"true", "1", "yes", "disputed"}
 
 
 def _clip_particulars(text: str) -> str:
@@ -54,6 +60,57 @@ def _event_dicts(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _year_not_on_record(year: int) -> ParsedDate:
+    return ParsedDate(
+        key=f"{year:04d}",
+        display=f"{year} (date not on record)",
+        precision="year",
+        year=year,
+    )
+
+
+def parse_event_date(item: dict[str, Any]) -> ParsedDate | None:
+    """Day-first parse; year-only when the model marks the day as not on record."""
+    raw = _as_str(item.get("date") or item.get("eventDate") or item.get("event_date"))
+    if raw.lower() not in _BLANK_DATES:
+        parsed = parse_date(raw)
+        if parsed:
+            return parsed
+    year_raw = _as_str(
+        item.get("year") or item.get("approximateYear") or item.get("undatedYear")
+    )
+    year_parsed = parse_date(year_raw) if year_raw else None
+    if year_parsed is None and raw.lower() in _BLANK_DATES:
+        return None
+    if year_parsed and year_parsed.precision == "year":
+        return _year_not_on_record(year_parsed.year)
+    if year_parsed:
+        return year_parsed
+    return None
+
+
+def _source_page(raw: Any) -> str:
+    text = _as_str(raw)
+    if not text:
+        return ""
+    match = _PAGE_MARK.fullmatch(text.replace(",", ""))
+    if match:
+        return match.group(1)
+    # Allow "54" or "p. 54" only — never a narrative page guess.
+    digits = re.sub(r"\D+", "", text)
+    if digits and text.lower() in {digits, f"p.{digits}", f"p. {digits}", f"page {digits}"}:
+        return digits
+    return ""
+
+
+@dataclass(slots=True)
+class GroundingReport:
+    events: list[GroundedEvent]
+    kept: int
+    dropped: int
+    reasons: dict[str, int] = field(default_factory=dict)
+
+
 def extract_grounded_report(
     payload: Any,
     *,
@@ -68,7 +125,7 @@ def extract_grounded_report(
         reasons[reason] = reasons.get(reason, 0) + 1
 
     for item in _event_dicts(payload):
-        parsed = parse_date(item.get("date") or item.get("eventDate") or item.get("event_date"))
+        parsed = parse_event_date(item)
         title = _as_str(item.get("title") or item.get("event") or item.get("heading"))
         particulars = _clip_particulars(
             item.get("particulars") or item.get("summary") or item.get("description") or title
@@ -85,6 +142,7 @@ def extract_grounded_report(
         if not date_in_source(parsed, source_text):
             _drop("date_not_in_document")
             continue
+        disputed = _as_bool(item.get("disputed"))
         event_type = normalize_event_type(item.get("eventType") or item.get("event_type"))
         phase = normalize_phase(item.get("phase"), event_type)
         out.append(
@@ -98,6 +156,15 @@ def extract_grounded_report(
                 phase=phase,
                 source_document=document_name,
                 source_quote=quote[:500],
+                forum=_as_str(item.get("forum") or item.get("court"))[:160],
+                case_number=_as_str(item.get("caseNumber") or item.get("case_number"))[:120],
+                source_page=_source_page(item.get("sourcePage") or item.get("source_page") or item.get("page")),
+                exhibit=_as_str(item.get("exhibit") or item.get("exhibitNo") or item.get("exhibit_no"))[:80],
+                source_role=normalize_source_role(
+                    item.get("sourceRole") or item.get("source_role"),
+                    disputed=disputed,
+                ),
+                disputed=disputed,
             )
         )
     dropped = sum(reasons.values())

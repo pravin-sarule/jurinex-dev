@@ -103,6 +103,12 @@ def merge_events(existing: ChronologyTree | None, incoming: list[GroundedEvent])
                         phase=node.phase or EVENT_TYPE_TO_PHASE.get(inferred_type, "other"),
                         source_document=item.sourceDocument,
                         source_quote=item.sourceQuote,
+                        forum=item.forum,
+                        case_number=item.caseNumber,
+                        source_page=item.sourcePage,
+                        exhibit=item.exhibit,
+                        source_role=item.sourceRole,
+                        disputed=bool(item.disputed),
                     )
                 )
         for name in existing.sourceDocuments:
@@ -129,6 +135,12 @@ def merge_events(existing: ChronologyTree | None, incoming: list[GroundedEvent])
                         eventType=item.event_type,
                         sourceDocument=item.source_document,
                         sourceQuote=item.source_quote,
+                        forum=item.forum,
+                        caseNumber=item.case_number,
+                        sourcePage=item.source_page,
+                        exhibit=item.exhibit,
+                        sourceRole=item.source_role,
+                        disputed=item.disputed,
                     )
                     for item in group
                 ],
