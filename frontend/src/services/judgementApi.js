@@ -69,8 +69,8 @@ export const judgementApi = {
    * pleaded in the filing and research precedents for each ground).
    * No search spend happens here.
    */
-  analyze({ text, fileRef, mode = 'issues', queryStyle = 'simple' } = {}) {
-    return postJson('/api/v1/analyze', { caseInput: { text: text || null, fileRef: fileRef || null }, mode, queryStyle });
+  analyze({ text, fileRef, mode = 'issues', queryStyle = 'simple', role = null } = {}) {
+    return postJson('/api/v1/analyze', { caseInput: { text: text || null, fileRef: fileRef || null }, mode, queryStyle, role: role || null });
   },
 
   /**
@@ -79,8 +79,8 @@ export const judgementApi = {
    * page-numbered chunks) from the agentic document service, so suggested
    * issues come back with 'file, page N' source references.
    */
-  analyzeCase(caseId, text = '', mode = 'issues', queryStyle = 'simple') {
-    return postJson('/api/v1/analyze/case', { caseId, text: text || null, mode, queryStyle });
+  analyzeCase(caseId, text = '', mode = 'issues', queryStyle = 'simple', role = null) {
+    return postJson('/api/v1/analyze/case', { caseId, text: text || null, mode, queryStyle, role: role || null });
   },
 
   /**
@@ -89,8 +89,8 @@ export const judgementApi = {
    * documents and the lawyer's stated objective (required) drives PROPOSED
    * grounds; the identical search pipeline then runs on them.
    */
-  analyzeCaseFresh(caseId, objective, queryStyle = 'simple') {
-    return postJson('/api/v1/analyze/case/fresh', { caseId, objective, queryStyle });
+  analyzeCaseFresh(caseId, objective, queryStyle = 'simple', role = null) {
+    return postJson('/api/v1/analyze/case/fresh', { caseId, objective, queryStyle, role: role || null });
   },
 
   /**
@@ -98,7 +98,7 @@ export const judgementApi = {
    * PDF/DOCX/TXT documents + an optional description. All documents are
    * analysed together as a single matter.
    */
-  async analyzeUpload(files, text = '', mode = 'issues', title = '', queryStyle = 'simple') {
+  async analyzeUpload(files, text = '', mode = 'issues', title = '', queryStyle = 'simple', role = null) {
     const list = Array.isArray(files) ? files : [files];
     const form = new FormData();
     list.forEach((f) => form.append('files', f));
@@ -106,6 +106,7 @@ export const judgementApi = {
     form.append('mode', mode);
     if (title) form.append('title', title);
     form.append('queryStyle', queryStyle);
+    if (role) form.append('role', role);
     let response;
     try {
       response = await fetch(`${JUDGEMENT_SERVICE_URL}/api/v1/analyze/upload`, {
@@ -242,6 +243,21 @@ export const judgementApi = {
     doctypes = '', fromdate = '', todate = '', sortby = 'relevance', pagenum = 0,
   } = {}) {
     return postJson('/api/v1/advanced-search', {
+      query, title, cite, author, bench, doctypes, fromdate, todate, sortby, pagenum,
+    });
+  },
+
+  /**
+   * Local judgment library search — POST /api/v1/local-search. Same
+   * criteria and response shape as advancedSearch, but served from the
+   * Elasticsearch mirror of every judgment already fetched (same docIds
+   * as Indian Kanoon) — zero IK spend.
+   */
+  localSearch({
+    query = '', title = '', cite = '', author = '', bench = '',
+    doctypes = '', fromdate = '', todate = '', sortby = 'relevance', pagenum = 0,
+  } = {}) {
+    return postJson('/api/v1/local-search', {
       query, title, cite, author, bench, doctypes, fromdate, todate, sortby, pagenum,
     });
   },

@@ -25,6 +25,37 @@ _ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 # signal valid in the formula — it just contributes nothing until it
 # turns on. Selected via SCORING_PHASE, overridable per-key with
 # SCORING_WEIGHTS_JSON so tuning never needs a redeploy.
+# Judgment-level ranking for the Elasticsearch paragraph layer. All
+# components are normalized to [0, 1] before weighting, so these express
+# RELATIVE importance, not magic magnitudes:
+#   bm25       — the judgment-level BM25 relevance (normalized by max score)
+#   proximity  — how tightly the query's phrases co-occur (same paragraph =
+#                1.0, decaying with the paragraph span that covers them all)
+#   coverage   — share of query phrases the judgment actually contains
+#                (only < 1.0 in flexible mode; strict requires all)
+#   section    — the query's section numbers appear in the judgment's
+#                extracted sections metadata
+#   para_type  — evidence paragraphs typed as reasoning/ratio outrank
+#                facts/arguments (types indexed only when reliably known)
+ES_RANK_WEIGHT_DEFAULTS: dict[str, float] = {
+    "bm25": 0.40,
+    "proximity": 0.30,
+    "coverage": 0.15,
+    "section": 0.10,
+    "para_type": 0.05,
+}
+# Paragraph-type value used by the para_type component; unknown/empty types
+# score neutral (0.5) — never invented, only rewarded when reliably present.
+ES_PARA_TYPE_VALUE: dict[str, float] = {
+    "court_reasoning": 1.0,
+    "analysis_of_law": 1.0,
+    "ratio": 1.0,
+    "conclusion": 0.9,
+    "order": 0.8,
+    "facts": 0.3,
+    "arguments": 0.3,
+}
+
 PHASE_WEIGHT_PRESETS: dict[int, dict[str, float]] = {
     1: {"semantic": 0.70, "keyword": 0.30, "authority": 0.0, "good_law": 0.0, "party": 0.0, "fact": 0.0},
     2: {"semantic": 0.40, "keyword": 0.15, "authority": 0.20, "good_law": 0.10, "party": 0.15, "fact": 0.0},
@@ -56,11 +87,12 @@ class Settings(BaseSettings):
     # query generation runs ~12×/analyze, so it stays on a strong flash.
     # Primary Gemini jobs (classify/extract/verifier/summaries) keep
     # gemini_model.
-    # 2026-08-14 (user decision, supersedes the 3.1-pro pin): extraction on
-    # FLASH — stage-1 cost drops ~₹36 → ~₹3 per analyze; flip back to
-    # "gemini-3.1-pro-preview" if extraction quality needs the pro model.
-    gemini_fallback_model: str = "gemini-3.6-flash"
-    gemini_keyword_fallback_model: str = "gemini-3.6-flash"
+    # 2026-08-19 (user decision, supersedes the 3.6-flash pick): EVERY
+    # Gemini job on 2.5-flash — 3.6-flash lists at 2.5× the price
+    # ($0.75/$3.75 vs $0.30/$2.50 per 1M). Flip back per-model via env if
+    # extraction quality needs a stronger tier.
+    gemini_fallback_model: str = "gemini-2.5-flash"
+    gemini_keyword_fallback_model: str = "gemini-2.5-flash"
     gemini_embedding_model: str = "models/gemini-embedding-001"
     embedding_dim: int = 768
 
@@ -93,13 +125,37 @@ class Settings(BaseSettings):
     verifier_context_cache: bool = True
     judgement_verifier_claude_model: str = "claude-sonnet-5"
     # Concurrent verifier calls PER ISSUE. Sized so the full-doc top-N
-    # verifies in ONE wave (two sequential waves used to dominate search
-    # latency); issues each get their own semaphore, so total concurrency
-    # is this × selected issues.
+    # verifies concurrently; issues each get their own semaphore, so total
+    # concurrency is this × selected issues. NOTE: since the wave early-stop
+    # (verifier_wave_size below), reads+verifies run in sequential waves —
+    # a hard issue that never early-stops trades some wall time for the
+    # early-stop savings on easy issues.
     verifier_concurrency: int = 12
+    # ── Verifier token-cost controls (2026-08-20) — the verifier is ~80% of
+    # AI spend, so each lever targets it without touching surfaced quality:
+    # 1) Relevance-focused doc slice: instead of a blind 22k-char head, send
+    #    head (parties/charges) + windows around the issue's own terms +
+    #    intact tail (operative order) inside a smaller budget. The kill
+    #    gates read exactly these regions — a smaller budget loses noise.
+    verifier_doc_budget: int = Field(default=14000, ge=2000,
+                                     validation_alias="VERIFIER_DOC_BUDGET")
+    verifier_evidence_slicing: bool = True
+    # 2) Semantic floor: candidates scoring below this embedding similarity
+    #    virtually never verify usable — skip their read+verify spend
+    #    entirely (top-4 by rank always survive; 0 disables).
+    verifier_semantic_floor: float = Field(default=0.30,
+                                           validation_alias="VERIFIER_SEMANTIC_FLOOR")
+    # 3) Wave early-stop: read+verify in waves; once an issue already has
+    #    early_stop_results usable judgments, the remaining candidates are
+    #    neither fetched (IK ₹) nor verified (tokens). 0 disables.
+    verifier_wave_size: int = Field(default=6, validation_alias="VERIFIER_WAVE_SIZE")
+    verifier_early_stop_results: int = Field(
+        default=5, validation_alias="VERIFIER_EARLY_STOP_RESULTS")
     # Web-grounded good-law check (Gemini + Google Search tool) on report
     # views — detects overruling/reversal/SLP/stay that text alone cannot.
-    good_law_web_check: bool = True
+    # OFF by user decision 2026-08-19 (₹0.43 + ₹3.36 grounding per report
+    # view); flip GOOD_LAW_WEB_CHECK=true to re-enable.
+    good_law_web_check: bool = False
 
     @property
     def active_claude_model(self) -> str:
@@ -155,6 +211,60 @@ class Settings(BaseSettings):
 
     # --- Stores (all optional; service degrades gracefully) ---
     redis_url: str | None = None
+    # Elasticsearch — the LOCAL judgment library: every judgment fetched
+    # from Indian Kanoon is mirrored here as-is under the SAME docId, so
+    # keyword search over the accumulated corpus is free and paginates
+    # exactly like IK's advanced search.
+    elasticsearch_url: str | None = None
+    elasticsearch_username: str | None = None
+    elasticsearch_password: str | None = None
+    elastic_verify_certs: bool = False
+    elastic_request_timeout: int = 3
+    elastic_index: str = "ik_judgments"
+    # Exact-query memory: every IK search response is stored under its wire
+    # query — the SAME query never needs IK again, across restarts.
+    elastic_search_cache_index: str = "ik_search_cache"
+    # Paragraph-level search layer: judgments are ALSO indexed as legal
+    # chunks so multi-phrase queries can prefer co-occurrence in the same or
+    # nearby paragraphs over mentions scattered across a 200-page judgment.
+    elastic_paragraph_index: str = "ik_judgment_paragraphs"
+    # Candidate funnel (env ES_CANDIDATE_LIMIT / FINAL_RESULT_LIMIT): ES
+    # qualifies up to candidate_limit judgments, ranking trims to
+    # final_result_limit before Gemini verification.
+    es_candidate_limit: int = Field(default=30, validation_alias="ES_CANDIDATE_LIMIT")
+    final_result_limit: int = Field(default=10, validation_alias="FINAL_RESULT_LIMIT")
+    # Usability threshold for the IK fallback decision: ES results below
+    # this BM25 score don't count as usable (0 = any qualifying judgment is
+    # usable — BM25 magnitudes are corpus-dependent, so the default only
+    # requires qualification, never a magic number).
+    es_min_score: float = Field(default=0.0, validation_alias="ES_MIN_SCORE")
+    # Judgment-level ranking weights for the paragraph search layer —
+    # tunable via ES_RANK_WEIGHTS_JSON (partial overrides merge over these
+    # defaults, same convention as SCORING_WEIGHTS_JSON).
+    es_rank_weights_json: str | None = Field(default=None,
+                                             validation_alias="ES_RANK_WEIGHTS_JSON")
+
+    @property
+    def es_rank_weights(self) -> dict[str, float]:
+        weights = dict(ES_RANK_WEIGHT_DEFAULTS)
+        if self.es_rank_weights_json:
+            try:
+                overrides = json.loads(self.es_rank_weights_json)
+                weights.update({k: float(v) for k, v in overrides.items()
+                                if k in weights})
+            except (ValueError, TypeError):
+                logger.warning("ES_RANK_WEIGHTS_JSON invalid — using defaults")
+        return weights
+    # Library-first fetching: each issue's FIRST fetch round runs against
+    # the local library ONLY — Indian Kanoon is never consulted in that
+    # round. An issue whose library round yields at least library_first_min
+    # USABLE (verified) judgments is done at zero IK spend; fewer than that
+    # (including an empty library round) triggers ONE normal IK round as a
+    # top-up. 3 (user decision 2026-08-21): an issue needs 3 verified
+    # judgments from ES before Indian Kanoon is skipped. Tune via
+    # LIBRARY_FIRST_MIN.
+    library_first: bool = True
+    library_first_min: int = 3
     qdrant_url: str | None = None
     qdrant_api_key: str | None = None
     judgement_qdrant_collection: str = "judgement_segments_768"

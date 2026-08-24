@@ -83,6 +83,7 @@ from tools import (
     keyword_signal,
     llm_track_usage,
     merge_cost_ledger,
+    normalize_quotes,
     party_perspective,
     rerank,
     run_cost_log,
@@ -267,6 +268,31 @@ def _cache_aligned(prefix: str, task_prompt: str, extra: str = "") -> str:
     return f"{prefix}\n\n[TASK INSTRUCTIONS]\n{task_prompt}{extra}"
 
 
+# ─── User-locked client role (petitioner / respondent) ──────────────────────
+
+def _role_note(role: str | None) -> str:
+    """Extraction-prompt addendum when the user locked the client's side.
+    Empty when no role is chosen — behaviour identical to before."""
+    if role not in ("petitioner", "respondent"):
+        return ""
+    other = "respondent" if role == "petitioner" else "petitioner"
+    return (
+        f"\n\nCLIENT ROLE (locked by the user — overrides anything the material "
+        f"suggests): the client is the {role.upper()}. Frame EVERY ground and "
+        f"issue from the {role}'s side — the questions the {role} needs "
+        f"authority on, seeking outcomes that favour the {role} and defeat the "
+        f"{other} — and set perspective='{role}' on every item."
+    )
+
+
+def apply_client_role(issues: list[Issue], role: str | None) -> None:
+    """Deterministic backstop: a locked role NEVER depends on prompt
+    compliance — every issue's perspective is forced to it."""
+    if role in ("petitioner", "respondent"):
+        for issue in issues:
+            issue.perspective = role
+
+
 ISSUE_SPLIT_PROMPT = (
     "Act as an expert Indian legal researcher and advocate, equally at home "
             "in criminal, civil and commercial litigation. You receive the CLIENT'S "
@@ -340,17 +366,31 @@ def build_issue_split_agent() -> LlmAgent:
 # Default query style: quoted phrases + bare words (implicit AND).
 _KEYWORD_SYNTAX_SIMPLE = (
     "INDIAN KANOON SEARCH BEHAVIOUR:\n"
-    "- Space-separated words must ALL appear somewhere in the document (AND).\n"
-    "- \"Double-quoted phrases\" must appear verbatim — use quotes for section "
-    "references and settled doctrinal formulae.\n\n"
+    "- Space-separated words must ALL appear somewhere in the document (AND) — "
+    "every extra bare word SHRINKS the result set.\n"
+    "- \"Double-quoted phrases\" must appear verbatim in the judgment.\n\n"
+    "MANDATORY ANCHOR-QUERY FORMAT (every query, no exceptions):\n"
+    "  \"Section NNN\" + 1–2 \"quoted settled formulae\" + ONE bare outcome "
+    "word (quash / quashed / quashing / FIR) [+ at most ONE distinctive fact word]\n"
+    "- QUOTE every multi-word legal formula, and ONLY phrases courts actually "
+    "write: \"abuse of process\", \"mala fide\", \"ulterior motive\", "
+    "\"civil dispute given criminal colour\", \"inherent powers\". NEVER quote "
+    "a phrase you composed yourself — an invented quoted phrase matches nothing.\n"
+    "- NEVER leave a doctrinal formula unquoted — unquoted words scatter across "
+    "the judgment and destroy precision.\n"
+    "- HARD LIMIT: at most 5 units per query (a quoted phrase = one unit).\n"
+    "CORRECT (produce exactly this style):\n"
+    "   '\"Section 528\" \"mala fide\" \"ulterior motive\" quash FIR'\n"
+    "   '\"Section 482\" \"civil dispute given criminal colour\" quashing'\n"
+    "   '\"Section 482\" \"abuse of process\" \"civil dispute\"'\n"
+    "   '\"Section 138\" \"Negotiable Instruments\" \"vicarious liability\" quash'\n"
+    "WRONG (never produce):\n"
+    "   '\"Section 482\" CrPC mala fide intentions ulterior motive'  <- formulae unquoted, scattered AND-words\n"
+    "   '\"Section 528\" BNSS civil dispute criminal colour'  <- unquoted doctrine phrase\n"
+    "   '\"Section 482\" \"criminal proceedings\" \"pressurize withdrawal\" civil dispute'  <- invented quoted phrase\n\n"
     "PRODUCE:\n"
-    "1. anchor_queries (2–4): complete, high-precision queries a senior advocate "
-    "would type — each MUST combine a statutory hook with the doctrinal concept, "
-    "optionally plus ONE distinctive fact word. Examples:\n"
-    "   '\"Section 482\" quashing matrimonial dispute'\n"
-    "   '\"Section 138\" \"Negotiable Instruments\" director vicarious liability'\n"
-    "   '\"Section 34\" IPC common intention murder'\n"
-    "These are the queries that find the leading line of cases on the issue.\n"
+    "1. anchor_queries (2–4): each in the MANDATORY FORMAT above — the queries "
+    "that find the leading line of cases on the issue.\n"
 )
 
 # Opt-in "Advanced search": explicit Boolean AND/OR expressions.
@@ -764,19 +804,115 @@ def build_judgment_verifier_agent() -> LlmAgent:
     )
 
 
-_VERIFIER_DOC_BUDGET = 22000  # chars of judgment text per verification call
+_VERIFIER_DOC_BUDGET = 22000  # legacy cap (used when evidence slicing is off)
+
+
+def _verifier_doc_slice(text: str, keywords: KeywordSet, budget: int) -> str:
+    """Relevance-focused verifier input: HEAD (cause title, parties,
+    charges) + windows around the FIRST occurrences of the issue's own
+    terms in the middle + the INTACT TAIL (operative order). The kill gates
+    read exactly these regions — outcome from the tail, shelf/trigger from
+    the term windows — so a smaller budget sheds noise, not signal. Every
+    emitted segment is a VERBATIM substring, so the machine-checked
+    outcome-evidence rule still holds."""
+    budget = max(2000, int(budget))  # defence: a tiny/zero env value must
+    if len(text) <= budget:          # never blow up into the full text
+        return text
+    head_len, tail_len = 5000, 7000
+    if budget < head_len + tail_len + 2000:
+        head_len = tail_len = max(600, budget // 3)
+    middle = text[head_len:len(text) - tail_len]
+    terms: list[str] = []
+    for query in keywords.anchor_queries[:4]:
+        terms.extend(re.findall(r'"([^"]+)"', query))
+    terms.extend(keywords.doctrinal[:4])
+    terms.extend(keywords.statutory[:4])
+    spans: list[tuple[int, int]] = []
+    for term in terms:
+        term = term.strip()
+        if len(term) < 4:
+            continue
+        # IGNORECASE regex, never .lower(): case folding can CHANGE string
+        # length (e.g. 'İ' → 2 chars) and silently shift every window.
+        m = re.search(re.escape(term), middle, re.IGNORECASE)
+        if m:
+            spans.append((max(0, m.start() - 600),
+                          min(len(middle), m.start() + 900)))
+    spans.sort()
+    merged: list[list[int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    room = max(0, budget - head_len - tail_len - 200)
+    picked: list[str] = []
+    used = 0
+    for start, end in merged:
+        segment = middle[start:end]
+        if used + len(segment) > room:
+            continue  # an oversized cluster must not discard later windows
+        picked.append(segment)
+        used += len(segment)
+    if not picked and merged and room > 300:
+        # Every merged cluster was oversized — truncate the first to fit so
+        # the slice still carries term evidence instead of blind head+tail.
+        start, end = merged[0]
+        picked.append(middle[start:start + room])
+    if not picked:
+        # None of the issue's terms in the middle — classic head+tail shape.
+        return (text[:max(600, budget - tail_len)]
+                + "\n[... middle of judgment omitted ...]\n" + text[-tail_len:])
+    marker = "\n[... omitted ...]\n"
+    return (text[:head_len] + marker + marker.join(picked)
+            + marker + text[-tail_len:])
 
 
 # ─── Verifier fast path: direct Gemini call with CONTEXT CACHING ─────────────
 # The v3 verifier prompt (~5k tokens) is identical across every call of a
 # run (~12 per issue × all issues). Explicit context caching bills those
-# tokens once per TTL window at the cached rate instead of full price on
-# every call. Any failure degrades to the ADK agent path — never breaks.
+# tokens once at the cached rate instead of full price on every call.
+# LIFECYCLE IS TASK-SCOPED: created lazily on the run's first verifier
+# call, DELETED the moment the last active run finishes — storage bills for
+# the minutes the task actually ran, not the full TTL hour (the TTL stays
+# as the crash safety-net). Any failure degrades to the ADK agent path.
 _VERIFIER_CACHE_TTL_S = 3600
-_verifier_cache: dict[str, tuple[str, float]] = {}  # model -> (name, expires)
+# model -> (name, expires_ts, created_ts, stored_tokens)
+_verifier_cache: dict[str, tuple[str, float, float, int]] = {}
 _verifier_cache_lock: asyncio.Lock | None = None
 _verifier_cache_failed = False
+_verifier_cache_refs = 0  # active runs using the cache (single event loop)
 _direct_client = None
+
+
+def verifier_cache_acquire() -> None:
+    """A run that may verify judgments has started — hold the cache open."""
+    global _verifier_cache_refs
+    _verifier_cache_refs += 1
+
+
+async def verifier_cache_release() -> None:
+    """The run finished. When NO other run is active, delete the context
+    cache immediately and bill storage for its ACTUAL lifetime — the meter
+    stops at task end instead of running out the TTL."""
+    global _verifier_cache_refs
+    _verifier_cache_refs = max(0, _verifier_cache_refs - 1)
+    if _verifier_cache_refs:
+        return
+    for model, (name, _expires, created, tokens) in list(_verifier_cache.items()):
+        hours = max((time.time() - created) / 3600, 1 / 60)  # billing floor: 1 min
+        try:
+            await asyncio.to_thread(_genai_direct().caches.delete, name=name)
+            cache_storage_track(model, tokens, hours)
+            logger.info("[verifier] context cache deleted at task end (%s) — "
+                        "storage billed for %.1f min instead of the full hour",
+                        name, hours * 60)
+        except Exception as exc:
+            # Delete failed → the TTL cleans it up; bill the full window.
+            cache_storage_track(model, tokens, _VERIFIER_CACHE_TTL_S / 3600)
+            logger.warning("[verifier] cache delete failed (%s) — it expires "
+                           "by TTL instead", exc)
+        _verifier_cache.pop(model, None)
 
 
 def _genai_direct():
@@ -796,11 +932,11 @@ async def _verifier_cached_name(model: str) -> str | None:
     if _verifier_cache_lock is None:
         _verifier_cache_lock = asyncio.Lock()
     now = time.time()
-    name, expires = _verifier_cache.get(model, (None, 0.0))
+    name, expires, _created, _tokens = _verifier_cache.get(model, (None, 0.0, 0.0, 0))
     if name and now < expires - 120:
         return name
     async with _verifier_cache_lock:
-        name, expires = _verifier_cache.get(model, (None, 0.0))
+        name, expires, _created, _tokens = _verifier_cache.get(model, (None, 0.0, 0.0, 0))
         if name and now < expires - 120:
             return name
         try:
@@ -809,14 +945,13 @@ async def _verifier_cached_name(model: str) -> str | None:
                 config=genai_types.CreateCachedContentConfig(
                     system_instruction=JUDGMENT_VERIFIER_SYSTEM,
                     ttl=f"{_VERIFIER_CACHE_TTL_S}s"))
-            _verifier_cache[model] = (cache.name, now + _VERIFIER_CACHE_TTL_S)
-            # Cache STORAGE bills per 1M tokens per hour of TTL — put it on
-            # the bill of the run that created the cache (once per hour).
+            # Storage is billed at RELEASE (actual lifetime), not here.
             stored_tokens = int(getattr(getattr(cache, "usage_metadata", None),
                                         "total_token_count", 0) or 0)
-            cache_storage_track(model, stored_tokens, _VERIFIER_CACHE_TTL_S / 3600)
+            _verifier_cache[model] = (cache.name, now + _VERIFIER_CACHE_TTL_S,
+                                      now, stored_tokens)
             logger.info("[verifier] context cache ready (%s, %s tokens stored) — "
-                        "the system prompt now bills once per hour, not per call",
+                        "deleted automatically when the run finishes",
                         cache.name, f"{stored_tokens:,}")
             return cache.name
         except Exception as exc:
@@ -857,6 +992,88 @@ async def _verify_direct_cached(message: str) -> JudgmentVerification | None:
     except Exception as exc:
         logger.debug("[verifier] cached-path call failed (%s) — ADK fallback", exc)
         return None
+
+
+def apply_semantic_floor(ranked: list[Candidate], semantic: dict[str, float],
+                         floor: float, protect: int = 4) -> list[Candidate]:
+    """Skip candidates whose similarity score is below the floor — they
+    virtually never verify usable, so their read (₹) + verify (tokens)
+    spend is pure waste. The top `protect` by rank always survive so
+    scoring noise can never empty an issue. floor<=0 disables.
+
+    SCALE-ADAPTIVE: when the reranker degraded to lexical tf-cosine (its
+    embedding backend down), good candidates score ~0.15–0.25 — a fixed
+    0.30 floor would gut the pool. The effective floor is therefore capped
+    at half the pool's own best score, so it only ever cuts candidates that
+    are weak RELATIVE to this pool, whatever the scale."""
+    if floor <= 0 or not ranked:
+        return ranked
+    best = max((semantic.get(c.doc_id, 0.0) for c in ranked), default=0.0)
+    effective = min(floor, best * 0.5)
+    if effective <= 0:
+        return ranked
+    kept = [c for i, c in enumerate(ranked)
+            if i < protect or semantic.get(c.doc_id, 0.0) >= effective]
+    dropped = len(ranked) - len(kept)
+    if dropped:
+        logger.info("[verifier] semantic floor %.2f (effective %.2f) skipped %d "
+                    "hopeless candidate(s) — no read/verify spend on them",
+                    floor, effective, dropped)
+    return kept
+
+
+async def fetch_and_verify_waves(issue: Issue, context: CaseContext,
+                                 top: list[Candidate], keywords: KeywordSet,
+                                 semantic: dict[str, float],
+                                 ) -> dict[str, JudgmentVerification]:
+    """Read + verify in waves of verifier_wave_size, best-ranked first.
+    Once the issue already holds early_stop_results SURFACEABLE verdicts,
+    the remaining candidates are neither fetched nor verified — easy issues
+    stop early, hard issues still get the full list.
+
+    SURFACEABLE means the verdict will actually reach the user: non-reject,
+    its judge/semantic blend clears the YELLOW band floor, and — with a
+    locked client role — not contra (those are filtered from display).
+    Counting anything less would stop early on verdicts the user never
+    sees, silently shrinking results; that is why the raw non-reject count
+    is NOT used."""
+    settings = get_settings()
+    wave = max(1, settings.verifier_wave_size)
+    early = settings.verifier_early_stop_results
+    if early:
+        # An early-stopped round must always satisfy the library top-up
+        # threshold, or the two levers would fight (stop early, then pay
+        # for an IK top-up because the round looks thin).
+        early = max(early, settings.library_first_min)
+    judge_w = settings.relevance_judge_weight
+    verifications: dict[str, JudgmentVerification] = {}
+    surfaceable = 0
+    for start in range(0, len(top), wave):
+        batch = top[start:start + wave]
+        texts = await asyncio.gather(*(ik_client.fetch_doc_text(c.doc_id)
+                                       for c in batch))
+        for cand, text in zip(batch, texts):
+            cand.doc_text = text
+        batch_verdicts = await verify_judgments(issue, context, batch, keywords)
+        verifications.update(batch_verdicts)
+        for doc_id, verdict in batch_verdicts.items():
+            if verdict.verdict == "reject":
+                continue
+            if context.client_role and verdict.verdict == "contra":
+                continue  # locked role: contra never surfaces
+            ai = max(0.0, min(1.0, verdict.score / 100.0))
+            blend = min(1.0, (1 - judge_w) * semantic.get(doc_id, 0.0)
+                        + judge_w * ai)
+            if blend >= settings.band_yellow_min:
+                surfaceable += 1
+        remaining = len(top) - start - len(batch)
+        if early and surfaceable >= early and remaining > 0:
+            logger.info("[verifier] issue %s: EARLY STOP — %d surfaceable "
+                        "verdict(s) after %d of %d docs; %d never read or "
+                        "verified (tokens + doc fees saved)", issue.id,
+                        surfaceable, start + len(batch), len(top), remaining)
+            break
+    return verifications
 
 
 async def verify_judgments(issue: Issue, context: CaseContext,
@@ -919,10 +1136,18 @@ async def verify_judgments(issue: Issue, context: CaseContext,
                 reject_reason=("different statutory shelf — none of the issue's "
                                "provisions appear in the judgment text "
                                "(pre-triage, no verifier call spent)"))
-        if len(text) > _VERIFIER_DOC_BUDGET:
-            # keep the tail intact — the operative order lives there
-            text = (text[:_VERIFIER_DOC_BUDGET - 9000]
-                    + "\n[... middle of judgment omitted ...]\n" + text[-9000:])
+        budget = max(2000, get_settings().verifier_doc_budget)
+        if len(text) > budget:
+            if get_settings().verifier_evidence_slicing:
+                text = _verifier_doc_slice(text, keywords, budget)
+            else:
+                # Legacy blind head + intact tail — head+tail always fit the
+                # budget, so the output can never exceed it (or duplicate
+                # overlapping text on short documents).
+                tail = min(9000, budget // 2)
+                head = budget - tail
+                text = (text[:head]
+                        + "\n[... middle of judgment omitted ...]\n" + text[-tail:])
         pinpoint, _ref = find_pinpoint(cand, issue.issue, keywords)
         message = (
             issue_block
@@ -944,15 +1169,24 @@ async def verify_judgments(issue: Issue, context: CaseContext,
                 # prompt (billed once/hour, not per call). None → ADK path.
                 verdict = await _verify_direct_cached(message)
             if verdict is None:
-                try:
-                    out = await run_agent_once(build_judgment_verifier_agent(), message,
-                                               ["judgment_verification"])
-                    verdict = JudgmentVerification.model_validate(
-                        out.get("judgment_verification") or {})
-                except Exception:
-                    logger.exception("[verifier] doc %s failed for issue %s",
-                                     cand.doc_id, issue.id)
-                    return cand.doc_id, None
+                # Two attempts: flash occasionally falls into a repetition
+                # loop (an endless number array) whose truncated output
+                # fails JSON validation — a fresh sample usually escapes it.
+                for attempt in (1, 2):
+                    try:
+                        out = await run_agent_once(build_judgment_verifier_agent(), message,
+                                                   ["judgment_verification"])
+                        verdict = JudgmentVerification.model_validate(
+                            out.get("judgment_verification") or {})
+                        break
+                    except Exception:
+                        if attempt == 1:
+                            logger.warning("[verifier] doc %s attempt 1 failed for "
+                                           "issue %s — retrying once", cand.doc_id, issue.id)
+                            continue
+                        logger.exception("[verifier] doc %s failed for issue %s",
+                                         cand.doc_id, issue.id)
+                        return cand.doc_id, None
         return cand.doc_id, enforce_verifier_rules(verdict, cand.doc_text,
                                                    issue.perspective, shelf_patterns)
 
@@ -1145,6 +1379,7 @@ async def spot_issues(raw_text: str, context: CaseContext,
             "remains, return an empty list.\n"
             f"{listed}"
         )
+    role_note = _role_note(context.client_role)
     user = (
         f"CASE MATERIAL:\n{_budget_case_text(raw_text, _llm_budget() - 4000)}\n\n"
         f"STRUCTURED CONTEXT (already extracted and source-verified):\n"
@@ -1152,6 +1387,7 @@ async def spot_issues(raw_text: str, context: CaseContext,
         f"Procedural history: {context.procedural_history[:800]}\n"
         f"Relief sought: {context.relief_sought[:300]}"
         f"{covered_note}"
+        f"{role_note}"
     )
     if claude_available():
         result = await claude_parse(ISSUE_SPOTTER_SYSTEM, user, IssueSpotResult)
@@ -1182,7 +1418,7 @@ async def spot_issues(raw_text: str, context: CaseContext,
     out = await run_agent_once(
         build_issue_split_agent(),
         _cache_aligned(_stage1_prefix(raw_text, context), ISSUE_SPLIT_PROMPT,
-                       extra=covered_note),
+                       extra=covered_note + role_note),
         ["issues"])
     issue_list = IssueList.model_validate(out.get("issues") or {"issues": []})
     spotted = issue_list.issues[:MAX_ISSUES]
@@ -1292,12 +1528,14 @@ async def extract_grounds(raw_text: str, context: CaseContext,
     automatic fallback. Returns (grounds-as-Issues, extraction metadata for
     display). Sets stage/forum/clarification on the context exactly like
     the issue spotter does."""
+    role_note = _role_note(context.client_role)
     user = (
         f"CASE MATERIAL:\n{_budget_case_text(raw_text, _llm_budget() - 4000)}\n\n"
         f"STRUCTURED CONTEXT (already extracted and source-verified):\n"
         f"Facts: {context.facts[:1500]}\n"
         f"Procedural history: {context.procedural_history[:800]}\n"
         f"Relief sought: {context.relief_sought[:300]}"
+        f"{role_note}"
     )
     result: GroundsExtractResult | None = None
     if claude_available():
@@ -1310,7 +1548,7 @@ async def extract_grounds(raw_text: str, context: CaseContext,
             out = await run_agent_once(
                 build_grounds_extract_agent(),
                 _cache_aligned(_stage1_prefix(raw_text, context),
-                               GROUNDS_EXTRACTOR_SYSTEM),
+                               GROUNDS_EXTRACTOR_SYSTEM, extra=role_note),
                 ["grounds_extract"])
             result = GroundsExtractResult.model_validate(out.get("grounds_extract") or {})
         except Exception:
@@ -1371,6 +1609,7 @@ async def extract_fresh(raw_text: str, context: CaseContext, objective: str,
     entire downstream pipeline (query generation, IK fan-out, verification,
     guardian, reports) runs unchanged — with the ground-anchored query and
     verifier extras applying to every proposed ground."""
+    role_note = _role_note(context.client_role)
     user = (
         f"CLIENT'S OBJECTIVE (the only instruction you follow):\n{objective[:2000]}\n\n"
         f"SOURCE DOCUMENTS OF THE CASE:\n{_budget_case_text(raw_text, _llm_budget() - 6000)}\n\n"
@@ -1378,6 +1617,7 @@ async def extract_fresh(raw_text: str, context: CaseContext, objective: str,
         f"Facts: {context.facts[:1500]}\n"
         f"Procedural history: {context.procedural_history[:800]}\n"
         f"Relief sought: {context.relief_sought[:300]}"
+        f"{role_note}"
     )
     async def _fresh_grounds() -> GroundsExtractResult:
         result: GroundsExtractResult | None = None
@@ -1393,7 +1633,7 @@ async def extract_fresh(raw_text: str, context: CaseContext, objective: str,
                     _cache_aligned(
                         _stage1_prefix(raw_text, context), FRESH_CASE_SYSTEM,
                         extra=("\n\nCLIENT'S OBJECTIVE (the only instruction "
-                               f"you follow):\n{objective[:2000]}")),
+                               f"you follow):\n{objective[:2000]}{role_note}")),
                     ["fresh_extract"])
                 result = GroundsExtractResult.model_validate(out.get("fresh_extract") or {})
             except Exception:
@@ -1623,12 +1863,103 @@ def _ground_note(issue: Issue) -> str:
     return "\n".join(lines)
 
 
+# ─── Deterministic anchor-format guard (the locked exemplar style) ───────────
+# '"Section NNN" "quoted settled formula" outcome-word' — enforced in CODE
+# for ANY model: prompt compliance alone proved unreliable (flash kept
+# emitting scattered bare-word formulae like 'civil dispute given criminal
+# colour' unquoted, or 6-word AND chains that strangle Indian Kanoon).
+
+_QUERY_UNIT_RE = re.compile(r'"[^"]*"|\S+')
+# Bare words that are FINE outside quotes: outcome stems, code names, and
+# section-number tokens — everything else bare counts toward a scattered run.
+_BARE_OK = {"quash", "quashed", "quashing", "fir", "bail", "dismissed",
+            "refused", "granted", "maintainable", "conviction", "acquittal",
+    "ipc", "crpc", "bnss", "bns", "bsa", "cpc", "ni", "act", "section"}
+
+
+def _anchor_format_ok(query: str) -> bool:
+    """≤5 units (a quoted phrase = one unit), and never 3+ consecutive bare
+    words outside the allowed set — that pattern is a doctrinal formula the
+    model forgot to quote, which IK then matches as scattered AND-words."""
+    units = _QUERY_UNIT_RE.findall(query or "")
+    if not units or len(units) > 5:
+        return False
+    run = 0
+    for unit in units:
+        if unit.startswith('"'):
+            run = 0
+            continue
+        if unit.lower().strip(".,()") in _BARE_OK or re.fullmatch(r"\d+[A-Za-z]?", unit):
+            run = 0
+            continue
+        run += 1
+        if run >= 3:
+            return False
+    return True
+
+
+def _repair_anchor(query: str, keywords: KeywordSet) -> str | None:
+    """Rebuild a non-compliant anchor deterministically in the exemplar
+    shape from parts we can trust: its own quoted section references (or
+    the first section number found bare) + the issue's first doctrinal-axis
+    phrase, quoted + one outcome word. Never invents a phrase."""
+    sections = re.findall(r'"Section[^"]*"', query)[:2]
+    if not sections:
+        m = re.search(r"Section\s+(\d+[A-Za-z]?)", query)
+        if m:
+            sections = [f'"Section {m.group(1)}"']
+    doctrine = next((t.strip().strip('"') for t in keywords.doctrinal if t.strip()), "")
+    if not sections or not doctrine:
+        return None
+    outcome_word = "quash"
+    for term in keywords.outcome:
+        first = (term.strip().split() or [""])[0].strip('"').lower()
+        if first:
+            outcome_word = first
+            break
+    parts = (sections + [f'"{doctrine}"', outcome_word])[:5]
+    return " ".join(parts)
+
+
+def _enforce_anchor_format(keywords: KeywordSet) -> KeywordSet:
+    """Every anchor either passes the format check or is deterministically
+    rebuilt; unrepairable ones are dropped rather than sent to IK broken."""
+    fixed: list[str] = []
+    for query in keywords.anchor_queries:
+        # Boolean (Advanced-search style) queries have their own grammar —
+        # the exemplar guard applies to the simple style only.
+        if re.search(r"\b(AND|OR|NOT|ANDD|ORR|NOTT)\b", query):
+            if query not in fixed:
+                fixed.append(query)
+            continue
+        if _anchor_format_ok(query):
+            if query not in fixed:
+                fixed.append(query)
+            continue
+        repaired = _repair_anchor(query, keywords)
+        if repaired and repaired not in fixed:
+            logger.info("[queries] reformatted non-compliant anchor: %r -> %r",
+                        query, repaired)
+            fixed.append(repaired)
+        else:
+            logger.info("[queries] dropped unrepairable anchor: %r", query)
+    if fixed:
+        keywords.anchor_queries = fixed
+    return keywords
+
+
 def _wire_queries(keywords: KeywordSet) -> KeywordSet:
     """Store and display anchor/contra queries in Indian Kanoon's EXACT wire
     syntax (ANDD / ORR / NOTT, parentheses stripped) — what the card shows is
     byte-for-byte what hits the API. The model writes readable AND/OR/NOT;
-    this deterministic pass converts it once, at generation time. Simple
-    keyword queries pass through unchanged."""
+    this deterministic pass converts it once, at generation time, after the
+    anchor-format guard has held every query to the exemplar shape. Simple
+    keyword queries pass through unchanged. Quote characters are normalized
+    FIRST (smart → ASCII) so the guard counts a curly-quoted phrase as one
+    unit instead of scattered bare words."""
+    keywords.anchor_queries = [normalize_quotes(q) for q in keywords.anchor_queries]
+    keywords.contra_queries = [normalize_quotes(q) for q in keywords.contra_queries]
+    _enforce_anchor_format(keywords)
     keywords.anchor_queries = [to_ik_operators(q) for q in keywords.anchor_queries]
     keywords.contra_queries = [to_ik_operators(q) for q in keywords.contra_queries]
     return keywords
@@ -1694,7 +2025,11 @@ async def generate_queries(issue: Issue, context: CaseContext,
             f"DOCTRINE: {issue.doctrine or 'not specified'}\n"
             f"STATUTORY HOOK: {issue.statutory_hook or 'not specified'}\n"
             f"PERSPECTIVE: {issue.perspective or 'neutral'}\n"
-            f"PROCEDURAL STAGE: {context.procedural_stage or 'not specified'}\n\n"
+            + (f"CLIENT ROLE (locked by the user): the client is the "
+               f"{context.client_role} — every anchor query MUST chase outcomes "
+               f"that favour the {context.client_role}.\n"
+               if context.client_role else "")
+            + f"PROCEDURAL STAGE: {context.procedural_stage or 'not specified'}\n\n"
             f"CASE SUMMARY (context only — never build queries from party facts):\n"
             f"{context.raw_case_summary[:1500]}"
             f"{ground_note}"
@@ -1709,7 +2044,11 @@ async def generate_queries(issue: Issue, context: CaseContext,
     keyword_message = (
         f"Case summary (context only):\n{context.raw_case_summary}\n\n"
         f"Legal issue to generate search terms for:\n{issue.issue}"
-        f"{ground_note}"
+        + (f"\n\nCLIENT ROLE (locked by the user): the client is the "
+           f"{context.client_role} — every anchor query MUST chase outcomes "
+           f"that favour the {context.client_role}."
+           if context.client_role else "")
+        + f"{ground_note}"
         f"{retry_note}"
     )
     out = await run_agent_once(build_keyword_extract_agent(style), keyword_message, ["keywords"])
@@ -1717,15 +2056,35 @@ async def generate_queries(issue: Issue, context: CaseContext,
         KeywordSet.model_validate(out.get("keywords") or {}), issue))
 
 
+async def safe_generate_queries(issue: Issue, context: CaseContext,
+                                **kwargs) -> KeywordSet:
+    """Containment wrapper for ANALYZE-time generation: one issue's
+    query-generation failure (LLM outage, exhausted quota — both Claude AND
+    the Gemini fallback down) must never fail the whole request. The
+    issue's card simply shows no queries, and /search/run regenerates them
+    live — where per-issue containment already exists (issue_fanout._safe)
+    and empty stored keywords trigger regeneration (_process_issue)."""
+    try:
+        return await generate_queries(issue, context, **kwargs)
+    except Exception:
+        logger.exception("[pipeline] query generation failed for issue %s — "
+                         "queries will regenerate at search time", issue.id)
+        return KeywordSet()
+
+
 # ─── Per-issue pipeline (Stage 2 → fetch → rerank → layers → score) ──────────
 
 async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
                        exclude: set[str] | None = None,
-                       page_map: dict[str, int] | None = None) -> dict[str, Any]:
+                       page_map: dict[str, int] | None = None,
+                       use_library: bool = True) -> dict[str, Any]:
     """One complete fetch → rerank → verify → score round for one issue.
-    ONE IK call per display query — the court filter (user's boxes, else
-    the env default) rides inside every query; repeat runs advance to the
-    next IK page via page_map."""
+    use_library=True (the first round) is a PURE-ES round: only the local
+    library is searched, Indian Kanoon spends nothing. use_library=False
+    forces Indian Kanoon (the fallback round when the library round
+    verified fewer than library_first_min judgments) — ONE IK call per
+    display query, with the court filter riding inside every query and
+    repeat runs advancing to the next IK page via page_map."""
     settings = get_settings()
 
     # RANKING only (no longer a fetch input): the case's own High Court
@@ -1734,9 +2093,14 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
         context.forum, f"{context.procedural_history} {context.raw_case_summary}")
 
     pool = await ik_client.fanout_and_fetch(keywords, exclude=exclude,
-                                            page_map=page_map)
+                                            page_map=page_map,
+                                            use_library=use_library,
+                                            library_only=use_library)
     if not pool:
-        return {"candidates": {}, "scored": []}
+        # An empty library-only round still reports fromLibrary so the
+        # issue-level fallback consults Indian Kanoon.
+        return {"candidates": {}, "scored": [],
+                "fromLibrary": bool(use_library and settings.library_first)}
 
     # Re-rank THIS issue's pool against THIS issue's text only.
     semantic = await rerank(issue.issue, pool)
@@ -1760,18 +2124,24 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
         top.append(cand)
         if len(top) >= settings.ik_full_doc_top_n:
             break
-    texts = await asyncio.gather(*(ik_client.fetch_doc_text(c.doc_id) for c in top))
-    for cand, text in zip(top, texts):
-        cand.doc_text = text
-
     # PROMPT-3 verification: is each fetched judgment USABLE for this issue?
     # Verified score blends into the semantic signal (and therefore bands);
     # KILL-check rejects go straight to RED; the verified outcome — never
     # the query role — decides support/contra. Verifier failure degrades to
-    # embedding-only ranking.
+    # embedding-only ranking. Cost controls: hopeless candidates are floored
+    # out before any spend, and reads+verifies run in early-stopping waves.
     verifications: dict[str, JudgmentVerification] = {}
     if settings.relevance_judge_enabled and settings.relevance_judge_weight > 0:
-        verifications = await verify_judgments(issue, context, top, keywords)
+        top = apply_semantic_floor(top, semantic, settings.verifier_semantic_floor)
+        verifications = await fetch_and_verify_waves(issue, context, top,
+                                                     keywords, semantic)
+    else:
+        # Degraded (no-judge) mode: bulk-read as before — pinpoints and
+        # lexical signals still want the texts.
+        texts = await asyncio.gather(*(ik_client.fetch_doc_text(c.doc_id)
+                                       for c in top))
+        for cand, text in zip(top, texts):
+            cand.doc_text = text
 
     weights = settings.phase_weights
     judge_w = settings.relevance_judge_weight
@@ -1838,6 +2208,11 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
     # (Supreme Court → High Courts → tribunals → district), top score first.
     # Contra follow clearly labelled; red-flagged (overruled) sink last.
     side_rank = {"support": 0, None: 1, "interim": 2, "contra": 3}
+    if context.client_role:
+        # The user LOCKED the client's side — adverse (contra) authority is
+        # excluded from the surfaced list entirely; only judgments whose
+        # verified outcome serves the chosen side (or neutral/interim) show.
+        surfaced = [r for r in surfaced if r.side != "contra"]
     court_by_id = {c.doc_id: c.court for c in pool}
     surfaced.sort(key=lambda r: (r.red_flag, side_rank.get(r.side, 1),
                                  forum_court_rank(court_by_id.get(r.doc_id, ""),
@@ -1847,6 +2222,9 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
     return {
         "candidates": {c.doc_id: c for c in pool},
         "scored": surfaced,
+        # True when this round's pool came from the local library (used to
+        # decide whether an IK top-up is owed on a thin result).
+        "fromLibrary": bool(pool) and all(c.from_library for c in pool),
     }
 
 
@@ -1855,11 +2233,13 @@ async def _process_issue(issue: Issue, context: CaseContext,
                          curated: bool = False,
                          query_style: str = "simple",
                          page_map: dict[str, int] | None = None) -> dict[str, Any]:
-    """Per-issue pipeline — ONE fetch round, one IK call per display query
-    (total calls == total displayed queries, by user demand). There is NO
-    automatic reformulation retry: an empty round returns an honest empty
-    list; re-running the search advances every query to its next IK page,
-    and editing the queries is the user's call.
+    """Per-issue pipeline — the first fetch round is ES-ONLY (zero Indian
+    Kanoon spend); IK runs only as the fallback round when the library
+    verified fewer than library_first_min judgments, at one IK call per
+    display query. There is NO automatic reformulation retry: an empty
+    fallback round returns an honest empty list; re-running the search
+    advances every query to its next IK page, and editing the queries is
+    the user's call.
     curated: the user checked/typed this issue's queries — they replaced
     the generated anchors upstream (apply_query_overrides), so the fetch is
     exactly their selection either way."""
@@ -1879,6 +2259,34 @@ async def _process_issue(issue: Issue, context: CaseContext,
         return {"issue": issue, "keywords": keywords, "candidates": {}, "scored": []}
 
     round1 = await _issue_round(issue, context, keywords, page_map=page_map)
+
+    # LIBRARY GUARANTEE (user decision 2026-08-21): the first round is
+    # ES-ONLY. An issue whose library round verified at least
+    # library_first_min (3) usable judgments never touches Indian Kanoon.
+    # Fewer than that — including an empty library round — and IK is
+    # consulted after all: one normal round (one call per query), excluding
+    # what the library already provided.
+    settings = get_settings()
+    if (round1.get("fromLibrary")
+            and len(round1["scored"]) < settings.library_first_min):
+        logger.info("[library] issue %s: library round verified only %d of %d "
+                    "required judgment(s) — falling back to Indian Kanoon",
+                    issue.id, len(round1["scored"]), settings.library_first_min)
+        round2 = await _issue_round(issue, context, keywords,
+                                    exclude=set(round1["candidates"].keys()),
+                                    page_map=page_map, use_library=False)
+        seen_ids = {r.doc_id for r in round1["scored"]}
+        combined = round1["scored"] + [r for r in round2["scored"]
+                                       if r.doc_id not in seen_ids]
+        return {
+            "issue": issue,
+            "keywords": keywords,
+            # Closed world: the guardian pool carries BOTH rounds' fetches.
+            "candidates": {**round1["candidates"], **round2["candidates"]},
+            "scored": combined[:MAX_RESULTS_PER_ISSUE],
+            "fromLibrary": False,
+        }
+
     if not round1["scored"]:
         logger.info("[pipeline] issue %s: no usable judgment this round — honest empty "
                     "(re-run fetches the next IK page%s)", issue.id,
@@ -2029,6 +2437,7 @@ def assemble_response(
                 title=cand.title,
                 court=cand.court,
                 year=cand.year,
+                fromLibrary=cand.from_library,
                 band=result.band,
                 score=result.score,
                 redFlag=result.red_flag,
@@ -2060,7 +2469,10 @@ def assemble_response(
             "results": [item.model_dump() for item in items],
             "candidateMeta": {
                 doc_id: {"title": c.title, "headline": c.headline,
-                         "court": c.court, "year": c.year, "numCitedby": c.num_citedby}
+                         "court": c.court, "year": c.year, "numCitedby": c.num_citedby,
+                         # ES engine explainability (internal debugging /
+                         # search-quality evaluation — not rendered).
+                         **({"esMeta": c.es_meta} if c.es_meta else {})}
                 for doc_id, c in candidates.items()
             },
         })
@@ -2093,6 +2505,7 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
                        mode: str = "issues",
                        objective: str | None = None,
                        query_style: str = "simple",
+                       client_role: str | None = None,
                        ) -> tuple[str, CaseContext, list[Issue], dict[str, Any]]:
     """Phase 1: Agentic Document Context Service (classify → extract via ADK
     SequentialAgent, then deterministic completeness + anti-invention guard)
@@ -2124,6 +2537,9 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
         ["case_context_draft"])
     draft = CaseContextDraft.model_validate(ex.get("case_context_draft") or {})
     context = verify_context_against_source(draft, source, classification.document_type)
+    # User-locked side rides on the context: extraction prompts, query
+    # generation, verification and surfacing all read it from here.
+    context.client_role = client_role if client_role in ("petitioner", "respondent") else None
     _t_ctx = time.perf_counter()
 
     issues: list[Issue] = []
@@ -2144,6 +2560,8 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
             issues, grounds_meta = await extract_fresh(raw_text, context, objective or "")
         else:
             issues = await spot_issues(raw_text, context)
+        # A locked role never depends on prompt compliance.
+        apply_client_role(issues, context.client_role)
         if pages:
             # Deterministic 'file, page N' attribution — never LLM-written.
             attribute_issue_sources(issues, pages)
@@ -2167,8 +2585,8 @@ async def analyze_case(raw_text: str, source_text: str | None = None,
                 return [f"Issue {j.id}: {j.title or j.issue[:70]}"
                         for j in issues if j.id != current.id]
             keyword_sets = await asyncio.gather(
-                *(generate_queries(i, context, sibling_issues=_siblings(i),
-                                   style=query_style) for i in issues))
+                *(safe_generate_queries(i, context, sibling_issues=_siblings(i),
+                                        style=query_style) for i in issues))
             for issue_obj, kw in zip(issues, keyword_sets):
                 # Card shows the 4 support queries (matching the lawyer-facing
                 # format); contra queries still run in the search itself.
@@ -2218,7 +2636,9 @@ def apply_query_overrides(keywords_map: dict[str, KeywordSet],
             continue  # custom issues generate live; nothing stored to override
         cleaned: list[str] = []
         for query in chosen:
-            text = (query or "").strip()
+            # User-typed queries arrive with whatever quotes the keyboard
+            # produced — normalize so phrase search actually fires.
+            text = normalize_quotes((query or "")).strip()
             if text and text not in cleaned:
                 cleaned.append(text)
         kw.anchor_queries = cleaned[:MAX_QUERIES_PER_ISSUE]
@@ -2260,10 +2680,16 @@ async def run_issue_search(session_id: str, context: CaseContext,
     for issue_key, sub in (session.get("ikQueryPages") or {}).items():
         if isinstance(sub, dict):
             page_map[str(issue_key)] = {str(w): int(p) for w, p in sub.items()}
-    fanout_results = await issue_fanout(issues, context, keywords_map,
-                                        curated_ids=curated_ids,
-                                        query_style=session.get("queryStyle", "simple"),
-                                        page_map=page_map)
+    # Verifier context cache is TASK-SCOPED: held open for this run, deleted
+    # the moment the last active run finishes (storage bills actual minutes).
+    verifier_cache_acquire()
+    try:
+        fanout_results = await issue_fanout(issues, context, keywords_map,
+                                            curated_ids=curated_ids,
+                                            query_style=session.get("queryStyle", "simple"),
+                                            page_map=page_map)
+    finally:
+        await verifier_cache_release()
     response = assemble_response(session_id, context, fanout_results)
     # Fold this run into the session's cumulative ledger, but print THIS
     # RUN's own bill as the table — the cumulative figures (analyze + every

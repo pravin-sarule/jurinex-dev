@@ -222,6 +222,51 @@ per request, the browser logs the same breakdown (`console.info`).
 
 ---
 
+## 3a. The ES legal engine (paragraph-level, primary search)
+
+Since 2026-08-20 the library is searched by a paragraph-aware legal engine —
+ES is the PRIMARY search, Indian Kanoon strictly the fallback for zero-hit
+queries.
+
+**Two indices** (auto-created on connect):
+- `ik_judgments` — one document per judgment, exactly as IK served it.
+- `ik_judgment_paragraphs` — the same judgments split into legal chunks
+  (`judgment_id`, `paragraph_no`, `text` + `text.english`, and regex-only
+  metadata: `sections`, `acts`, `citations`; `paragraph_type`/`case_number`
+  stay empty rather than invented). Backfill: `python reindex_paragraphs.py`
+  (idempotent — deterministic ids, create-only).
+
+**Two-step search** (`tools.es_legal_search`):
+1. **Qualify** at judgment level — STRICT mode: every quoted phrase /
+   citation is a `bool.must match_phrase` (all must be present — never OR);
+   FLEXIBLE mode: BM25 with phrase boosts and `minimum_should_match` for
+   natural-language queries. Court/date filters apply here.
+2. **Evidence + re-rank** at paragraph level — named phrase queries reveal
+   which paragraphs matched which phrases; the judgment score combines
+   (weights in `ES_RANK_WEIGHTS_JSON`, defaults in config):
+   `bm25 0.40 + proximity 0.30 + coverage 0.15 + section 0.10 + para_type
+   0.05`. Proximity = 1/(1 + smallest paragraph span covering all phrases)
+   — three phrases in one paragraph beat the same phrases scattered across
+   a 200-page judgment.
+
+**Query parser** (`parse_legal_query`): quoted phrases → required phrases;
+citations like `(2019) 4 SCC 123` and bare `Section 482` references are
+recognised and treated as phrases; remaining words are BM25 terms.
+
+**Funnel** (`ES_CANDIDATE_LIMIT=30` → rank → `FINAL_RESULT_LIMIT=10` →
+Gemini verification). `ES_MIN_SCORE` (default 0) is the usability threshold
+for the IK fallback decision — 4 good ES results are USED, never topped up
+from IK just because they're fewer than 10.
+
+**Wired into**: the pipeline's library-first fan-out (`es_wire_search` now
+runs strict engine searches) and `/api/v1/local-search` (keyword queries →
+engine with `searchMode: auto|strict|flexible`; field criteria
+title:/cite:/author:/bench: keep the field-level path). Explainability
+(`esScore`, `finalScore`, `matchedPhrases`, `matchedParagraphs`) rides on
+local-search results and session `candidateMeta.esMeta` — internal only.
+
+---
+
 ## 4. Cost visibility & per-user usage ledger
 
 - **Per run**: `[cost] COMPLETE COST — THIS SEARCH RUN — session …` shows

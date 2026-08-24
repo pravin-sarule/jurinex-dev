@@ -4,6 +4,7 @@ import {
   ArrowPathIcon,
   ArrowTopRightOnSquareIcon,
   CalendarDaysIcon,
+  CircleStackIcon,
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -129,6 +130,9 @@ function DoctypeFilter({ doctypes, onToggle, onToggleAll, openCats, onToggleOpen
  */
 export default function AdvancedSearchModal({ open, onClose }) {
   const [view, setView] = useState('form'); // form | results | doc
+  // Search source: 'ik' = Indian Kanoon (billed) | 'local' = the
+  // Elasticsearch library of every judgment already fetched (free).
+  const [source, setSource] = useState('ik');
   const [fields, setFields] = useState(EMPTY_FIELDS);
   const [sortby, setSortby] = useState('relevance');
   const [fromdate, setFromdate] = useState(''); // yyyy-mm-dd (native date input)
@@ -169,6 +173,7 @@ export default function AdvancedSearchModal({ open, onClose }) {
     fromdate,
     todate,
     sortby,
+    source,
   });
 
   const runSearch = async (pagenum = 0, criteria = null) => {
@@ -180,8 +185,9 @@ export default function AdvancedSearchModal({ open, onClose }) {
     setSearching(true);
     setError('');
     try {
-      const data = await judgementApi.advancedSearch({ ...params, pagenum });
-      if (data.cost) {
+      const call = params.source === 'local' ? judgementApi.localSearch : judgementApi.advancedSearch;
+      const data = await call({ ...params, pagenum });
+      if (data.cost && params.source !== 'local') {
         // Complete costing for the Advanced Search module — the service
         // console prints the same bill as a [cost] table per request.
         console.info(
@@ -212,7 +218,7 @@ export default function AdvancedSearchModal({ open, onClose }) {
     const t = setTimeout(() => runSearch(0, current), 700);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doctypes, sortby, fromdate, todate, view]);
+  }, [doctypes, sortby, fromdate, todate, source, view]);
 
   if (!open) return null;
 
@@ -273,6 +279,7 @@ export default function AdvancedSearchModal({ open, onClose }) {
     setFromdate('');
     setTodate('');
     setDoctypes(new Set());
+    setSource('ik');
     setResp(null);
     setError('');
     setDoc(null);
@@ -354,8 +361,16 @@ export default function AdvancedSearchModal({ open, onClose }) {
               </a>
             </div>
           </div>
-          <div className="mt-1 text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#64748B]">
-            {[item.court, prettyDate(item.date)].filter(Boolean).join(' · ')}
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#64748B]">
+            <span>{[item.court, prettyDate(item.date)].filter(Boolean).join(' · ')}</span>
+            {item.fromLibrary && (
+              <span
+                title="Served from JuriNex's own judgment library — no Indian Kanoon call"
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-[#E9F9F5] border border-[#BFE9DF] text-[length:calc(9.5px*var(--jnx-text-scale,1))] font-bold text-[#0E8371]"
+              >
+                <CircleStackIcon className="h-3 w-3" /> JuriNex
+              </span>
+            )}
           </div>
           {item.headline && (
             <p className="mt-2 text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#475569] leading-relaxed line-clamp-3">
@@ -450,6 +465,25 @@ export default function AdvancedSearchModal({ open, onClose }) {
             <div className="flex-1 min-h-0 overflow-y-auto px-5 sm:px-7 py-5">
               <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-5 items-start">
                 <section className="rounded-2xl border border-[#E5ECEB] bg-white p-5 shadow-sm">
+                  {/* Source: Indian Kanoon (billed) vs the local library (free) */}
+                  <div className="mb-4 inline-flex items-center gap-[3px] rounded-xl border border-[#E5ECEB] bg-[#F8FAFC] p-1">
+                    {[
+                      { key: 'ik', label: 'Indian Kanoon' },
+                      { key: 'local', label: 'My library (free)' },
+                    ].map(({ key, label }) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => setSource(key)}
+                        aria-pressed={source === key}
+                        className={`px-3.5 py-1.5 rounded-[9px] text-[length:calc(12px*var(--jnx-text-scale,1))] font-semibold transition-colors ${
+                          source === key ? 'bg-[#0F1B21] text-white' : 'text-[#64757C] hover:bg-[#EFF4F3]'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                   <h3 className="text-[length:calc(14px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21] mb-4">Search Criteria</h3>
                   <div className="space-y-3.5">
                     {CRITERIA_FIELDS.map(({ key, label, placeholder }) => (
@@ -614,6 +648,11 @@ export default function AdvancedSearchModal({ open, onClose }) {
                       ? 'No documents matched these criteria — adjust the filters or edit the search.'
                       : `Showing ${pageStart}–${pageEnd}${resp.total ? ` of ${resp.total.toLocaleString('en-IN')}` : ''}`}
                   </span>
+                  {resp.source === 'local_library' && (
+                    <span className="px-2 py-0.5 rounded-md bg-[#E9F9F5] border border-[#BFE9DF] text-[length:calc(11px*var(--jnx-text-scale,1))] font-bold text-[#0E8371]">
+                      From your library — free
+                    </span>
+                  )}
                   <code className="ml-auto max-w-full truncate text-[length:calc(11px*var(--jnx-text-scale,1))] text-[#93A2A7] bg-[#F8FAFC] border border-[#E5ECEB] rounded-md px-2 py-0.5" title={resp.formInput}>
                     {resp.formInput}
                   </code>

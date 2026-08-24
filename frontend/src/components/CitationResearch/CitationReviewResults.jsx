@@ -6,6 +6,7 @@ import {
   CalendarIcon,
   CheckCircleIcon,
   ChevronDownIcon,
+  CircleStackIcon,
   ChevronRightIcon,
   DocumentTextIcon,
   HomeIcon,
@@ -131,7 +132,15 @@ function CitationCard({ item, status, onView }) {
           <span className="flex items-start gap-1.5 text-[length:calc(11px*var(--jnx-text-scale,1))] text-[#64757C] min-w-[180px]">
             <HomeIcon className="h-3.5 w-3.5 text-[#93A2A7] mt-0.5" />
             <span><span className="uppercase text-[length:calc(9px*var(--jnx-text-scale,1))] font-semibold tracking-[0.08em] text-[#93A2A7] block leading-none mb-1">Source</span>
-              <span className="font-semibold text-[#25353C]">{item.court || '—'}</span></span>
+              <span className="font-semibold text-[#25353C]">{item.court || '—'}</span>
+              {item.fromLibrary && (
+                <span
+                  title="Served from JuriNex's own judgment library — no Indian Kanoon call"
+                  className="ml-1.5 inline-flex items-center gap-1 align-middle px-1.5 py-0.5 rounded-md bg-[#E9F9F5] border border-[#BFE9DF] text-[length:calc(9px*var(--jnx-text-scale,1))] font-bold text-[#0E8371]"
+                >
+                  <CircleStackIcon className="h-3 w-3" /> JuriNex
+                </span>
+              )}</span>
           </span>
           <span className="flex items-start gap-1.5 text-[length:calc(11px*var(--jnx-text-scale,1))] text-[#64757C] min-w-[100px]">
             <CalendarIcon className="h-3.5 w-3.5 text-[#93A2A7] mt-0.5" />

@@ -36,6 +36,12 @@ class CaseContext(BaseModel):
     needs_clarification: bool = False
     clarification_question: str | None = None
     source_confidence: Literal["high", "medium", "low"] = "medium"
+    # User-locked client side: 'petitioner'/'respondent' forces every
+    # ground/issue perspective, steers query outcomes to that side, and
+    # drops adverse (contra) judgments from the surfaced results. None =
+    # the system infers the side from the case material (behaviour before
+    # this field existed).
+    client_role: Literal["petitioner", "respondent"] | None = None
 
 
 class DocClassification(BaseModel):
@@ -329,6 +335,12 @@ class Candidate(BaseModel):
     source_url: str = ""
     matched_terms: list[str] = Field(default_factory=list)
     doc_text: str | None = None  # full text, fetched only for top-N
+    # True when this candidate came from the local JuriNex library (ES)
+    # instead of a billed Indian Kanoon search — shown on the card.
+    from_library: bool = False
+    # Explainability payload from the ES legal engine (internal — never
+    # user-facing): esScore, finalScore, matchedPhrases, matchedParagraphs.
+    es_meta: dict[str, Any] | None = None
 
 
 # ─── Scoring ─────────────────────────────────────────────────────────────────
@@ -377,6 +389,7 @@ class ResultItem(BaseModel):
     url: str = ""
     headline: str = ""                 # IK search snippet, shown on review cards
     matchedTerms: list[str] = Field(default_factory=list)  # queries that hit this doc
+    fromLibrary: bool = False          # served by the JuriNex library, not IK
     # support / contra / interim / None + the verbatim disposal phrase that
     # proves the outcome (substring-verified against the fetched text).
     side: str | None = None
@@ -447,6 +460,7 @@ class SearchRequest(BaseModel):
     caseInput: CaseInput
     mode: ResearchMode = "issues"
     queryStyle: QueryStyle = "simple"
+    role: Literal["petitioner", "respondent"] | None = None
 
 
 class RefineRequest(BaseModel):
@@ -488,6 +502,7 @@ class AnalyzeCaseRequest(BaseModel):
     userId: str | None = None
     mode: ResearchMode = "issues"
     queryStyle: QueryStyle = "simple"
+    role: Literal["petitioner", "respondent"] | None = None
 
 
 class AnalyzeCaseFreshRequest(BaseModel):
@@ -500,6 +515,7 @@ class AnalyzeCaseFreshRequest(BaseModel):
     objective: str
     userId: str | None = None
     queryStyle: QueryStyle = "simple"
+    role: Literal["petitioner", "respondent"] | None = None
 
 
 class CourtScope(BaseModel):
@@ -550,6 +566,10 @@ class AdvancedSearchRequest(BaseModel):
     todate: str = ""     # DD-MM-YYYY (YYYY-MM-DD also accepted)
     sortby: Literal["relevance", "mostrecent", "leastrecent"] = "relevance"
     pagenum: int = 0
+    # Local-library engine mode: 'strict' = every quoted phrase required;
+    # 'flexible' = BM25 + phrase boosts for natural-language queries;
+    # 'auto' picks strict when the query carries quoted phrases/citations.
+    searchMode: Literal["auto", "strict", "flexible"] = "auto"
 
 
 # ─── Per-citation report (VIEW → Report tab) ────────────────────────────────

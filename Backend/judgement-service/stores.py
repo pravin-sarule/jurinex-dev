@@ -10,6 +10,7 @@ and vault writes are no-ops. Nothing here may raise at import or boot.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -663,6 +664,282 @@ class DocDBStore:
 doc_db = DocDBStore()
 
 
+# ─── Elasticsearch (local judgment library — the IK mirror) ──────────────────
+
+class ElasticStore:
+    """Every judgment fetched from Indian Kanoon is mirrored here AS-IS,
+    under the SAME document id as IK (`tid`), so keyword search over the
+    accumulated corpus is free and paginates exactly like IK's advanced
+    search. Optional — when ES is absent, indexing/search degrade silently
+    and IK remains the only search source."""
+
+    def __init__(self) -> None:
+        self._client = None
+        self._failed = False
+        # Indexing is fired from executor THREADS (12 doc fetches can land
+        # together) — without this lock they all raced into the connect
+        # attempt before the failure latch was set, printing the warning
+        # once per thread.
+        self._connect_lock = threading.Lock()
+
+    def _get(self):
+        if self._client is not None or self._failed:
+            return self._client
+        with self._connect_lock:
+            if self._client is not None or self._failed:
+                return self._client
+            settings = get_settings()
+            if not settings.elasticsearch_url:
+                self._failed = True
+                return None
+            try:
+                # The per-request transport logs are INFO-noisy; failures
+                # surface through our own warning below.
+                logging.getLogger("elastic_transport.transport").setLevel(logging.WARNING)
+                from elasticsearch import Elasticsearch
+                kwargs: dict[str, Any] = {
+                    "request_timeout": settings.elastic_request_timeout,
+                    "verify_certs": settings.elastic_verify_certs,
+                    "ssl_show_warn": False,
+                }
+                if settings.elasticsearch_username and settings.elasticsearch_password:
+                    kwargs["basic_auth"] = (settings.elasticsearch_username,
+                                            settings.elasticsearch_password)
+                client = Elasticsearch(settings.elasticsearch_url, **kwargs)
+                # info() (unlike ping()) raises with the REAL cause — an
+                # auth 401 reads as an auth 401, not a vague "ping failed".
+                client.info()
+                self._client = client
+                self._ensure_index()
+                logger.info("[stores] Elasticsearch connected — judgment library "
+                            "index '%s'", settings.elastic_index)
+            except Exception as exc:
+                logger.warning("[stores] Elasticsearch unavailable (%s) — local "
+                               "judgment library disabled until restart", exc)
+                self._client = None
+                self._failed = True
+            return self._client
+
+    @property
+    def available(self) -> bool:
+        return self._get() is not None
+
+    def _ensure_index(self) -> None:
+        cache_index = get_settings().elastic_search_cache_index
+        if not self._client.indices.exists(index=cache_index):
+            self._client.indices.create(index=cache_index, mappings={"properties": {
+                "wire": {"type": "keyword"},
+                "pagenum": {"type": "integer"},
+                "docs": {"type": "object", "enabled": False},
+                "saved_at": {"type": "date"},
+            }})
+            logger.info("[stores] created Elasticsearch index '%s'", cache_index)
+        para_index = get_settings().elastic_paragraph_index
+        if not self._client.indices.exists(index=para_index):
+            # The paragraph layer: every judgment is ALSO indexed as legal
+            # chunks so multi-phrase queries can score same/nearby-paragraph
+            # co-occurrence above scattered mentions. `text` keeps the
+            # standard analyzer (exact word forms for phrase matching);
+            # `text.english` adds a stemmed subfield for flexible/BM25 mode.
+            # Metadata fields are keyword-typed for exact filtering and are
+            # filled only when reliably extracted — never invented.
+            self._client.indices.create(index=para_index, mappings={"properties": {
+                "judgment_id": {"type": "keyword"},
+                "paragraph_no": {"type": "integer"},
+                "title": {"type": "text"},
+                "docsource": {"type": "text",
+                              "fields": {"kw": {"type": "keyword"}}},
+                "publishdate": {"type": "date",
+                                "format": "yyyy-MM-dd||strict_date_optional_time",
+                                "ignore_malformed": True},
+                "case_number": {"type": "keyword"},
+                "bench": {"type": "text"},
+                "sections": {"type": "keyword"},
+                "acts": {"type": "keyword"},
+                "citations": {"type": "keyword"},
+                "paragraph_type": {"type": "keyword"},
+                "text": {"type": "text",
+                         "fields": {"english": {"type": "text",
+                                                "analyzer": "english"}}},
+            }})
+            logger.info("[stores] created Elasticsearch index '%s'", para_index)
+        index = get_settings().elastic_index
+        if self._client.indices.exists(index=index):
+            return
+        self._client.indices.create(index=index, mappings={"properties": {
+            "tid": {"type": "keyword"},
+            "title": {"type": "text"},
+            # `doc` = IK's own judgment HTML, stored verbatim (not searched);
+            # `text` = the stripped full text, the search field.
+            "doc": {"type": "text", "index": False},
+            "text": {"type": "text"},
+            "docsource": {"type": "text",
+                          "fields": {"kw": {"type": "keyword"}}},
+            "publishdate": {"type": "date",
+                            "format": "yyyy-MM-dd||strict_date_optional_time",
+                            "ignore_malformed": True},
+            "author": {"type": "text"},
+            "bench": {"type": "text"},
+            "numcites": {"type": "integer"},
+            "numcitedby": {"type": "integer"},
+            "casesCited": {"type": "object", "enabled": False},
+            "citedBy": {"type": "object", "enabled": False},
+        }})
+        logger.info("[stores] created Elasticsearch index '%s'", index)
+
+    def index_judgment(self, doc_id: str, body: dict[str, Any]) -> bool:
+        """Add one judgment under its IK docId — CREATE-only: a docId
+        already in the dataset is SKIPPED, never re-written (no duplicates,
+        no churn). Fire-and-forget from the fetch path — never raises."""
+        client = self._get()
+        if client is None or not doc_id:
+            return False
+        try:
+            client.index(index=get_settings().elastic_index, id=str(doc_id),
+                         op_type="create",
+                         document={k: v for k, v in body.items() if v is not None})
+            return True
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 409 or "version_conflict" in str(exc):
+                return False  # already in the dataset — duplicate skipped
+            logger.warning("[stores] ES index of doc %s failed (%s)", doc_id, exc)
+            return False
+
+    def update_judgment(self, doc_id: str, fields: dict[str, Any]) -> None:
+        """Best-effort partial merge (e.g. author/bench from /docmeta) onto
+        an already-indexed judgment. Missing doc → silently skipped."""
+        client = self._get()
+        if client is None or not doc_id:
+            return
+        try:
+            client.update(index=get_settings().elastic_index, id=str(doc_id),
+                          doc={k: v for k, v in fields.items() if v})
+        except Exception:
+            pass  # not indexed yet, or ES hiccup — nothing depends on this
+
+    def search_judgments(self, query: dict[str, Any], sort: list | None,
+                         pagenum: int, size: int = 10) -> dict[str, Any] | None:
+        """One page (`size` hits) of the library, IK-style: `from` walks
+        pages, highlights on `text` produce the headline snippet.
+        None = ES down."""
+        client = self._get()
+        if client is None:
+            return None
+        try:
+            return dict(client.search(
+                index=get_settings().elastic_index,
+                query=query,
+                sort=sort or ["_score"],
+                from_=max(0, pagenum) * size,
+                size=size,
+                highlight={"fields": {"text": {
+                    "fragment_size": 160, "number_of_fragments": 2}}},
+                source_excludes=["doc", "text"],
+                track_total_hits=True,
+            ))
+        except Exception as exc:
+            logger.warning("[stores] ES search failed (%s)", exc)
+            return None
+
+    def index_paragraphs(self, judgment_id: str,
+                         paragraphs: list[dict[str, Any]]) -> int:
+        """Bulk-add one judgment's chunks. Deterministic ids
+        (judgment_id:paragraph_no) + create-only make re-indexing a no-op —
+        no duplicate chunks, ever. Never raises."""
+        client = self._get()
+        if client is None or not judgment_id or not paragraphs:
+            return 0
+        try:
+            from elasticsearch.helpers import bulk
+            index = get_settings().elastic_paragraph_index
+            actions = [{
+                "_op_type": "create",
+                "_index": index,
+                "_id": f"{judgment_id}:{int(row.get('paragraph_no') or 0)}",
+                "_source": {k: v for k, v in row.items() if v not in (None, "", [])},
+            } for row in paragraphs]
+            ok, _errors = bulk(client, actions, raise_on_error=False,
+                               raise_on_exception=False)
+            return int(ok)
+        except Exception as exc:
+            logger.warning("[stores] ES paragraph indexing of %s failed (%s)",
+                           judgment_id, exc)
+            return 0
+
+    def search_paragraphs(self, query: dict[str, Any], size: int = 200,
+                          ) -> dict[str, Any] | None:
+        """Chunk-level search — returns raw hits (with matched_queries from
+        named clauses and text highlights) for judgment grouping upstream.
+        None = ES down."""
+        client = self._get()
+        if client is None:
+            return None
+        try:
+            return dict(client.search(
+                index=get_settings().elastic_paragraph_index,
+                query=query,
+                size=size,
+                source_includes=["judgment_id", "paragraph_no", "sections",
+                                 "acts", "paragraph_type"],
+                highlight={"fields": {"text": {
+                    "fragment_size": 160, "number_of_fragments": 1}}},
+                track_total_hits=True,
+            ))
+        except Exception as exc:
+            logger.warning("[stores] ES paragraph search failed (%s)", exc)
+            return None
+
+    def search_cache_put(self, wire: str, pagenum: int,
+                         docs: list[dict[str, Any]]) -> None:
+        """Remember one IK search response under its exact wire query —
+        the same query is then served from ES forever. Never raises."""
+        client = self._get()
+        if client is None or not docs:
+            return
+        try:
+            key = f"{hashlib.sha1(wire.encode()).hexdigest()}:{pagenum}"
+            client.index(index=get_settings().elastic_search_cache_index, id=key,
+                         document={"wire": wire, "pagenum": pagenum, "docs": docs,
+                                   "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                             time.gmtime())})
+        except Exception as exc:
+            logger.warning("[stores] ES search-cache put failed (%s)", exc)
+
+    def search_cache_get(self, wire: str) -> list[dict[str, Any]] | None:
+        """Every judgment IK ever returned for this exact wire query (all
+        remembered pages, in page order), or None when never asked."""
+        client = self._get()
+        if client is None:
+            return None
+        try:
+            resp = client.search(index=get_settings().elastic_search_cache_index,
+                                 query={"term": {"wire": wire}},
+                                 sort=[{"pagenum": {"order": "asc"}}], size=20)
+            hits = (resp.get("hits") or {}).get("hits") or []
+            if not hits:
+                return None
+            docs: list[dict[str, Any]] = []
+            for hit in hits:
+                docs.extend((hit.get("_source") or {}).get("docs") or [])
+            return docs
+        except Exception:
+            return None
+
+    def get_judgment(self, doc_id: str) -> dict[str, Any] | None:
+        """The stored judgment (incl. IK's raw HTML) by docId, or None."""
+        client = self._get()
+        if client is None or not doc_id:
+            return None
+        try:
+            hit = client.get(index=get_settings().elastic_index, id=str(doc_id))
+            return dict(hit.get("_source") or {})
+        except Exception:
+            return None
+
+
+elastic = ElasticStore()
+
+
 def store_health() -> dict[str, Any]:
     return {
         "cache": cache.backend,
@@ -670,4 +947,5 @@ def store_health() -> dict[str, Any]:
         "neo4j": neo4j_store.available,
         "postgres": postgres.available,
         "docDb": doc_db.available,
+        "elastic": elastic.available,
     }

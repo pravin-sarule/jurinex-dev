@@ -77,6 +77,7 @@ const { generateToken } = require('../utils/jwt');
 const crypto = require('crypto');
 const { collectDeviceInfo, lookupGeoLocation } = require('../utils/deviceInfo');
 const { createAndSendOTP, verifyOTP, sendPasswordSetEmail } = require('../services/otpService');
+const { syncContactToBrevo } = require('../services/brevoService');
 
 // ⚠️ TEMPORARY: skips email OTP on regular login (username/password only).
 // Set to false (or BYPASS_LOGIN_OTP=false in env) to restore OTP verification.
@@ -231,6 +232,9 @@ const registerSoloLawyer = async (req, res) => {
     // Assign free plan (non-blocking)
     assignFreePlanToUser(user.id).catch(() => {});
 
+    // Sync contact to Brevo list (non-blocking — triggers Welcome Email automation)
+    syncContactToBrevo(email, full_name);
+
     // Generate token and create device session (3-device limit + IP/browser metadata)
     const activeUser = await markUserActiveSession(user.id) || user;
     const token = await createDeviceSession(req, activeUser);
@@ -366,6 +370,9 @@ const registerFirm = async (req, res) => {
       // Assign free plan to firm admin (non-blocking)
       assignFreePlanToUser(adminUser.id).catch(() => {});
 
+      // Sync contact to Brevo list (non-blocking — triggers Welcome Email automation)
+      syncContactToBrevo(email, registering_advocate_name);
+
       // TODO: Send email to admin with credentials (tempPassword)
       // For now, we'll return it in response (remove in production)
       console.log(`[Firm Registration] Admin credentials for ${email}: Password: ${tempPassword}`);
@@ -445,6 +452,9 @@ const register = async (req, res) => {
 
     // Assign free plan (non-blocking)
     assignFreePlanToUser(user.id).catch(() => {});
+
+    // Sync contact to Brevo list (non-blocking — triggers Welcome Email automation)
+    syncContactToBrevo(email, username);
 
     const token = generateToken(user);
 
@@ -703,6 +713,9 @@ const firebaseGoogleSignIn = async (req, res) => {
       });
 
       console.log(`[GoogleSignIn] ✅ New Google user created: ${userEmail}`);
+
+      // Sync contact to Brevo list (non-blocking — triggers Welcome Email automation)
+      syncContactToBrevo(userEmail, username);
     } else {
       console.log(`[GoogleSignIn] ✅ Existing user found: ${userEmail}`);
       
@@ -1484,6 +1497,9 @@ const createFirmStaff = async (req, res) => {
       user_id: staffUser.id,
       role: 'STAFF'
     });
+
+    // Sync contact to Brevo list (non-blocking — triggers Welcome Email automation)
+    syncContactToBrevo(email, staffUser.username);
 
     res.status(201).json({
       success: true,

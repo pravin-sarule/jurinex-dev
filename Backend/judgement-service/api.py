@@ -22,11 +22,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from agents import (
     analyze_case,
+    apply_client_role,
     enrich_custom_issue,
     generate_case_summary,
     generate_citation_analysis,
-    generate_queries,
     run_issue_search,
+    safe_generate_queries,
     run_search_pipeline,
 )
 from auth import jwt_verification_enabled, resolve_user_id
@@ -50,7 +51,7 @@ from schemas import (
     SearchRequest,
     SearchResponse,
 )
-from stores import postgres, sessions, store_health
+from stores import elastic, postgres, sessions, store_health
 from tools import (
     IK_RATES_INR,
     band_for,
@@ -266,7 +267,8 @@ async def analyze(request: SearchRequest, http_request: Request) -> AnalyzeRespo
     raw_text = await asyncio.to_thread(_gather_case_text, request.caseInput.text,
                                        request.caseInput.fileRef)
     session_id, context, issues, grounds_meta = await analyze_case(
-        raw_text, mode=request.mode, query_style=request.queryStyle)
+        raw_text, mode=request.mode, query_style=request.queryStyle,
+        client_role=request.role)
     _tag_session(session_id, resolve_user_id(http_request))
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
@@ -299,7 +301,7 @@ async def analyze_from_case(request: AnalyzeCaseRequest, http_request: Request) 
 
     session_id, context, issues, grounds_meta = await analyze_case(
         llm_text, source_text=full_text, pages=pages, mode=request.mode,
-        query_style=request.queryStyle)
+        query_style=request.queryStyle, client_role=request.role)
     _tag_session(session_id, user_id, case_title or None, str(request.caseId))
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
@@ -341,7 +343,8 @@ async def analyze_fresh_case(request: AnalyzeCaseFreshRequest,
 
     session_id, context, issues, grounds_meta = await analyze_case(
         llm_text, source_text=full_text, pages=pages, mode="fresh",
-        objective=objective, query_style=request.queryStyle)
+        objective=objective, query_style=request.queryStyle,
+        client_role=request.role)
     _tag_session(session_id, user_id, case_title or None, str(request.caseId))
     return AnalyzeResponse(
         sessionId=session_id, caseContext=context, suggestedIssues=issues,
@@ -359,7 +362,8 @@ async def analyze_upload(http_request: Request,
                          text: str = Form(default=""),
                          mode: str = Form(default="issues"),
                          title: str = Form(default=""),
-                         queryStyle: str = Form(default="simple")) -> AnalyzeResponse:
+                         queryStyle: str = Form(default="simple"),
+                         role: str = Form(default="")) -> AnalyzeResponse:
     """One or more uploaded documents analysed together as a single matter.
     `files` is the multi-upload field; the legacy single `file` field still
     works. Every page keeps its own filename so issue source references
@@ -386,8 +390,10 @@ async def analyze_upload(http_request: Request,
         raise HTTPException(status_code=400, detail="Uploaded file produced no readable text")
     mode = mode if mode in ("issues", "grounds", "combined") else "issues"
     query_style = queryStyle if queryStyle in ("simple", "advanced") else "simple"
+    client_role = role if role in ("petitioner", "respondent") else None
     session_id, context, issues, grounds_meta = await analyze_case(
-        "\n\n---\n\n".join(parts), pages=pages, mode=mode, query_style=query_style)
+        "\n\n---\n\n".join(parts), pages=pages, mode=mode, query_style=query_style,
+        client_role=client_role)
     stem = (uploads[0].filename or "").rsplit(".", 1)[0] or None
     fallback = f"{stem} (+{len(uploads) - 1} more)" if stem and len(uploads) > 1 else stem
     _tag_session(session_id, resolve_user_id(http_request),
@@ -429,6 +435,8 @@ async def search_run(session_id: str, request: RunSearchRequest,
             *(enrich_custom_issue(i, context) for i in custom_issues)))
     if not chosen:
         raise HTTPException(status_code=400, detail="No issues selected and none provided")
+    # A locked role holds for run-time custom issues and legacy sessions too.
+    apply_client_role(chosen, context.client_role)
 
     # The user explicitly chose what to search — a pending clarification
     # no longer blocks (their own issues ARE the clarification).
@@ -507,8 +515,8 @@ async def add_session_issue(session_id: str, request: AddIssueRequest,
     next_id = max((i.id for i in suggested), default=0) + 1
     issue = await enrich_custom_issue(Issue(id=next_id, issue=text), context)
     siblings = [f"Issue {j.id}: {j.title or j.issue[:70]}" for j in suggested]
-    kw = await generate_queries(issue, context, sibling_issues=siblings,
-                                style=session.get("queryStyle", "simple"))
+    kw = await safe_generate_queries(issue, context, sibling_issues=siblings,
+                                     style=session.get("queryStyle", "simple"))
     issue.queries = list(kw.anchor_queries)
     session["suggestedIssues"] = [i.model_dump() for i in suggested] + [issue.model_dump()]
     session.setdefault("issueKeywords", {})[str(next_id)] = kw.model_dump()
@@ -1047,6 +1055,209 @@ async def advanced_search_doc(doc_id: str, http_request: Request) -> dict[str, A
             "cachedHits": cost_tracker["cached"],
             "totalInr": round(ik_total, 2),
         },
+    }
+
+
+# ─── Local judgment library (Elasticsearch mirror of fetched judgments) ─────
+
+def _iso_date(value: str, field: str) -> str:
+    """Either date form → yyyy-MM-dd for the ES publishdate range."""
+    v = value.strip()
+    m = _DATE_YMD.match(v)
+    if m:
+        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = _DATE_DMY.match(v)
+    if m:
+        return f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+    raise HTTPException(status_code=422, detail=f"{field} must be a date in DD-MM-YYYY form")
+
+
+def _es_court_clauses(doctypes: str) -> list[dict[str, Any]]:
+    """docsource filters mirroring IK doctype tokens (shared with the
+    pipeline's library-first fetch — tools.es_court_clauses)."""
+    from tools import es_court_clauses
+    return es_court_clauses(doctypes)
+
+
+async def _local_engine_search(request: AdvancedSearchRequest) -> dict[str, Any]:
+    """The paragraph-aware ES legal engine behind /local-search for keyword
+    queries: parse → qualify (strict/flexible) → paragraph evidence →
+    weighted re-rank → paginate. Response shape identical to the legacy
+    path so the popup renders it unchanged."""
+    from tools import es_legal_search, parse_legal_query
+    parsed = parse_legal_query(request.query)
+    mode = request.searchMode
+    if mode == "auto":
+        mode = "strict" if (parsed["phrases"] or parsed["citations"]) else "flexible"
+    fromdate_iso = (_iso_date(request.fromdate, "fromdate")
+                    if request.fromdate.strip() else None)
+    todate_iso = (_iso_date(request.todate, "todate")
+                  if request.todate.strip() else None)
+    ranked = await asyncio.to_thread(
+        es_legal_search, parsed, mode=mode, doctypes=request.doctypes,
+        fromdate_iso=fromdate_iso, todate_iso=todate_iso)
+    if request.sortby == "mostrecent":
+        ranked.sort(key=lambda d: d.get("publishdate") or "", reverse=True)
+    elif request.sortby == "leastrecent":
+        ranked.sort(key=lambda d: d.get("publishdate") or "9999")
+
+    pagenum = max(0, request.pagenum)
+    page = ranked[pagenum * 10:(pagenum + 1) * 10]
+    results = [{
+        "docId": d["tid"],
+        "title": d["title"],
+        "headline": d.get("headline") or "",
+        "court": d.get("docsource") or "",
+        "date": d.get("publishdate") or "",
+        "numCitedby": int(d.get("numcitedby") or 0),
+        "url": f"https://indiankanoon.org/doc/{d['tid']}/",
+        "fromLibrary": True,
+        # Explainability (internal/debug — the popup ignores unknown keys).
+        "esScore": d.get("esScore"),
+        "finalScore": d.get("finalScore"),
+        "matchedPhrases": d.get("matchedPhrases") or [],
+        "matchedParagraphs": d.get("matchedParagraphs") or [],
+    } for d in page]
+    total = len(ranked)
+    start = pagenum * 10 + 1 if results else 0
+    end = pagenum * 10 + len(results)
+    shown = normalize_ws(request.query)
+    if request.doctypes.strip():
+        shown += f" doctypes:{normalize_ws(request.doctypes.replace(', ', ','))}"
+    return {
+        "formInput": shown,
+        "source": "local_library",
+        "mode": mode,
+        "pagenum": pagenum,
+        "found": f"{start} - {end} of {total}" if total else "",
+        "total": total,
+        "hasMore": (pagenum + 1) * 10 < total,
+        "results": results,
+        "cost": {"billedSearches": 0, "cachedHits": 0,
+                 "ratePerSearchInr": 0.0, "totalInr": 0.0},
+    }
+
+
+@app.post("/api/v1/local-search")
+async def local_search(request: AdvancedSearchRequest,
+                       http_request: Request) -> dict[str, Any]:
+    """IK-style advanced search over the LOCAL judgment library — the
+    Elasticsearch mirror of every judgment this system has fetched from
+    Indian Kanoon (same docIds, ZERO IK spend). Same grammar as IK:
+    space-separated terms must ALL appear, "quoted phrases" verbatim; same
+    filters and sort; 10 results per page via pagenum. Response shape is
+    identical to /advanced-search so the popup renders either source."""
+    if not elastic.available:
+        raise HTTPException(status_code=503, detail=(
+            "The local judgment library (Elasticsearch) is not reachable — "
+            "check ELASTICSEARCH_URL, or search Indian Kanoon instead."))
+
+    # Keyword-only searches go through the paragraph-aware legal engine
+    # (strict phrase qualification + proximity re-rank). Field criteria
+    # (title:/cite:/author:/bench:) keep the field-level path below.
+    if request.query.strip() and not any(v.strip() for v in (
+            request.title, request.cite, request.author, request.bench)):
+        return await _local_engine_search(request)
+
+    must: list[dict[str, Any]] = []
+    filters: list[dict[str, Any]] = []
+
+    def _text_clauses(value: str, fields: list[str]) -> None:
+        # IK grammar: "quoted phrases" verbatim; remaining words all-AND.
+        for phrase in re.findall(r'"([^"]+)"', value):
+            must.append({"multi_match": {"query": phrase, "type": "phrase",
+                                         "fields": fields}})
+        rest = normalize_ws(re.sub(r'"[^"]*"', " ", value))
+        if rest:
+            must.append({"multi_match": {"query": rest, "operator": "and",
+                                         "fields": fields}})
+
+    if request.query.strip():
+        _text_clauses(request.query, ["text", "title^2"])
+    if request.title.strip():
+        _text_clauses(request.title, ["title"])
+    if request.cite.strip():
+        must.append({"match_phrase": {"text": normalize_ws(request.cite)}})
+    if request.author.strip():
+        must.append({"match": {"author": {"query": request.author, "operator": "and"}}})
+    if request.bench.strip():
+        must.append({"match": {"bench": {"query": request.bench, "operator": "and"}}})
+    court_should = _es_court_clauses(request.doctypes)
+    if court_should:
+        filters.append({"bool": {"should": court_should, "minimum_should_match": 1}})
+    date_range: dict[str, str] = {}
+    if request.fromdate.strip():
+        date_range["gte"] = _iso_date(request.fromdate, "fromdate")
+    if request.todate.strip():
+        date_range["lte"] = _iso_date(request.todate, "todate")
+    if date_range:
+        filters.append({"range": {"publishdate": date_range}})
+    if not must and not filters:
+        raise HTTPException(status_code=422, detail="Fill in at least one search field")
+
+    sort: list | None = None
+    if request.sortby == "mostrecent":
+        sort = [{"publishdate": {"order": "desc", "missing": "_last"}}]
+    elif request.sortby == "leastrecent":
+        sort = [{"publishdate": {"order": "asc", "missing": "_last"}}]
+
+    pagenum = max(0, request.pagenum)
+    resp = await asyncio.to_thread(
+        elastic.search_judgments,
+        {"bool": {"must": must or [{"match_all": {}}], "filter": filters}},
+        sort, pagenum)
+    if resp is None:
+        raise HTTPException(status_code=503, detail=(
+            "The local judgment library did not respond — try again, or "
+            "search Indian Kanoon instead."))
+
+    hits = resp.get("hits") or {}
+    total = int(((hits.get("total") or {}).get("value")) or 0)
+    results: list[dict[str, Any]] = []
+    for hit in hits.get("hits") or []:
+        src = hit.get("_source") or {}
+        frags = (hit.get("highlight") or {}).get("text") or []
+        doc_id = str(src.get("tid") or hit.get("_id") or "")
+        results.append({
+            "docId": doc_id,
+            "title": src.get("title") or doc_id,
+            "headline": strip_html(" … ".join(frags)).strip(),
+            "court": src.get("docsource") or "",
+            "date": src.get("publishdate") or "",
+            "numCitedby": int(src.get("numcitedby") or 0),
+            "url": f"https://indiankanoon.org/doc/{doc_id}/",
+            "fromLibrary": True,
+        })
+
+    # Same display string the IK path shows, so the popup's query chip works.
+    shown: list[str] = []
+    if request.query.strip():
+        shown.append(normalize_ws(request.query))
+    for directive, value in (("title", request.title), ("cite", request.cite),
+                             ("author", request.author), ("bench", request.bench),
+                             ("doctypes", request.doctypes)):
+        if value.strip():
+            shown.append(f"{directive}:{normalize_ws(value.replace(', ', ','))}")
+    if request.fromdate.strip():
+        shown.append(f"fromdate:{_ik_date(request.fromdate, 'fromdate')}")
+    if request.todate.strip():
+        shown.append(f"todate:{_ik_date(request.todate, 'todate')}")
+    if request.sortby != "relevance":
+        shown.append(f"sortby:{request.sortby}")
+
+    start = pagenum * 10 + 1 if results else 0
+    end = pagenum * 10 + len(results)
+    return {
+        "formInput": " ".join(shown),
+        "source": "local_library",
+        "pagenum": pagenum,
+        "found": f"{start} - {end} of {total}" if total else "",
+        "total": total,
+        "hasMore": (pagenum + 1) * 10 < total,
+        "results": results,
+        # The library is free — zeros keep the popup's cost logging uniform.
+        "cost": {"billedSearches": 0, "cachedHits": 0,
+                 "ratePerSearchInr": 0.0, "totalInr": 0.0},
     }
 
 

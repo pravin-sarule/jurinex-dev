@@ -56,6 +56,29 @@ def normalize_ws(text: str) -> str:
     return _WS_RE.sub(" ", (text or "")).strip().lower()
 
 
+def squash_ws(text: str) -> str:
+    """Whitespace collapse WITHOUT lowercasing — for legal terms that must
+    keep their case ('Section 482', '(2019) 4 SCC 123')."""
+    return _WS_RE.sub(" ", (text or "")).strip()
+
+
+_QUOTE_TRANS = str.maketrans({
+    "“": '"', "”": '"', "„": '"', "‟": '"',  # “ ” „ ‟
+    "″": '"', "«": '"', "»": '"',                 # ″ « »
+    "‘": "'", "’": "'", "‚": "'", "‛": "'",  # ‘ ’ ‚ ‛
+    "′": "'",                                               # ′
+})
+
+
+def normalize_quotes(text: str) -> str:
+    """Typographic → ASCII quotes. LLMs (and phone keyboards, for user-typed
+    queries) emit smart quotes; Indian Kanoon and every quote-aware step in
+    this pipeline — phrase protection in to_ik_operators, the anchor-format
+    guard, the ES wire translation — only understand the ASCII forms, so a
+    curly-quoted phrase silently degrades to scattered AND-words."""
+    return (text or "").translate(_QUOTE_TRANS)
+
+
 def _tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", (text or "").lower())
 
@@ -493,7 +516,12 @@ def to_ik_operators(query: str) -> str:
     IK docs do not document — are dropped so they never reach the engine as
     junk tokens (ANDD is implicit between terms, so precedence degrades
     gracefully)."""
-    parts = _QUOTED_SEG_RE.split(query or "")
+    query = normalize_quotes(query or "")
+    if query.count('"') % 2:
+        # A stray unpaired quote would reach IK glued to a word; dropping
+        # the last one degrades the phrase to plain AND-words instead.
+        query = query[::-1].replace('"', "", 1)[::-1]
+    parts = _QUOTED_SEG_RE.split(query)
     out: list[str] = []
     for i, part in enumerate(parts):
         if i % 2 == 1:  # quoted phrase — verbatim
@@ -559,6 +587,502 @@ def build_ik_query(term: str, exact: bool = False, doctypes: str | None = None) 
     if dates and "fromdate:" not in query and "todate:" not in query:
         query = f"{query} {dates}"
     return query
+
+
+def es_court_clauses(doctypes: str) -> list[dict[str, Any]]:
+    """docsource filters mirroring IK doctype tokens for the local library.
+    Tokens with no docsource pattern (tribunal codes, laws) are skipped —
+    the library holds the court judgments the pipeline fetched anyway."""
+    clauses: list[dict[str, Any]] = []
+    for token in (doctypes or "").split(","):
+        token = token.strip().lower()
+        if not token:
+            continue
+        if token in ("supremecourt", "scorders"):
+            clauses.append({"match_phrase": {"docsource": "Supreme Court"}})
+        elif token == "highcourts":
+            clauses.append({"match_phrase": {"docsource": "High Court"}})
+        elif token in ("delhidc", "bangaloredc", "districtcourts"):
+            clauses.append({"match_phrase": {"docsource": "District"}})
+        else:
+            match = _COURT_TOKEN_MATCH.get(token)
+            if match:
+                clauses.append({"bool": {"must": [
+                    {"match_phrase": {"docsource": "High Court"}},
+                    {"bool": {"should": [{"match": {"docsource": m}} for m in match],
+                              "minimum_should_match": 1}},
+                ]}})
+    return clauses
+
+
+_WIRE_DMY_RE = re.compile(r"^(\d{1,2})-(\d{1,2})-(\d{4})$")
+
+
+def _es_query_from_wire(wire: str) -> dict[str, Any]:
+    """Translate one IK wire query — directives included — into the exact
+    equivalent ES bool query: "quoted phrases" verbatim, remaining words
+    all-AND, doctypes: → docsource filter, fromdate:/todate: → date range."""
+    text_part = wire or ""
+    doctypes = fromdate = todate = None
+    m = re.search(r"\bdoctypes:(\S+)", text_part)
+    if m:
+        doctypes = m.group(1)
+    m = re.search(r"\bfromdate:(\S+)", text_part)
+    if m:
+        fromdate = m.group(1)
+    m = re.search(r"\btodate:(\S+)", text_part)
+    if m:
+        todate = m.group(1)
+    text_part = re.sub(r"\b(?:doctypes|fromdate|todate|sortby):\S+", " ", text_part)
+
+    must: list[dict[str, Any]] = []
+    for phrase in re.findall(r'"([^"]+)"', text_part):
+        must.append({"multi_match": {"query": phrase, "type": "phrase",
+                                     "fields": ["text", "title^2"]}})
+    rest = normalize_ws(re.sub(r'"[^"]*"', " ", text_part))
+    if rest:
+        must.append({"multi_match": {"query": rest, "operator": "and",
+                                     "fields": ["text", "title^2"]}})
+
+    filters: list[dict[str, Any]] = []
+    if doctypes:
+        clauses = es_court_clauses(doctypes)
+        if clauses:
+            filters.append({"bool": {"should": clauses, "minimum_should_match": 1}})
+    date_range: dict[str, str] = {}
+    for bound, value in (("gte", fromdate), ("lte", todate)):
+        m = _WIRE_DMY_RE.match(value or "")
+        if m:
+            date_range[bound] = f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+    if date_range:
+        filters.append({"range": {"publishdate": date_range}})
+    return {"bool": {"must": must or [{"match_all": {}}], "filter": filters}}
+
+
+def _wire_date_iso(value: str | None) -> str | None:
+    m = _WIRE_DMY_RE.match(value or "")
+    if not m:
+        return None
+    return f"{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+
+
+def es_wire_search(wire: str, size: int = 10,
+                   pagenum: int = 0) -> list[dict[str, Any]]:
+    """The EXACT IK wire query, run against the local judgment library
+    through the paragraph-aware legal engine: STRICT qualification (every
+    quoted phrase must be present in the judgment) + proximity-weighted
+    re-ranking over paragraph evidence. Hits come back IK-doc-shaped (with
+    evidence attached) so the fan-out merge treats both sources
+    identically. pagenum is accepted for signature compatibility — the
+    library always serves its best matches."""
+    from stores import elastic  # local import: stores must stay import-light
+    if not get_settings().library_first or not elastic.available:
+        return []
+    text_part = wire or ""
+    m = re.search(r"\bdoctypes:(\S+)", text_part)
+    doctypes = m.group(1) if m else ""
+    m = re.search(r"\bfromdate:(\S+)", text_part)
+    fromdate_iso = _wire_date_iso(m.group(1) if m else None)
+    m = re.search(r"\btodate:(\S+)", text_part)
+    todate_iso = _wire_date_iso(m.group(1) if m else None)
+    text_part = re.sub(r"\b(?:doctypes|fromdate|todate|sortby):\S+", " ", text_part)
+    parsed = parse_legal_query(text_part)
+    docs = es_legal_search(parsed, mode="strict", doctypes=doctypes,
+                           fromdate_iso=fromdate_iso, todate_iso=todate_iso)
+    # The spec funnel: ES qualifies up to ES_CANDIDATE_LIMIT judgments,
+    # ranking trims to FINAL_RESULT_LIMIT before verification.
+    return docs[:max(1, min(size, get_settings().final_result_limit))]
+
+
+def es_search_cache_get(wire: str) -> list[dict[str, Any]]:
+    """Exact-query memory: the judgments Indian Kanoon previously returned
+    for this VERY wire query, served back from ES — the 'same keyword
+    twice never bills twice' guarantee. Empty when never asked."""
+    from stores import elastic
+    if not get_settings().library_first:
+        return []
+    return elastic.search_cache_get(normalize_ws(wire)) or []
+
+
+def es_get_judgment(doc_id: str) -> dict[str, Any] | None:
+    """The stored judgment (full text + IK's raw HTML) from the library,
+    or None when off/absent — the free alternative to an IK /doc call."""
+    from stores import elastic
+    if not get_settings().library_first:
+        return None
+    return elastic.get_judgment(doc_id)
+
+
+def _library_count(n: int = 1) -> None:
+    """Requests served free by the local library — shown in the [cost]
+    table beside the billed IK rows."""
+    tracker = _ik_cost_tracker.get()
+    if tracker is not None:
+        tracker["library"] = tracker.get("library", 0) + n
+
+
+# ─── Legal metadata extraction (regex-only — never invented) ─────────────────
+
+_SECTION_REF_RE = re.compile(r"[Ss]ections?\s+(\d{1,4}(?:-?[A-Za-z]{1,2})?)")
+_ACT_TOKENS = ("IPC", "CrPC", "BNSS", "BNS", "BSA", "CPC",
+               "Indian Penal Code", "Code of Criminal Procedure",
+               "Negotiable Instruments Act", "Bharatiya Nagarik Suraksha Sanhita",
+               "Bharatiya Nyaya Sanhita", "Evidence Act", "Arbitration and "
+               "Conciliation Act", "Companies Act", "Contract Act")
+_ACT_NAME_RE = re.compile("|".join(re.escape(t) for t in _ACT_TOKENS))
+_CITATION_RE = re.compile(
+    r"\(\d{4}\)\s+\d+\s+SCC\s+\d+"
+    r"|AIR\s+\d{4}\s+(?:SC|SCC|[A-Z][a-z]+)\s+\d+"
+    r"|\d{4}\s+SCC\s+OnLine\s+[A-Za-z]+\s+\d+"
+    r"|\d{4}\s+\(\d+\)\s+[A-Z]{2,6}\s+\d+")
+
+
+def extract_sections(text: str, cap: int = 40) -> list[str]:
+    seen: list[str] = []
+    for m in _SECTION_REF_RE.finditer(text or ""):
+        token = m.group(1).replace("-", "").upper()
+        if token not in seen:
+            seen.append(token)
+        if len(seen) >= cap:
+            break
+    return seen
+
+
+def extract_acts(text: str, cap: int = 15) -> list[str]:
+    seen: list[str] = []
+    for m in _ACT_NAME_RE.finditer(text or ""):
+        if m.group(0) not in seen:
+            seen.append(m.group(0))
+        if len(seen) >= cap:
+            break
+    return seen
+
+
+def extract_citations(text: str, cap: int = 40) -> list[str]:
+    seen: list[str] = []
+    for m in _CITATION_RE.finditer(text or ""):
+        token = squash_ws(m.group(0))
+        if token not in seen:
+            seen.append(token)
+        if len(seen) >= cap:
+            break
+    return seen
+
+
+# ─── Paragraph splitting (the searchable legal chunks) ───────────────────────
+
+_NUMBERED_PARA_RE = re.compile(r"^\s*\d{1,3}[.)]\s+\S")
+_MIN_PARA_CHARS = 200
+_MAX_PARA_CHARS = 2500
+_MAX_PARAS_PER_JUDGMENT = 400
+
+
+def split_judgment_paragraphs(text: str) -> list[str]:
+    """Split a judgment's plain text into legal chunks: blank-line blocks
+    when present, else numbered-paragraph starts ('12. The petitioner…'),
+    else sentence-packed windows. Tiny blocks merge forward, giant blocks
+    split at sentence boundaries — so chunks stay retrieval-sized."""
+    text = (text or "").replace("\r", "")
+    if not text.strip():
+        return []
+    if "\n\n" in text:
+        blocks = [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
+    elif "\n" in text:
+        blocks, current = [], []
+        for line in text.split("\n"):
+            if _NUMBERED_PARA_RE.match(line) and current:
+                blocks.append(" ".join(current).strip())
+                current = []
+            if line.strip():
+                current.append(line.strip())
+        if current:
+            blocks.append(" ".join(current).strip())
+    else:
+        blocks = [text.strip()]
+
+    # Sentence-pack any oversized block.
+    sized: list[str] = []
+    for block in blocks:
+        while len(block) > _MAX_PARA_CHARS:
+            cut = block.rfind(". ", _MIN_PARA_CHARS, _MAX_PARA_CHARS)
+            cut = cut + 1 if cut != -1 else _MAX_PARA_CHARS
+            sized.append(block[:cut].strip())
+            block = block[cut:].strip()
+        if block:
+            sized.append(block)
+    # Merge undersized blocks forward so chunks carry enough context.
+    merged: list[str] = []
+    for block in sized:
+        if merged and (len(merged[-1]) < _MIN_PARA_CHARS
+                       or len(block) < _MIN_PARA_CHARS // 2):
+            merged[-1] = f"{merged[-1]} {block}"
+        else:
+            merged.append(block)
+    return merged[:_MAX_PARAS_PER_JUDGMENT]
+
+
+def build_paragraph_rows(doc_id: str, body: dict[str, Any]) -> list[dict[str, Any]]:
+    """The chunk documents for one judgment — metadata copied from the
+    judgment, sections/acts/citations regex-extracted per chunk, fields
+    left EMPTY when not reliably known (paragraph_type, case_number)."""
+    rows: list[dict[str, Any]] = []
+    for no, para in enumerate(split_judgment_paragraphs(body.get("text") or ""), 1):
+        rows.append({
+            "judgment_id": str(doc_id),
+            "paragraph_no": no,
+            "title": body.get("title"),
+            "docsource": body.get("docsource"),
+            "publishdate": body.get("publishdate"),
+            "bench": body.get("bench"),
+            "sections": extract_sections(para),
+            "acts": extract_acts(para),
+            "citations": extract_citations(para),
+            "text": para,
+        })
+    return rows
+
+
+# ─── Legal query parser ──────────────────────────────────────────────────────
+
+def parse_legal_query(query: str) -> dict[str, Any]:
+    """IK-style parse: quoted phrases are REQUIRED phrases, recognised
+    citations and 'Section NNN' references become phrases even when
+    unquoted (exact legal terms deserve strong relevance), remaining bare
+    words are plain terms. Returns {phrases, terms, citations, sections}."""
+    working = normalize_quotes(query or "")
+    citations = extract_citations(working)
+    for cite in citations:
+        working = working.replace(cite, " ")
+    phrases = [squash_ws(p) for p in re.findall(r'"([^"]+)"', working)
+               if squash_ws(p)]
+    working = re.sub(r'"[^"]*"', " ", working)
+    section_phrases = []
+    for m in re.finditer(r"[Ss]ections?\s+\d{1,4}(?:-?[A-Za-z]{1,2})?", working):
+        section_phrases.append(squash_ws(m.group(0)))
+    working = re.sub(r"[Ss]ections?\s+\d{1,4}(?:-?[A-Za-z]{1,2})?", " ", working)
+    terms = [t for t in squash_ws(working).split(" ") if t]
+    sections: list[str] = []
+    for source_text in phrases + section_phrases:
+        sections.extend(extract_sections(source_text))
+    return {
+        "phrases": phrases + section_phrases,
+        "terms": terms,
+        "citations": citations,
+        "sections": list(dict.fromkeys(sections)),
+    }
+
+
+# ─── Judgment-level legal search (ES primary engine) ─────────────────────────
+
+def _phrase_clause(phrase: str, name: str | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {"query": phrase}
+    if name:
+        body["_name"] = name
+    return {"match_phrase": {"text": body}}
+
+
+def _min_covering_span(evidence: list[tuple[int, frozenset]],
+                       wanted: frozenset) -> int | None:
+    """Smallest paragraph-number window whose union of matched phrases
+    covers `wanted`. None when evidence never covers it."""
+    marks = sorted((no, names) for no, names in evidence if names & wanted)
+    best: int | None = None
+    for i in range(len(marks)):
+        covered: set = set()
+        for j in range(i, len(marks)):
+            covered |= marks[j][1] & wanted
+            if covered >= wanted:
+                span = marks[j][0] - marks[i][0]
+                best = span if best is None else min(best, span)
+                break
+    return best
+
+
+def es_legal_search(parsed: dict[str, Any], *, mode: str = "strict",
+                    doctypes: str = "", fromdate_iso: str | None = None,
+                    todate_iso: str | None = None,
+                    limit: int | None = None) -> list[dict[str, Any]]:
+    """The ES primary search: (1) QUALIFY judgments on the full-text index
+    — strict mode requires EVERY phrase/citation present in the judgment,
+    flexible mode ranks by BM25 with phrase boosts; (2) gather paragraph
+    EVIDENCE and re-rank by configured weights (BM25 + proximity of the
+    phrases across paragraphs + coverage + section metadata + paragraph
+    type). Returns IK-doc-shaped dicts with evidence attached, best first.
+    Empty list = nothing usable (caller decides the IK fallback)."""
+    from stores import elastic
+    settings = get_settings()
+    if not elastic.available:
+        return []
+    phrases = list(parsed.get("phrases") or []) + list(parsed.get("citations") or [])
+    terms = list(parsed.get("terms") or [])
+    if not phrases and not terms:
+        return []
+
+    filters: list[dict[str, Any]] = []
+    court_clauses = es_court_clauses(doctypes)
+    if court_clauses:
+        filters.append({"bool": {"should": court_clauses,
+                                 "minimum_should_match": 1}})
+    date_range: dict[str, str] = {}
+    if fromdate_iso:
+        date_range["gte"] = fromdate_iso
+    if todate_iso:
+        date_range["lte"] = todate_iso
+    if date_range:
+        filters.append({"range": {"publishdate": date_range}})
+
+    # ── Step 1: judgment-level qualification ──
+    if mode == "strict" and phrases:
+        must: list[dict[str, Any]] = [_phrase_clause(p) for p in phrases]
+        if terms:
+            must.append({"match": {"text": {"query": " ".join(terms),
+                                            "operator": "and"}}})
+        qualification = {"bool": {"must": must, "filter": filters}}
+    else:
+        should: list[dict[str, Any]] = [
+            {"match_phrase": {"text": {"query": p, "boost": 3.0}}} for p in phrases]
+        all_words = normalize_ws(" ".join(phrases + terms))
+        if all_words:
+            should.append({"multi_match": {
+                "query": all_words, "fields": ["text", "text.english", "title^2"],
+                "minimum_should_match": "60%"}})
+        qualification = {"bool": {"should": should, "minimum_should_match": 1,
+                                  "filter": filters}}
+
+    candidate_limit = limit or settings.es_candidate_limit
+    resp = elastic.search_judgments(qualification, None, 0, size=candidate_limit)
+    if resp is None:
+        return []
+    hits = (resp.get("hits") or {}).get("hits") or []
+    if settings.es_min_score > 0:
+        hits = [h for h in hits if (h.get("_score") or 0) >= settings.es_min_score]
+    if not hits:
+        return []
+    max_score = max((h.get("_score") or 0.0) for h in hits) or 1.0
+    judgments: dict[str, dict[str, Any]] = {}
+    for hit in hits:
+        src = hit.get("_source") or {}
+        doc_id = str(src.get("tid") or hit.get("_id") or "")
+        judgments[doc_id] = {
+            "tid": doc_id,
+            "title": src.get("title") or doc_id,
+            "docsource": src.get("docsource") or "",
+            "publishdate": src.get("publishdate") or "",
+            "numcitedby": int(src.get("numcitedby") or 0),
+            "esScore": float(hit.get("_score") or 0.0),
+            "_bm25": (hit.get("_score") or 0.0) / max_score,
+            "headline": "",
+            "matchedParagraphs": [],
+            "matchedPhrases": [],
+        }
+
+    # ── Step 2: paragraph evidence + weighted re-rank ──
+    wanted = frozenset(f"ph:{i}" for i in range(len(phrases)))
+    weights = settings.es_rank_weights
+    evidence_resp = None
+    if phrases or terms:
+        should = [_phrase_clause(p, name=f"ph:{i}") for i, p in enumerate(phrases)]
+        if terms:
+            should.append({"match": {"text": {"query": " ".join(terms),
+                                              "operator": "and"}}})
+        evidence_resp = elastic.search_paragraphs(
+            {"bool": {"filter": [{"terms": {"judgment_id": list(judgments)}}],
+                      "should": should, "minimum_should_match": 1}},
+            size=min(400, candidate_limit * 12))
+    by_judgment: dict[str, list[dict[str, Any]]] = {}
+    for hit in ((evidence_resp or {}).get("hits") or {}).get("hits") or []:
+        src = hit.get("_source") or {}
+        jid = str(src.get("judgment_id") or "")
+        frags = (hit.get("highlight") or {}).get("text") or []
+        by_judgment.setdefault(jid, []).append({
+            "no": int(src.get("paragraph_no") or 0),
+            "score": float(hit.get("_score") or 0.0),
+            "names": frozenset(hit.get("matched_queries") or []),
+            "sections": src.get("sections") or [],
+            "type": src.get("paragraph_type") or "",
+            "fragment": strip_html(" ".join(frags)).strip(),
+        })
+
+    from config import ES_PARA_TYPE_VALUE
+    query_sections = set(parsed.get("sections") or [])
+    ranked: list[dict[str, Any]] = []
+    for doc_id, doc in judgments.items():
+        paras = sorted(by_judgment.get(doc_id, []),
+                       key=lambda p: p["score"], reverse=True)
+        matched_names: set = set()
+        for para in paras:
+            matched_names |= para["names"]
+        coverage = (len(matched_names & wanted) / len(wanted)) if wanted else 1.0
+        if mode == "strict":
+            coverage = 1.0  # step 1 already required every phrase
+        span = _min_covering_span([(p["no"], p["names"]) for p in paras],
+                                  matched_names & wanted or wanted)
+        proximity = 1.0 / (1.0 + span) if span is not None else 0.0
+        if query_sections:
+            evidence_sections = {s for p in paras for s in p["sections"]}
+            section_component = 1.0 if query_sections & evidence_sections else 0.0
+        else:
+            section_component = 0.5  # query names no section — stay neutral
+        type_values = [ES_PARA_TYPE_VALUE.get(p["type"], 0.0)
+                       for p in paras if p["type"]]
+        type_component = max(type_values) if type_values else 0.5
+        doc["finalScore"] = round(
+            weights["bm25"] * doc["_bm25"]
+            + weights["proximity"] * proximity
+            + weights["coverage"] * coverage
+            + weights["section"] * section_component
+            + weights["para_type"] * type_component, 6)
+        doc["matchedParagraphs"] = [p["no"] for p in paras[:5]]
+        doc["matchedPhrases"] = sorted(
+            phrases[int(n.split(":", 1)[1])] for n in (matched_names & wanted))
+        doc["headline"] = " … ".join(p["fragment"] for p in paras[:2]
+                                     if p["fragment"])
+        doc.pop("_bm25", None)
+        ranked.append(doc)
+    ranked.sort(key=lambda d: d["finalScore"], reverse=True)
+    return ranked
+
+
+def _es_judgment_body(doc_id: str, data: dict[str, Any], text: str) -> dict[str, Any]:
+    """The IK /doc response, shaped for the local Elasticsearch library —
+    a PURE judgment dataset: only the judgment's own fields as IK gives
+    them, under IK's own docId. Nothing about who/when/why fetched it."""
+    return {
+        "tid": str(doc_id),
+        "title": strip_html(str(data.get("title") or "")).strip() or None,
+        "doc": str(data.get("doc") or "") or None,
+        "text": text or None,
+        "docsource": strip_html(str(data.get("docsource") or "")).strip() or None,
+        "publishdate": str(data.get("publishdate") or "").strip() or None,
+        "numcites": int(data.get("numcites") or 0),
+        "numcitedby": int(data.get("numcitedby") or 0),
+    }
+
+
+def _store_judgment_and_paragraphs(doc_id: str, body: dict[str, Any]) -> None:
+    """Judgment document + its paragraph chunks, together. Chunks are only
+    built when the judgment is NEW (create-only dedupe holds for both)."""
+    from stores import elastic
+    if elastic.index_judgment(str(doc_id), body):
+        rows = build_paragraph_rows(str(doc_id), body)
+        indexed = elastic.index_paragraphs(str(doc_id), rows)
+        if indexed:
+            logger.info("[library] stored judgment %s + %d paragraph chunk(s)",
+                        doc_id, indexed)
+
+
+def index_judgment_async(doc_id: str, data: dict[str, Any], text: str,
+                         extra: dict[str, Any] | None = None) -> None:
+    """Mirror a freshly fetched IK judgment into the local Elasticsearch
+    library — fire-and-forget: an ES outage never slows or breaks a fetch."""
+    body = _es_judgment_body(doc_id, data, text)
+    if extra:
+        body.update(extra)
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _store_judgment_and_paragraphs, str(doc_id), body)
+    except RuntimeError:  # sync context (tests/scripts)
+        _store_judgment_and_paragraphs(str(doc_id), body)
 
 
 class IndianKanoonClient:
@@ -668,6 +1192,18 @@ class IndianKanoonClient:
                                                 "maxpages": 1})
         docs = (data or {}).get("docs") or []
         cache.set_json(cache_key, docs, ttl=86400)
+        if docs:
+            # Durable exact-query memory (ES): the SAME wire query never
+            # needs Indian Kanoon again, across restarts.
+            stubs = [{k: d.get(k) for k in ("tid", "title", "headline",
+                                            "docsource", "publishdate", "numcitedby")}
+                     for d in docs]
+            from stores import elastic
+            try:
+                asyncio.get_running_loop().run_in_executor(
+                    None, elastic.search_cache_put, norm, pagenum, stubs)
+            except RuntimeError:
+                elastic.search_cache_put(norm, pagenum, stubs)
         return docs
 
     async def search_raw(self, query: str, pagenum: int = 0) -> dict[str, Any] | None:
@@ -699,6 +1235,23 @@ class IndianKanoonClient:
         if text is not None and info is not None:
             _ik_count_cached()
             return text or None, info
+        # Local library BEFORE IK: an already-collected judgment's full
+        # text lives in ES — reading it back costs nothing.
+        es_doc = await asyncio.to_thread(es_get_judgment, doc_id)
+        if es_doc and (es_doc.get("text") or "").strip():
+            full_text = es_doc["text"]
+            info = {
+                "title": es_doc.get("title") or "",
+                "publishdate": es_doc.get("publishdate") or "",
+                "citesTotal": int(es_doc.get("numcites") or 0) or len(es_doc.get("casesCited") or []),
+                "citedByTotal": int(es_doc.get("numcitedby") or 0) or len(es_doc.get("citedBy") or []),
+                "casesCitedSample": (es_doc.get("casesCited") or [])[:20],
+                "citedBySample": (es_doc.get("citedBy") or [])[:20],
+            }
+            cache.set(f"ik:doc:{doc_id}", full_text, ttl=7 * 86400)
+            cache.set_json(f"ik:docinfo2:{doc_id}", info, ttl=7 * 86400)
+            _library_count()
+            return full_text or None, info
         # maxcites/maxcitedby are REQUIRED for IK to include citeList /
         # citedbyList in the response — without them both come back empty.
         data = await self._request(f"/doc/{doc_id}/", {"maxcites": 20, "maxcitedby": 20})
@@ -728,6 +1281,10 @@ class IndianKanoonClient:
         }
         cache.set(f"ik:doc:{doc_id}", full_text, ttl=7 * 86400)
         cache.set_json(f"ik:docinfo2:{doc_id}", info, ttl=7 * 86400)
+        # Local judgment library: mirror every billed fetch into ES as-is.
+        index_judgment_async(doc_id, data, full_text,
+                             extra={"casesCited": info["casesCitedSample"],
+                                    "citedBy": info["citedBySample"]})
         return full_text or None, info
 
     async def fetch_doc_text(self, doc_id: str) -> str | None:
@@ -746,6 +1303,23 @@ class IndianKanoonClient:
         if cached is not None:
             _ik_count_cached()
             return cached
+        # Local library BEFORE IK: the library keeps IK's own HTML — the
+        # in-app doc view of a collected judgment costs nothing.
+        es_doc = await asyncio.to_thread(es_get_judgment, doc_id)
+        if es_doc and (es_doc.get("doc") or "").strip():
+            raw = {
+                "title": es_doc.get("title") or "",
+                "html": es_doc.get("doc") or "",
+                "publishdate": es_doc.get("publishdate") or "",
+                "docsource": es_doc.get("docsource") or "",
+                "numcites": int(es_doc.get("numcites") or 0),
+                "numcitedby": int(es_doc.get("numcitedby") or 0),
+                "casesCited": es_doc.get("casesCited") or [],
+                "citedBy": es_doc.get("citedBy") or [],
+            }
+            cache.set_json(cache_key, raw, ttl=7 * 86400)
+            _library_count()
+            return raw
         data = await self._request(f"/doc/{doc_id}/", {"maxcites": 50, "maxcitedby": 50})
         if not data:
             return None
@@ -772,6 +1346,10 @@ class IndianKanoonClient:
             "citedBy": _samples(citedby_list),
         }
         cache.set_json(cache_key, raw, ttl=7 * 86400)
+        # Local judgment library: mirror every billed fetch into ES as-is.
+        index_judgment_async(
+            doc_id, data, re.sub(r"[ \t]+", " ", strip_html(raw["html"])),
+            extra={"casesCited": raw["casesCited"], "citedBy": raw["citedBy"]})
         return raw
 
     async def fetch_doc_meta(self, doc_id: str) -> dict[str, Any]:
@@ -787,11 +1365,22 @@ class IndianKanoonClient:
                 if isinstance(v, (str, int, float)) and k in
                 ("title", "publishdate", "author", "bench", "docsource", "doctype")}
         cache.set_json(cache_key, meta, ttl=7 * 86400)
+        if meta.get("author") or meta.get("bench"):
+            # Enrich the ES copy with author/bench (best-effort, no await).
+            from stores import elastic
+            try:
+                asyncio.get_running_loop().run_in_executor(
+                    None, elastic.update_judgment, str(doc_id),
+                    {"author": meta.get("author"), "bench": meta.get("bench")})
+            except RuntimeError:
+                pass
         return meta
 
     async def fanout_and_fetch(self, keywords: KeywordSet, cap: int | None = None,
                                exclude: set[str] | None = None,
-                               page_map: dict[str, int] | None = None) -> list[Candidate]:
+                               page_map: dict[str, int] | None = None,
+                               use_library: bool = True,
+                               library_only: bool = False) -> list[Candidate]:
         """ONE Indian Kanoon search per display query — exactly the queries
         the user sees (and curates) on the issue card, each carrying the
         run's court filter (the user's court boxes, else the env default).
@@ -808,7 +1397,11 @@ class IndianKanoonClient:
         instead of re-buying page one — while an issue that never used a
         query starts at page one (served from cache when another issue
         already bought it). Mutated in place for session persistence.
-        `exclude`: docIds already fetched earlier (never re-fetched)."""
+        `exclude`: docIds already fetched earlier (never re-fetched).
+        `library_only`: pure-ES round — queries the library can't satisfy
+        fetch NOTHING here instead of falling through to IK; the caller
+        (agents._process_issue) decides after verification whether an IK
+        round is owed. Ignored when the library feature is off."""
         settings = get_settings()
         cap = cap or settings.ik_candidate_cap
         per_query = settings.ik_results_per_query
@@ -838,46 +1431,108 @@ class IndianKanoonClient:
         if not queries:
             return []
 
-        pages: list[int] = []
-        for _label, wire, _weight, _take in queries:
-            page = page_map.get(wire, -1) + 1
-            page_map[wire] = page
-            pages.append(page)
-        results = await asyncio.gather(
-            *(self.search(wire, pagenum=page)
-              for (_label, wire, _weight, _take), page in zip(queries, pages)))
+        def _merge(result_lists, lib_flags):
+            """Union result lists (both sources) into one candidate pool —
+            dedupe by docId, court-scope guard, multi-query weighting.
+            lib_flags marks which query's docs came from the library."""
+            merged: dict[str, Candidate] = {}
+            merged_hits: Counter[str] = Counter()
+            dropped = 0
+            for (label, _wire, weight, take), docs, is_lib in zip(queries, result_lists,
+                                                                  lib_flags):
+                for rank, doc in enumerate(docs[:take]):
+                    doc_id = str(doc.get("tid") or "").strip()
+                    if not doc_id or doc_id in exclude:
+                        continue
+                    court = str(doc.get("docsource") or "").strip()
+                    # Court-scoped run: enforce the user's court boxes
+                    # deterministically, whatever the source returned.
+                    if not scope_allows_court(court):
+                        dropped += 1
+                        continue
+                    merged_hits[doc_id] += weight * max(1, 10 - rank)  # earlier rank → more weight
+                    if doc_id in merged:
+                        if label not in merged[doc_id].matched_terms:
+                            merged[doc_id].matched_terms.append(label)
+                        continue
+                    title = strip_html(str(doc.get("title") or "")).strip()
+                    headline = strip_html(str(doc.get("headline") or "")).strip()
+                    es_meta = None
+                    if "esScore" in doc:
+                        es_meta = {k: doc.get(k) for k in
+                                   ("esScore", "finalScore", "matchedPhrases",
+                                    "matchedParagraphs") if doc.get(k) is not None}
+                    merged[doc_id] = Candidate(
+                        doc_id=doc_id,
+                        title=title,
+                        court=court,
+                        year=year_from_text(str(doc.get("publishdate") or ""), title),
+                        headline=headline,
+                        num_citedby=int(doc.get("numcitedby") or 0),
+                        source_url=f"https://indiankanoon.org/doc/{doc_id}/",
+                        matched_terms=[label],
+                        from_library=is_lib,
+                        es_meta=es_meta,
+                    )
+            return merged, merged_hits, dropped
 
-        by_id: dict[str, Candidate] = {}
-        hits: Counter[str] = Counter()
-        dropped_scope = 0
-        for (label, _wire, weight, take), docs in zip(queries, results):
-            for rank, doc in enumerate(docs[:take]):
-                doc_id = str(doc.get("tid") or "").strip()
-                if not doc_id or doc_id in exclude:
-                    continue
-                court = str(doc.get("docsource") or "").strip()
-                # Court-scoped run: enforce the user's court boxes
-                # deterministically, whatever IK returned.
-                if not scope_allows_court(court):
-                    dropped_scope += 1
-                    continue
-                hits[doc_id] += weight * max(1, 10 - rank)  # earlier IK rank → more weight
-                if doc_id in by_id:
-                    if label not in by_id[doc_id].matched_terms:
-                        by_id[doc_id].matched_terms.append(label)
-                    continue
-                title = strip_html(str(doc.get("title") or "")).strip()
-                headline = strip_html(str(doc.get("headline") or "")).strip()
-                by_id[doc_id] = Candidate(
-                    doc_id=doc_id,
-                    title=title,
-                    court=court,
-                    year=year_from_text(str(doc.get("publishdate") or ""), title),
-                    headline=headline,
-                    num_citedby=int(doc.get("numcitedby") or 0),
-                    source_url=f"https://indiankanoon.org/doc/{doc_id}/",
-                    matched_terms=[label],
-                )
+        # PER-QUERY ROUTING, library first: EVERY wire query checks the
+        # local dataset and is served from the library whenever it has
+        # ANYTHING (free). A query the library can't satisfy goes to Indian
+        # Kanoon (billed; its ik page advances) — except in library_only
+        # rounds, where it simply fetches nothing and the issue-level
+        # verified count (library_first_min) decides whether an IK round
+        # follows.
+        n = len(queries)
+        result_lists: list[list[dict[str, Any]] | None] = [None] * n
+        if settings.library_first and use_library:
+            # No per-run ES paging — that leap-frogged past the library's
+            # depth and sent every other run to IK. Repeat runs re-serve the
+            # library's best matches, which GROW as IK fills gaps.
+            # (1) EXACT-QUERY MEMORY — everything IK ever answered for this
+            # very wire query.
+            cached_lists = await asyncio.gather(*(
+                asyncio.to_thread(es_search_cache_get, wire)
+                for _label, wire, _weight, _take in queries))
+            for idx, docs in enumerate(cached_lists):
+                if docs:
+                    result_lists[idx] = docs[:queries[idx][3]]
+            # (2) FULL-TEXT LIBRARY — top matches by relevance.
+            pending = [i for i in range(n) if result_lists[i] is None]
+            if pending:
+                gathered = await asyncio.gather(*(
+                    asyncio.to_thread(es_wire_search, queries[i][1],
+                                      queries[i][3], 0)
+                    for i in pending))
+                for i, docs in zip(pending, gathered):
+                    if docs:
+                        result_lists[i] = docs
+        lib_flags = [lst is not None for lst in result_lists]
+        if library_only and settings.library_first and use_library:
+            # Pure-ES round: unsatisfied queries contribute nothing and
+            # spend nothing — their IK pages stay unburned for the top-up.
+            for i in range(n):
+                if result_lists[i] is None:
+                    result_lists[i] = []
+        ik_idx = [i for i in range(n) if result_lists[i] is None]
+        if ik_idx:
+            ik_pages: list[int] = []
+            for i in ik_idx:
+                wire = queries[i][1]
+                page = page_map.get(wire, -1) + 1
+                page_map[wire] = page
+                ik_pages.append(page)
+            ik_results = await asyncio.gather(*(
+                self.search(queries[i][1], pagenum=page)
+                for i, page in zip(ik_idx, ik_pages)))
+            for i, docs in zip(ik_idx, ik_results):
+                result_lists[i] = docs
+        if any(lib_flags):
+            _library_count(sum(lib_flags))
+        logger.info("[library] queries served: %d from LOCAL DATASET (free), "
+                    "%d via INDIAN KANOON (billed)", sum(lib_flags), len(ik_idx))
+
+        by_id, hits, dropped_scope = _merge(result_lists, lib_flags)
         if dropped_scope:
             logger.info("[scope] dropped %d candidate(s) outside the selected courts",
                         dropped_scope)
@@ -1080,6 +1735,7 @@ def merge_cost_ledger(ledger: dict | None, tracker: dict) -> dict:
     for kind, count in dict(tracker.get("billed") or {}).items():
         out["billed"][kind] = out["billed"].get(kind, 0) + count
     out["cached"] += tracker.get("cached", 0)
+    out["library"] = int(led.get("library") or 0) + tracker.get("library", 0)
     out["embed_calls"] += tracker.get("embed_calls", 0)
     out["embed_tokens_est"] += tracker.get("embed_tokens_est", 0)
     out["grounding_calls"] += tracker.get("grounding_calls", 0)
@@ -1190,6 +1846,15 @@ def _usage_rows(tracker: dict, session_id: str | None, stage: str) -> list[dict[
                      "cache_hit": True,
                      "metadata": {"cache_method": "response_cache"},
                      "producer_cost_inr": 0.0})
+    if tracker.get("library"):
+        n = int(tracker["library"])
+        rows.append({**base, "provider": "elastic", "service": "judgement_library",
+                     "operation": "library_hit", "model": None,
+                     "unit": "calls", "quantity": n, "calls": n,
+                     "input_tokens": 0, "output_tokens": 0,
+                     "cache_hit": True,
+                     "metadata": {"cache_method": "local_library"},
+                     "producer_cost_inr": 0.0})
     for step_no, row in enumerate(rows):
         row["step_no"] = step_no
         row["event_key"] = (f"jud:{run_id}:{step_no}:{row['operation']}:"
@@ -1299,7 +1964,7 @@ def run_cost_log(tracker: dict, tag: str, step: dict | None = None) -> None:
 
     billed: Counter = tracker["billed"]
     ik_total = sum(IK_RATES_INR[kind] * count for kind, count in billed.items())
-    if billed or tracker.get("cached"):
+    if billed or tracker.get("cached") or tracker.get("library"):
         logger.info("[cost] %s", dash)
         logger.info("[cost] %-28s %6s %12s %12s %9s",
                     "Indian Kanoon", "Calls", "Rate", "", "Cost INR")
@@ -1313,6 +1978,9 @@ def run_cost_log(tracker: dict, tag: str, step: dict | None = None) -> None:
         if tracker.get("cached"):
             logger.info("[cost] %-28s %6d %12s %12s %9.2f",
                         "Cache hits (free)", tracker["cached"], "-", "", 0.0)
+        if tracker.get("library"):
+            logger.info("[cost] %-28s %6d %12s %12s %9.2f",
+                        "Local library (free)", tracker["library"], "-", "", 0.0)
         logger.info("[cost] %-28s %6s %12s %12s %9.2f",
                     "IK subtotal", "", "", "", ik_total)
 

@@ -382,6 +382,10 @@ export default function CitationResearchPanel() {
   // Date range for the run — every query gets fromdate:/todate: when set.
   const [scopeFromDate, setScopeFromDate] = useState(''); // yyyy-mm-dd
   const [scopeToDate, setScopeToDate] = useState('');
+  // Acting for: '' = auto (infer from the case) | petitioner | respondent.
+  // Locked role → grounds/issues/queries framed for that side; only that
+  // side's judgments surface.
+  const [clientRole, setClientRole] = useState('');
 
   // Description boxes grow with their content instead of scrolling inside.
   // height:auto first so shrinking works; scrollHeight then includes the
@@ -547,10 +551,15 @@ export default function CitationResearchPanel() {
   }, [filteredCases.length, casesPerPage]);
 
   // Each tab shows only its own research: case-based sessions carry a
-  // caseId; uploaded-document sessions don't.
+  // caseId; uploaded-document sessions don't. With a case SELECTED, Recents
+  // narrows to that case's history; no selection = all (default).
   const tabHistory = useMemo(
-    () => history.filter((h) => (inputMode === 'case' ? !!h.caseId : !h.caseId)),
-    [history, inputMode],
+    () => history.filter((h) => {
+      if (inputMode !== 'case') return !h.caseId;
+      if (!h.caseId) return false;
+      return !selectedCaseId || String(h.caseId) === String(selectedCaseId);
+    }),
+    [history, inputMode, selectedCaseId],
   );
 
   // Latest research per case — drives the "N issues" badge on case cards.
@@ -659,11 +668,11 @@ export default function CitationResearchPanel() {
       const queryStyle = advancedSearch ? 'advanced' : 'simple';
       const data = inputMode === 'case'
         ? (freshMode
-          ? await judgementApi.analyzeCaseFresh(selectedCaseId, caseText.trim(), queryStyle)
-          : await judgementApi.analyzeCase(selectedCaseId, caseText.trim(), researchMode, queryStyle))
+          ? await judgementApi.analyzeCaseFresh(selectedCaseId, caseText.trim(), queryStyle, clientRole || null)
+          : await judgementApi.analyzeCase(selectedCaseId, caseText.trim(), researchMode, queryStyle, clientRole || null))
         // Upload tab: the document is the case material; the optional
         // description steers which grounds and issues come back.
-        : await judgementApi.analyzeUpload(files, caseText.trim(), researchMode, uploadTitle.trim(), queryStyle);
+        : await judgementApi.analyzeUpload(files, caseText.trim(), researchMode, uploadTitle.trim(), queryStyle, clientRole || null);
       setAnalysis(data);
       // Nothing pre-selected: the user consciously picks what to research;
       // checking a ground ticks its whole query set (toggleIssue).
@@ -848,6 +857,7 @@ export default function CitationResearchPanel() {
     setCourtsOpen(false);
     setScopeFromDate('');
     setScopeToDate('');
+    setClientRole('');
     try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* non-fatal */ }
   };
 
@@ -1138,6 +1148,42 @@ export default function CitationResearchPanel() {
                 <StepLab n="2" title="Research options" note="optional — leave off for a standard run" />
                 <div className="space-y-2.5">
 
+                  {/* Acting for: lock the client's side. Locked → grounds,
+                      issues and queries are framed for that side and ONLY
+                      that side's judgments surface. Auto = infer from the
+                      case (existing behaviour). */}
+                  <div className="rounded-[14px] border-[1.5px] border-[#E5ECEB] bg-white px-[17px] py-[13px]">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className="min-w-0">
+                        <span className="block text-[length:calc(13.5px*var(--jnx-text-scale,1))] font-bold text-[#0F1B21]">Acting for</span>
+                        <span className="block text-[length:calc(11.5px*var(--jnx-text-scale,1))] text-[#93A2A7]">
+                          {clientRole
+                            ? `Only judgments favouring the ${clientRole} will be surfaced.`
+                            : 'Auto — the system infers your side from the case papers.'}
+                        </span>
+                      </span>
+                      <div className="ml-auto inline-flex items-center gap-[3px] rounded-xl border border-[#E5ECEB] bg-[#F8FAFC] p-1">
+                        {[
+                          { key: '', label: 'Auto' },
+                          { key: 'petitioner', label: 'Petitioner' },
+                          { key: 'respondent', label: 'Respondent' },
+                        ].map(({ key, label }) => (
+                          <button
+                            key={key || 'auto'}
+                            type="button"
+                            onClick={() => setClientRole(key)}
+                            aria-pressed={clientRole === key}
+                            className={`px-3 py-1.5 rounded-[9px] text-[length:calc(12px*var(--jnx-text-scale,1))] font-semibold transition-colors ${
+                              clientRole === key ? 'bg-[#0F1B21] text-white' : 'text-[#64757C] hover:bg-[#EFF4F3]'
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
                   {/* Fresh matter: nothing drafted yet — proposed grounds are
                       built from ALL case documents + the typed objective. */}
                   {inputMode === 'case' && (
@@ -1306,6 +1352,9 @@ export default function CitationResearchPanel() {
                   className="w-full shrink-0 flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[length:calc(13px*var(--jnx-text-scale,1))] font-semibold text-[#64757C] transition-colors hover:text-[#0F1B21] hover:bg-[#EFF4F3]"
                 >
                   Recents
+                  {inputMode === 'case' && selectedCaseId && (
+                    <span className="px-1.5 py-px rounded-[5px] bg-[#E9F9F5] border border-[#BFE9DF] text-[length:calc(10px*var(--jnx-text-scale,1))] font-bold text-[#0E8371]">this case</span>
+                  )}
                   <ChevronRightIcon strokeWidth={2.4} className={`h-3.5 w-3.5 transition-transform ${recentsCollapsed ? '' : 'rotate-90'}`} />
                   {tabHistory.length > 0 && (
                     <span className="ml-auto text-[length:calc(11px*var(--jnx-text-scale,1))] font-medium text-[#93A2A7]">{tabHistory.length}</span>
@@ -1319,7 +1368,9 @@ export default function CitationResearchPanel() {
                     {!historyLoading && tabHistory.length === 0 && (
                       <div className="px-2 py-2 text-[length:calc(12px*var(--jnx-text-scale,1))] text-[#93A2A7]">
                         {inputMode === 'case'
-                          ? 'No research on your cases yet — it will appear here.'
+                          ? (selectedCaseId
+                            ? 'No research for this case yet — unselect it to see all history.'
+                            : 'No research on your cases yet — it will appear here.')
                           : 'No research on uploaded documents yet — it will appear here.'}
                       </div>
                     )}
