@@ -175,7 +175,13 @@ class Settings(BaseSettings):
     debug: bool = False
     cors_origins: str = (
         "https://ailearn.co.in,https://www.ailearn.co.in,"
+        "https://jurinex.netlify.app,https://jurinex-dev.netlify.app,"
+        "https://nexintel.netlify.app,"
         "http://localhost:5173,http://localhost:3000,http://localhost:5000"
+    )
+    # Safety net for Netlify deploy previews and ailearn/jurinex subdomains.
+    cors_origin_regex: str = (
+        r"https://([a-z0-9-]+\.)*(ailearn\.co\.in|netlify\.app|jurinex\.ai)(:\d+)?$"
     )
 
     # --- Scoring ---
