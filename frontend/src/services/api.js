@@ -770,6 +770,14 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
     if (extraFetchParams.web_search === true || extraFetchParams.web_search === 'true') {
       body.web_search = true;
     }
+    if (extraFetchParams.disable_cache === true) {
+      // Skip the Gemini explicit-cache path entirely (used by Case Storage chat).
+      body.disable_cache = true;
+    }
+    if (typeof extraFetchParams.chat_source === 'string' && extraFetchParams.chat_source) {
+      // Tags the saved chat (e.g. 'case_storage') so it stays out of ChatModel's history.
+      body.chat_source = extraFetchParams.chat_source;
+    }
  }
 
  const headers = {
@@ -871,8 +879,11 @@ return this.request(`${AUTH_SERVICE_URL}/api/auth/professional-profile`, {
            onChunk(piece);
          } else if (parsed.type === 'done' && onDone) {
            const fromServer = typeof parsed.answer === 'string' ? parsed.answer : '';
-           const merged =
-             fromServer.length > accumulatedAnswer.length ? fromServer : (accumulatedAnswer || fromServer);
+           // Server answer is authoritative: the backend streams degenerate/restarted
+           // generation rounds live but EXCLUDES them from its stitched final answer
+           // (and from saved history). The accumulated stream can therefore be longer
+           // but dirtier — only fall back to it when the server sent nothing.
+           const merged = fromServer.trim() ? fromServer : (accumulatedAnswer || fromServer);
            doneDispatched = true;
            onDone({ ...parsed, answer: merged });
            streamDone = true;

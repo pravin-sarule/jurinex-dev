@@ -13,7 +13,7 @@ from app.services.db import doc_conn
 from app.services.gemini_pricing import DEFAULT_CACHE_MODEL
 from app.services import chat_orchestrator, gemini_cache_service
 from app.services.chat_repository import FileChatRepository, FileRepository
-from app.services.gcs_service import download_object_buffer
+from app.services.gcs_service import download_object_buffer, to_gcs_uri
 from app.services.llm_config_service import get_llm_config, merge_request_overrides
 from app.services.llm_policy_service import assert_chat_allowed
 from app.services.payment_token_guard import check_token_availability
@@ -608,7 +608,7 @@ async def cache_ask_stream(request: Request, user: dict = Depends(get_current_us
             # GCS fallback if ADK path returned nothing
             if not "".join(answer_parts).strip():
                 from app.services.llm_service import stream_llm_with_gcs
-                gcs_uri = f"gs://{get_settings().gcs_bucket_name}/{row['gcs_path']}"
+                gcs_uri = to_gcs_uri(get_settings().gcs_bucket_name, row["gcs_path"])
                 yield f"data: {json.dumps({'type': 'status', 'status': 'generating', 'message': 'Processing document...'})}\n\n"
                 async for ev in stream_llm_with_gcs(
                     question=prompt,

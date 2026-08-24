@@ -457,6 +457,19 @@ class LegalCasePipelineService:
             page_count = int(ocr_result.page_count or 0)
             if isinstance(getattr(ocr_result, "structured_json", None), dict):
                 structured_ocr_json = ocr_result.structured_json
+            from app.services.chronology.pages import text_with_page_markers
+
+            marked = text_with_page_markers(structured_ocr_json)
+            if marked:
+                text = marked
+                from app.services.chronology.console import log_note
+                from app.services.chronology.pages import split_into_pages
+
+                stamped = split_into_pages(text)
+                log_note(
+                    f"Stamped OCR with [PAGE n] on {len(stamped)} page(s) "
+                    "so chronology pin cites are real paper-book pages"
+                )
             logger.info(
                 "[Pipeline] Step 1/4: done — chars=%d pages=%d quality=%.2f",
                 len(text),

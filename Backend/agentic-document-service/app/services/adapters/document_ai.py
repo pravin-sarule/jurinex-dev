@@ -18,6 +18,8 @@ from app.services.prompt_orchestration import (
     format_instruction_for_query,
     is_custom_template_question as _is_custom_template_question_orch,
 )
+from app.services.chronology.pack import pack_for_extraction
+from app.services.chronology.prompt import CHRONOLOGY_EXTRACTION_BLOCK
 from app.services.token_usage_log import log_token_usage_table
 
 logger = logging.getLogger("agentic_document_service.document_ai")
@@ -144,11 +146,21 @@ Return ONLY valid JSON without markdown formatting. If a field is not found, use
 === DOCUMENT CONTENT ===
 """
 
+# Form fields + grounded events in one form_population_agent call (one document input bill).
+_EXTRACTION_PROMPT = (
+    _EXTRACTION_PROMPT.replace(
+        "Return ONLY valid JSON without markdown formatting. If a field is not found, use null or empty string.",
+        CHRONOLOGY_EXTRACTION_BLOCK
+        + "\n\nReturn ONLY valid JSON without markdown formatting. If a field is not found, use null or empty string.",
+        1,
+    )
+)
+
 
 @dataclass(slots=True)
 class ExtractionResult:
     text: str
-    entities: dict[str, str]
+    entities: dict[str, Any]
     confidence_by_field: dict[str, float]
     quality_score: float
 
@@ -1523,15 +1535,21 @@ def _generation_config(
                 "temperature": float(cfg.temperature),
                 "max_output_tokens": max_tokens,
             }
+            # Intake auto-fill: Gemini 3.7 Flash rejects thinking_level=minimal (400).
+            # "low" is the fastest level that model accepts.
+            if agent_name == _AGENT_EXTRACTION:
+                llm_params["thinking_level"] = "low"
+                llm_params["thinking_mode"] = False
             logger.info(
                 "[DocumentAI] generation_config  agent_prompts=%s  tokens=from_agent_prompts  "
                 "agent=%s  model=%s  temperature=%.2f  max_output_tokens=%s  "
-                "url_context=%s  grounding_search=%s  code_execution=%s",
+                "thinking_level=%s  url_context=%s  grounding_search=%s  code_execution=%s",
                 _describe_agent_prompts_origin(cfg),
                 agent_name,
                 cfg.model_name,
                 gen_kwargs["temperature"],
                 max_tokens,
+                llm_params.get("thinking_level") or "—",
                 llm_params.get("url_context", False),
                 llm_params.get("grounding_google_search", False),
                 llm_params.get("code_execution", False),
@@ -1818,18 +1836,36 @@ def _build_gemini_config(
         if tools:
             config_kwargs["tools"] = tools
 
-        # ── Thinking (Gemini 2.5+ only; 2.0 etc. reject ThinkingConfig) ─────────
-        if llm_params.get("thinking_mode"):
-            if _gemini_model_supports_thinking_config(model_name):
+        # ── Thinking (Gemini 2.5 numeric budget; Gemini 3.x thinking_level) ──
+        # Gemini 3 Flash thinks at its default (medium) unless thinking_level is sent.
+        # gemini-3.7-flash accepts only low|medium|high — "minimal" is a 400.
+        if _gemini_model_supports_thinking_config(model_name) and not _is_gemma_model(model_name):
+            raw_name = (model_name or "").strip().lower().rsplit("/", 1)[-1]
+            level = str(llm_params.get("thinking_level") or "").strip().lower()
+            if "gemini-3.7" in raw_name and level == "minimal":
+                level = "low"
+            gemini3_levels = ("low", "medium", "high")
+            allowed = gemini3_levels if "gemini-3.7" in raw_name else ("minimal",) + gemini3_levels
+            if "gemini-3" in raw_name and level in allowed:
+                try:
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=level)
+                    active_flags.append(f"thinking_level={level}")
+                except Exception as _tl_exc:
+                    logger.info(
+                        "[DocumentAI] gemini thinking_level=%s not applied: %s",
+                        level,
+                        _tl_exc,
+                    )
+            elif llm_params.get("thinking_mode"):
                 budget = _resolve_thinking_budget(llm_params, "gemini")
                 config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
                 active_flags.append(f"thinking(budget={budget})")
-            else:
-                logger.info(
-                    "[DocumentAI] thinking_mode set in llm_parameters but model=%s "
-                    "does not support Gemini ThinkingConfig — omitting",
-                    model_name or "(unknown)",
-                )
+        elif llm_params.get("thinking_mode"):
+            logger.info(
+                "[DocumentAI] thinking_mode set in llm_parameters but model=%s "
+                "does not support Gemini ThinkingConfig — omitting",
+                model_name or "(unknown)",
+            )
 
         # ── Media resolution ─────────────────────────────────────────────────
         media_res = str(llm_params.get("media_resolution") or "default").lower()
@@ -2487,23 +2523,36 @@ def deepseek_stream_generator(
 #   2. reasoning arrives as a separate `reasoning_content` field and must never be
 #      shown to the user (the stream loop below drops it, as the DeepSeek one does).
 
+def _kimi_is_k3(api_model: str) -> bool:
+    """True for kimi-k3 / moonshot-k3 (reasoning_effort only; no thinking{} body)."""
+    return _model_tail_lower(api_model).startswith(("kimi-k3", "moonshot-k3"))
+
+
 def _kimi_thinking_settings() -> tuple[bool, int, str]:
     """
     Read the Kimi thinking policy from .env on EVERY call (no import-time snapshot),
     so changing KIMI_THINKING_* takes effect on the next request.
 
     Returns (thinking_enabled, budget_tokens, reasoning_effort).
+
+    Moonshot API levels (no "medium"):
+      kimi-k3  → reasoning_effort: low | high | max
+      kimi-k2.6 → thinking.type enabled|disabled (+ optional budget_tokens)
+    "medium" is accepted as an alias for "high".
     """
     from app.core.config import get_settings
 
     s = get_settings()
-    enabled = bool(getattr(s, "kimi_thinking_enabled", False))
+    enabled = bool(getattr(s, "kimi_thinking_enabled", True))
     try:
         budget = int(getattr(s, "kimi_thinking_budget_tokens", 0) or 0)
     except (TypeError, ValueError):
         budget = 0
     budget = max(0, budget)
     effort = str(getattr(s, "kimi_reasoning_effort", "") or "").strip().lower()
+    # API has no "medium"; map to high (middle of low / high / max).
+    if effort == "medium":
+        effort = "high"
     if effort not in {"low", "high", "max"}:
         effort = ""
     return enabled, budget, effort
@@ -2521,15 +2570,16 @@ def _kimi_apply_thinking(
     """
     Apply the right thinking lever for THIS model, plus the one temperature that mode allows.
 
-    Three cases:
-      • thinking wanted            -> thinking:enabled (+budget, +effort if set), temp 1.0
-      • thinking off, model allows -> thinking:disabled, temp 0.6          (K2.6)
-      • thinking off, model won't  -> reasoning_effort:"low", temp 1.0     (K3, K2.7 Code)
+    Per Moonshot docs (platform.kimi.ai/docs/guide/use-thinking-models):
+      • kimi-k3     → no thinking{}; top-level reasoning_effort low|high|max
+      • kimi-k2.6   → thinking.enabled|disabled (+ optional budget_tokens hint)
+      • kimi-k2.7*  → always thinks; thinking:disabled errors
 
     `force_thinking` is the retry path for a model that rejected thinking:disabled.
     """
     wants_minimal = not thinking_on
     can_disable = _kimi_supports_thinking_off(api_model) and not force_thinking
+    is_k3 = _kimi_is_k3(api_model)
 
     if wants_minimal and can_disable:
         # Moonshot only allows temperature 0.6 alongside an explicit thinking:disabled,
@@ -2541,19 +2591,28 @@ def _kimi_apply_thinking(
 
     # Thinking is on — either by request, or because this model cannot switch it off.
     create_kwargs["temperature"] = _kimi_temperature(thinking_on=True)
+
+    # Default effort: low when caller wants minimal; high (= medium) when thinking on.
+    resolved_effort = effort or (_KIMI_MIN_EFFORT if wants_minimal else "high")
+
+    if is_k3:
+        # K3 rejects / ignores the K2.x thinking{} body — effort is the only lever.
+        create_kwargs.pop("extra_body", None)
+        create_kwargs["reasoning_effort"] = resolved_effort
+        return create_kwargs
+
     thinking: dict[str, Any] = {"type": "enabled"}
     if budget > 0:
         # NOTE: Moonshot treats budget_tokens as a HINT, not a hard cap (measured:
-        # 860-2,065 reasoning tokens whether set to 500 or 2,000). reasoning_effort
-        # is the lever that actually bites.
+        # 860-2,065 reasoning tokens whether set to 500 or 2,000).
         thinking["budget_tokens"] = budget
     create_kwargs["extra_body"] = {"thinking": thinking}
 
-    resolved_effort = effort or (_KIMI_MIN_EFFORT if wants_minimal else '')
-    if resolved_effort:
+    # reasoning_effort is K3-only per docs; do not send it for K2.6 / K2.7.
+    create_kwargs.pop("reasoning_effort", None)
+    if not can_disable and wants_minimal and resolved_effort:
+        # K2.7-code can't disable thinking; still try effort if the API ever accepts it.
         create_kwargs["reasoning_effort"] = resolved_effort
-    else:
-        create_kwargs.pop("reasoning_effort", None)
     return create_kwargs
 
 
@@ -2686,9 +2745,14 @@ def kimi_stream_generator(
     llm_params: dict,
 ):
     """
-    Yield text chunks from the Moonshot (Kimi) streaming API (OpenAI-compatible SSE).
+    Yield stream events from the Moonshot (Kimi) streaming API.
 
-    Supported flags: system_instructions, max_output_tokens, thinking_mode.
+    Yields dicts:
+      {"type": "thinking", "text": "..."}  — live reasoning_content (and <think> blocks)
+      {"type": "chunk", "text": "..."}     — final answer tokens
+
+    The route maps these to SSE `thinking` / `chunk` so the UI updates during the
+    long CoT phase instead of freezing on a static "Thinking..." label.
     """
     client = _kimi_client()
     if client is None:
@@ -2710,15 +2774,18 @@ def kimi_stream_generator(
     # Moonshot rejects every value except the mandated one.
     from app.core.config import get_settings as _kimi_settings
 
+    _ks = _kimi_settings()
     tabular = _is_tabular_request(prompt, llm_params) and not bool(
-        getattr(_kimi_settings(), "kimi_stream_tabular", True)
+        getattr(_ks, "kimi_stream_tabular", True)
     )
+    stream_reasoning = bool(getattr(_ks, "kimi_stream_reasoning", True))
 
     _, _budget, _effort = _kimi_thinking_settings()
     logger.info(
-        "[DocumentAI] ▶ Kimi stream  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d  thinking=%s  budget_tokens=%s  buffered=%s",
+        "[DocumentAI] ▶ Kimi stream  model_id=%s (raw=%s)  temperature=%.2f  max_tokens=%d  "
+        "thinking=%s  budget_tokens=%s  effort=%s  stream_reasoning=%s  buffered=%s",
         api_model, model_name, temperature, create_kwargs["max_tokens"], thinking_on,
-        (_budget or "—") if thinking_on else "—", tabular,
+        (_budget or "—") if thinking_on else "—", _effort or "—", stream_reasoning, tabular,
     )
 
     try:
@@ -2747,6 +2814,8 @@ def kimi_stream_generator(
     final_usage_raw: Any = None
     buffer_parts: list[str] = []
     full_response = ""
+    # Accumulator for incomplete <think>… content so we can stream it as thinking.
+    think_open_buf = ""
 
     for chunk in stream:
         usage = getattr(chunk, "usage", None)
@@ -2770,8 +2839,11 @@ def kimi_stream_generator(
         if not delta:
             continue
 
-        # Kimi streams its chain-of-thought in `reasoning_content` — never surface it.
-        if getattr(delta, "reasoning_content", None):
+        # Native Moonshot CoT field — stream live as thinking so the UI engages.
+        reasoning = getattr(delta, "reasoning_content", None)
+        if reasoning:
+            if stream_reasoning:
+                yield {"type": "thinking", "text": reasoning}
             continue
 
         content = delta.content or ""
@@ -2780,29 +2852,53 @@ def kimi_stream_generator(
 
         full_response += content
 
-        # Some Kimi builds inline the reasoning as a <think>…</think> block in `content`
-        # instead of `reasoning_content`; suppress that form too.
+        # Some Kimi builds inline the reasoning as a <think>…</think> block in `content`.
         if "<think>" in full_response and "</think>" not in full_response:
+            if stream_reasoning:
+                # Stream only the newly arrived portion inside the think block.
+                if think_open_buf:
+                    # full_response grew by `content`; emit content (minus any leading <think>)
+                    piece = content
+                    if piece.startswith("<think>"):
+                        piece = piece[len("<think>"):]
+                    elif "<think>" in piece:
+                        piece = piece.split("<think>", 1)[1]
+                    if piece:
+                        yield {"type": "thinking", "text": piece}
+                else:
+                    after_open = full_response.split("<think>", 1)[1]
+                    if after_open:
+                        yield {"type": "thinking", "text": after_open}
+                think_open_buf = full_response
             continue
         if "<think>" in full_response and "</think>" in full_response:
-            after_think = "</think>".join(full_response.split("</think>")[1:])
+            before_close, after_think = full_response.split("</think>", 1)
+            if stream_reasoning:
+                # Emit any think-tail not already streamed (content after last yield up to </think>).
+                inside = before_close.split("<think>", 1)[-1]
+                already = think_open_buf.split("<think>", 1)[-1] if think_open_buf else ""
+                if inside.startswith(already):
+                    tail = inside[len(already):]
+                    if tail:
+                        yield {"type": "thinking", "text": tail}
+            think_open_buf = ""
             full_response = after_think
             if after_think.strip():
                 if tabular:
                     buffer_parts.append(after_think)
                 else:
-                    yield after_think
+                    yield {"type": "chunk", "text": after_think}
             continue
 
         if "<think>" not in full_response:
             if tabular:
                 buffer_parts.append(content)
             else:
-                yield content
+                yield {"type": "chunk", "text": content}
             full_response = ""
 
     if tabular and buffer_parts:
-        yield normalize_markdown_render_output("".join(buffer_parts))
+        yield {"type": "chunk", "text": normalize_markdown_render_output("".join(buffer_parts))}
 
     if final_usage:
         _log_kimi_cache(api_model, final_usage_raw, phase="stream")
@@ -3155,8 +3251,11 @@ def _generate_text(
 def _call_gemini_for_extraction(text: str) -> dict:
     """Use Gemini to extract all case fields from document text (uses form_population_agent config)."""
     try:
-        limited_text = text[:80000]  # stay within token limits
-        prompt = _EXTRACTION_PROMPT + limited_text
+        packed, pack_meta = pack_for_extraction(text)
+        from app.services.chronology.console import log_pack_decision
+
+        log_pack_decision(pack_meta)
+        prompt = _EXTRACTION_PROMPT + packed
         raw = _generate_text(prompt, agent_name=_AGENT_EXTRACTION)
         if not raw:
             return {}

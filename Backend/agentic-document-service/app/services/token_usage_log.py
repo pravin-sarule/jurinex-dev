@@ -10,6 +10,7 @@ logger = logging.getLogger("agentic_document_service.token_usage")
 
 _session_key_var: ContextVar[str | None] = ContextVar("token_usage_session_key", default=None)
 _thread_local = threading.local()
+_last_usage_local = threading.local()
 _accumulators: dict[str, list[dict[str, Any]]] = {}
 _flushed_session_keys: set[str] = set()
 
@@ -28,6 +29,7 @@ _MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gemini-3.1-flash-lite": (0.25, 1.50),  # official (AI Studio, rel. 7 May 2026)
     "gemini-3-pro":      (2.50, 15.00),   # estimate
     "gemini-3.6-flash":  (1.50, 7.50),    # official (AI Studio, rel. 21 Jul 2026)
+    "gemini-3.7-flash":  (0.75, 3.75),    # official (AI Studio, rel. 13 Aug 2026)
     "gemini-3.5-flash":  (1.50, 9.00),
     "gemini-2.5-pro":    (1.25, 10.00),
     "gemini-2.5-flash":  (0.30, 2.50),
@@ -141,6 +143,15 @@ def _normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | str]:
     }
 
 
+def _store_last_usage(normalized: dict[str, Any]) -> None:
+    _last_usage_local.data = dict(normalized)
+
+
+def get_last_usage() -> dict[str, Any]:
+    """Most recent LLM usage on THIS worker thread (input/output tokens + model)."""
+    return dict(getattr(_last_usage_local, "data", None) or {})
+
+
 def begin_token_usage_session(session_key: str | None = None) -> str:
     key = session_key or uuid.uuid4().hex[:12]
     _accumulators[key] = []
@@ -180,6 +191,7 @@ def record_token_usage(
             "context": context,
         }
     )
+    _store_last_usage(normalized)
     if key and key not in _flushed_session_keys and key in _accumulators:
         _accumulators[key].append(normalized)
         return
@@ -250,12 +262,18 @@ def format_aggregated_token_usage_table(
         rows.append(("Session ID", str(session_id)))
     if request_id:
         rows.append(("Request ID", str(request_id)))
-    if model_name:
-        rows.append(("Primary Model", model_name))
-    elif len(models) == 1:
-        rows.append(("Model", models[0]))
-    elif models:
-        rows.append(("Models", ", ".join(models)))
+    # The requested model is not always the one that answered: when an admin-selected
+    # override 404s or is unavailable, the adapter retries with the agent default.
+    # Entries record whatever actually ran, so report that — and name the requested
+    # model separately rather than crediting it with tokens it never spent.
+    served = [m for m in models if m and m != "-"]
+    requested = str(model_name).strip() if model_name else ""
+    if served:
+        rows.append(("Primary Model" if len(served) == 1 else "Models", ", ".join(served)))
+        if requested and requested not in served:
+            rows.append(("Requested Model", f"{requested}  (unavailable - fell back)"))
+    elif requested:
+        rows.append(("Primary Model", requested))
     if providers and providers != ["-"]:
         rows.append(("Providers", ", ".join(providers)))
     total_cached = sum(int(e.get("cachedTokens") or 0) for e in entries)
@@ -296,8 +314,12 @@ def flush_aggregated_token_usage_table(
     answer_length: int | None = None,
     routing: str | None = None,
     retrieved_chunks: int | None = None,
-) -> dict[str, int] | None:
-    """Log one final table with summed input/output/total tokens for the whole request."""
+) -> dict[str, Any] | None:
+    """Log one final table with summed input/output/total tokens for the whole request.
+
+    Also returns "primaryModel"/"models" — the model(s) that actually served, which
+    can differ from `model_name` when a requested override fell back.
+    """
     entries = _accumulators.pop(session_key, [])
     _flushed_session_keys.add(session_key)
     if _session_key_var.get() == session_key:
@@ -308,13 +330,24 @@ def flush_aggregated_token_usage_table(
     if not entries:
         return None
 
-    totals = {
+    totals: dict[str, Any] = {
         "inputTokens": sum(int(e.get("inputTokens") or 0) for e in entries),
         "outputTokens": sum(int(e.get("outputTokens") or 0) for e in entries),
         "totalTokens": sum(int(e.get("totalTokens") or 0) for e in entries),
     }
     if totals["totalTokens"] <= 0:
         totals["totalTokens"] = totals["inputTokens"] + totals["outputTokens"]
+
+    # The model that actually served, so the caller can bill it rather than the
+    # one that was requested and then fell back. "primaryModel" is the model that
+    # spent the most tokens, which is the meaningful one on a multi-call answer.
+    served_entries = [e for e in entries if e.get("model") and e.get("model") != "-"]
+    totals["models"] = sorted({str(e["model"]) for e in served_entries})
+    totals["primaryModel"] = (
+        str(max(served_entries, key=lambda e: int(e.get("totalTokens") or 0))["model"])
+        if served_entries
+        else ""
+    )
 
     table = format_aggregated_token_usage_table(
         entries,
@@ -531,6 +564,16 @@ def log_token_usage_table(
     routing: str | None = None,
 ) -> None:
     """Log immediately, or accumulate when a request session is active."""
+    _store_last_usage(
+        _normalize_usage(
+            {
+                **(usage or {}),
+                "provider": provider or (usage or {}).get("provider"),
+                "model": model_name or (usage or {}).get("model") or (usage or {}).get("modelName"),
+                "context": context,
+            }
+        )
+    )
     if _active_session_key() and _active_session_key() not in _flushed_session_keys:
         record_token_usage(
             context=context,

@@ -140,7 +140,7 @@ const googleDriveApi = {
    * @param {string} accessToken - Google OAuth access token from Picker
    * @param {string} folderName - Optional folder name
    */
-  downloadMultipleFiles: async (files, accessToken, folderName = null) => {
+  downloadMultipleFiles: async (files, accessToken, folderName = null, opts = {}) => {
     if (!folderName) {
       throw new Error('Folder name is required for Google Drive import');
     }
@@ -149,7 +149,8 @@ const googleDriveApi = {
       .filter(Boolean);
     const response = await axios.post(
       `${DOCS_BASE_URL}/${encodeURIComponent(folderName)}/google-drive/import`,
-      { file_ids: fileIds },
+      // process:false → storage-only import (Case Storage), no OCR/embedding pipeline.
+      { file_ids: fileIds, ...(opts.process === false ? { process: false } : {}) },
       {
         headers: {
           ...getAuthHeader(),

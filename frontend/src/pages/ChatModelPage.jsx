@@ -2098,7 +2098,9 @@ const ChatModelPage = () => {
           });
           const fromDone = (doneData && typeof doneData.answer === 'string') ? doneData.answer : '';
           const fromBuf = streamBufferRef.current || '';
-          const finalResponse = fromDone.length >= fromBuf.length ? (fromDone || fromBuf) : fromBuf;
+          // Server answer wins (see askQuestionToChat) — the local buffer may
+          // contain streamed-then-discarded degenerate rounds.
+          const finalResponse = fromDone.trim() ? fromDone : fromBuf;
           streamBufferRef.current = finalResponse;
           flushStreamUiUpdate();
 
@@ -2314,7 +2316,10 @@ const ChatModelPage = () => {
           finalMetadata = doneData;
           const fromDone = (doneData && typeof doneData.answer === 'string') ? doneData.answer : '';
           const fromBuf = streamBufferRef.current || '';
-          const finalResponse = fromDone.length >= fromBuf.length ? (fromDone || fromBuf) : fromBuf;
+          // Server answer wins: degenerate rounds are streamed live but excluded
+          // from the stitched server answer (and from history) — the longer local
+          // buffer can contain that discarded garbage.
+          const finalResponse = fromDone.trim() ? fromDone : fromBuf;
           streamBufferRef.current = finalResponse;
 
           if (!finalResponse || !String(finalResponse).trim()) {

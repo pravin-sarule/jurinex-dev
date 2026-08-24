@@ -564,6 +564,7 @@ import {
   QuestionMarkCircleIcon,
   ChatBubbleLeftRightIcon,
   GlobeAltIcon,
+  ArchiveBoxIcon,
 } from '@heroicons/react/24/outline';
 import {
   FolderPlus,
@@ -807,6 +808,7 @@ const Sidebar = () => {
   const navigationItems = [
     { name: 'Dashboard', path: '/dashboard', icon: ChartBarIcon },
     { name: 'Projects', path: '/documents', icon: DocumentTextIcon },
+    { name: 'Case Storage', path: '/case-storage', icon: ArchiveBoxIcon },
     { name: 'Citation Research', path: '/citation-research', icon: ScaleIcon },
     { name: 'ChatModel', path: '/chatmodel', icon: ChatBubbleLeftRightIcon },
     { name: 'Chats', path: '/chats', icon: MessageSquare, isSpecial: true },

@@ -38,6 +38,7 @@ psql -d your_database -f 070_patch_document_ai_extractions_add_file_id.sql
 psql -d your_database -f 080_patch_prompt_extractions_fix_template_fk.sql
 psql -d your_database -f 090_create_preset_prompts_table.sql
 psql -d your_database -f 100_backfill_folder_chats_and_file_chats_uuid_arrays.sql
+psql -d your_database -f 163_create_case_chronology_table.sql
 ```
 
 ## Notes

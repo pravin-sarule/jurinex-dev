@@ -254,6 +254,122 @@ def _build_generation_config(llm_config: dict[str, Any], model: str | None = Non
     return cfg
 
 
+def _uri_file_parts(gcs_uris: list[str]) -> list[Any]:
+    """gs:// URI file parts — Vertex fetches the object itself (no download here,
+    no ~20MB inline-request limit; required for large PDFs)."""
+    from google.genai import types as gt
+
+    parts = []
+    for uri in gcs_uris:
+        if isinstance(uri, str) and uri.startswith("gs://"):
+            parts.append(gt.Part.from_uri(file_uri=uri, mime_type=mime_from_path(uri)))
+    return parts
+
+
+# Vertex hard per-file limit; PDFs above it are page-split into parts under the
+# chunk target — same numbers and strategy as ChatModel's splitPdfIntoGcsParts.
+_VERTEX_FILE_SIZE_LIMIT_BYTES = 50 * 1024 * 1024
+_PDF_CHUNK_TARGET_BYTES = 48 * 1024 * 1024
+
+
+def _split_oversized_pdfs(gcs_uris: list[str], session_id: str | None) -> tuple[list[str], str]:
+    """ChatModel's large-file strategy: any PDF over Vertex's 50MB limit is
+    page-split into <48MB part-PDFs uploaded under tmp/{session}/, and a
+    'unified document' notice is returned to prepend to the question so the
+    model treats the segments as one source. Non-oversized URIs pass through.
+    """
+    import io
+
+    from pypdf import PdfReader, PdfWriter
+
+    from app.services.gcs_service import (
+        download_object_buffer,
+        get_object_metadata,
+        parse_gcs_uri,
+        upload_file_to_gcs,
+    )
+
+    out_uris: list[str] = []
+    notices: list[str] = []
+    for uri in gcs_uris:
+        parsed = parse_gcs_uri(uri)
+        if not parsed:
+            continue
+        bucket, path = parsed
+        try:
+            size = int(get_object_metadata(bucket, path).get("size") or 0)
+        except Exception:
+            size = 0
+        if size <= _VERTEX_FILE_SIZE_LIMIT_BYTES:
+            out_uris.append(uri)
+            continue
+        if mime_from_path(path) != "application/pdf":
+            raise RuntimeError(
+                f"{path.rsplit('/', 1)[-1]} exceeds 50 MB and is not a PDF, so it cannot be page-split for Vertex AI."
+            )
+        logger.info("Splitting oversized PDF for Vertex: %s (%d bytes)", uri, size)
+        reader = PdfReader(io.BytesIO(download_object_buffer(bucket, path)))
+        total_pages = len(reader.pages)
+        if not total_pages:
+            raise RuntimeError(f"PDF {path} contains no pages.")
+        chunk_count = max(2, -(-size // _PDF_CHUNK_TARGET_BYTES))
+        pages_per_chunk = max(1, -(-total_pages // chunk_count))
+        base = path.rsplit("/", 1)[-1].rsplit(".", 1)[0][:80] or "document"
+        safe_session = re.sub(r"[^a-zA-Z0-9-_]", "_", str(session_id or f"adhoc-{uuid.uuid4().hex[:8]}"))
+        part_uris: list[str] = []
+        start = 0
+        part_i = 1
+        while start < total_pages:
+            end = min(total_pages, start + pages_per_chunk)
+            while end > start:
+                writer = PdfWriter()
+                for p in range(start, end):
+                    writer.add_page(reader.pages[p])
+                buf = io.BytesIO()
+                writer.write(buf)
+                chunk = buf.getvalue()
+                if len(chunk) <= _PDF_CHUNK_TARGET_BYTES or end - start == 1:
+                    if end - start == 1 and len(chunk) > _VERTEX_FILE_SIZE_LIMIT_BYTES:
+                        raise RuntimeError(
+                            f"Page {start + 1} of {path} exceeds the Vertex file limit by itself — cannot split safely."
+                        )
+                    part_path = f"tmp/{safe_session}/{base}.part{part_i:02d}.pdf"
+                    part_uris.append(upload_file_to_gcs(bucket, part_path, chunk, "application/pdf"))
+                    break
+                end -= max(1, (end - start) // 4)  # shrink the range and retry
+            part_i += 1
+            start = end
+        out_uris.extend(part_uris)
+        notices.append(
+            f'Source "{path.rsplit("/", 1)[-1]}" is split into {len(part_uris)} sequential parts covering pages 1-{total_pages}.'
+        )
+    notice = ""
+    if notices:
+        notice = (
+            "Context header: some attached files are sequential segments of one larger source document. "
+            "Treat every segment from the same source as one unified document, not as separate sources. "
+            "Synthesize information across all segments before answering.\n" + "\n".join(notices) + "\n\n"
+        )
+    return out_uris, notice
+
+
+def _total_gcs_size(gcs_uris: list[str]) -> int:
+    """Total object size in bytes (0 for anything unreadable)."""
+    from app.services.gcs_service import get_object_metadata, parse_gcs_uri
+
+    total = 0
+    for uri in gcs_uris:
+        parsed = parse_gcs_uri(uri)
+        if not parsed:
+            continue
+        try:
+            meta = get_object_metadata(parsed[0], parsed[1])
+            total += int(meta.get("size") or 0)
+        except Exception:
+            pass
+    return total
+
+
 def _inline_file_parts(gcs_uris: list[str]) -> list[Any]:
     """Download GCS objects and build inline parts (fallback when Vertex URI fetch fails)."""
     from google.genai import types as gt
@@ -283,6 +399,10 @@ def _extract_stream_payload(chunk: Any) -> tuple[str, str]:
     if isinstance(text_attr, str) and text_attr:
         answer = text_attr
 
+    # chunk.text IS the concatenation of the candidate's non-thought text parts
+    # (google-genai SDK) — collecting parts into `answer` on top of it DOUBLES
+    # every chunk. Parts are only used as the answer when .text is absent.
+    parts_answer = ""
     candidates = getattr(chunk, "candidates", None) or []
     if candidates:
         cand = candidates[0]
@@ -296,7 +416,9 @@ def _extract_stream_payload(chunk: Any) -> tuple[str, str]:
             if getattr(part, "thought", False):
                 thought += t
             else:
-                answer += t
+                parts_answer += t
+    if not answer:
+        answer = parts_answer
     return answer, thought
 
 
@@ -327,7 +449,10 @@ def _append_stream_piece(current: str, piece: str) -> tuple[str, str]:
     # Only check recent tail for performance and to avoid eating legitimate substrings.
     # We require a minimum length of 50 chars for suffix matching to avoid
     # accidentally eating short, legitimate repeats like table pipes or list bullets.
-    if len(piece) >= 50:
+    # Pieces that are pure padding (spaces/pipes/dashes — column-aligned tables emit
+    # long identical runs of them) are REAL content, not duplicates: swallowing them
+    # made the stall counter kill rounds that would have completed fine.
+    if len(piece) >= 50 and piece.strip(" \t\n|-:.=_~*#"):
         tail_len = min(len(current), 1000)
         tail = current[-tail_len:]
         if tail.endswith(piece):
@@ -338,13 +463,48 @@ def _append_stream_piece(current: str, piece: str) -> tuple[str, str]:
 
 
 def _stream_tail_delta(streamed: str, last_chunk: Any) -> tuple[str, str]:
-    """Return (full_text, delta) when the final chunk holds text the stream skipped."""
+    """Return (full_text, delta) when the final chunk holds text the stream skipped.
+
+    The delta MUST be alignment-verified. ``streamed`` passes through the
+    duplicate filter and can drift from the candidate's raw text, so a blind
+    ``agg[len(streamed):]`` slice lands at an arbitrary mid-word offset and
+    appends a near-duplicate of the answer's second half (dates spliced like
+    "30/05"+"4/2022", whole table rows repeated with a small lag).
+    """
     if last_chunk is None:
         return streamed, ""
     agg = _aggregate_candidate_text(last_chunk)
     if len(agg) <= len(streamed):
         return streamed, ""
-    return agg, agg[len(streamed) :]
+
+    def _flush(tail: str) -> tuple[str, str]:
+        # The final candidate sometimes contains the answer TWICE (top-level
+        # `text` + the same content again from candidate parts), making the
+        # "missed tail" a full restart of the answer — never flush those.
+        if tail and _looks_like_restart(streamed, _strip_continuation_preamble(tail)):
+            logger.warning("Final-candidate tail duplicates the answer (%s chars) — skipping flush.", len(tail))
+            return streamed, ""
+        if tail:
+            return streamed + tail, tail
+        return streamed, ""
+
+    # Clean extension — the only case the old length-slice handled correctly.
+    if agg.startswith(streamed):
+        return _flush(agg[len(streamed) :])
+    # Otherwise align on the streamed text's tail inside the candidate.
+    probe = streamed[-80:]
+    if probe:
+        idx = agg.rfind(probe)
+        if idx != -1:
+            return _flush(agg[idx + len(probe) :])
+    # Unalignable: flushing would duplicate content — losing an unverifiable
+    # tail is the lesser harm (MAX_TOKENS finishes still trigger continuation).
+    logger.warning(
+        "Final candidate (%s chars) does not align with streamed text (%s chars) — skipping tail flush.",
+        len(agg),
+        len(streamed),
+    )
+    return streamed, ""
 
 
 def _is_max_tokens_finish(finish: Any) -> bool:
@@ -377,8 +537,10 @@ CHAT_RECOVERY_PROMPT = (
     "CONTINUE the answer from where it went wrong, but DO NOT use the same structure "
     "that caused the repetition. If a table or list was being written, write it again "
     "ONCE with its correct rows — and if the same table keeps failing, present that "
-    "section as a bulleted list instead of a table. Then continue with ALL remaining "
-    "sections until the answer is complete. "
+    "section as a bulleted list instead of a table. "
+    "When writing markdown tables, keep cells COMPACT: exactly one space around each "
+    "value (`| value |`) — never pad cells with runs of spaces to align columns. "
+    "Then continue with ALL remaining sections until the answer is complete. "
     "Do NOT repeat any earlier content. Do NOT restart from the beginning. "
     "Be direct and varied in your output to avoid another loop."
 )
@@ -424,7 +586,12 @@ def _recovery_sampling(config: Any, model_name: str | None = None) -> Any:
     """
     try:
         base_temp = float(getattr(config, "temperature", None) or 0.0)
-        update: dict[str, Any] = {"temperature": max(0.7, base_temp)}
+        # The sampling must actually CHANGE or the loop reproduces verbatim —
+        # and it must change UPWARD: lowering temperature makes padding loops
+        # dramatically worse (measured: 0.55 produced 81KB of spaces where 1.0
+        # completed the table). Always land above the base.
+        new_temp = min(1.5, max(1.1, base_temp + 0.35))
+        update: dict[str, Any] = {"temperature": new_temp}
         if supports_frequency_penalty(model_name):
             update["frequency_penalty"] = 0.4
         return config.model_copy(update=update)
@@ -473,6 +640,47 @@ def continuation_time_budget() -> float:
 # already-delivered text; probes shorter than the minimum are inconclusive.
 _RESTART_PROBE_CHARS = 400
 _RESTART_PROBE_MIN = 60
+
+
+# Courteous lead-ins models prepend to continuation rounds despite being told
+# not to ("Happy to continue, sk. Here is the summary ... ensuring no
+# repetition:"). They are never part of the real answer, and worse, they mask
+# restarts: the novel preamble at the head means neither the overlap trimmer
+# nor the restart probe (both prefix-based) can match the re-emitted content
+# behind it — the whole answer then gets appended twice.
+_CONTINUATION_PREAMBLE_RE = re.compile(
+    r"^(?:happy to|sure|certainly|of course|okay|ok\b|alright|absolutely|got it|"
+    r"understood|right away|continuing|as requested|no problem|here (?:is|are)|"
+    r"apologies|sorry)[^\n]{0,220}$",
+    re.IGNORECASE,
+)
+
+
+def _strip_continuation_preamble(text: str) -> str:
+    """Drop up to two leading courteous lead-in lines from a continuation head."""
+    remaining = text
+    for _ in range(2):
+        stripped = remaining.lstrip()
+        first_line, sep, rest = stripped.partition("\n")
+        candidate = first_line.strip()
+        if not sep or not candidate:
+            break
+        looks_preamble = bool(_CONTINUATION_PREAMBLE_RE.match(candidate)) or (
+            candidate.endswith(":")
+            and re.search(r"(?:no repetition|without repeat|where (?:it|I) (?:stopped|left)|continu)", candidate, re.IGNORECASE)
+        )
+        if not looks_preamble:
+            break
+        remaining = rest
+    return remaining.lstrip("\n") if remaining is not text else text
+
+
+def _trim_symbol_flood(text: str) -> str:
+    """Trim a trailing punctuation flood (e.g. a table-separator row that ran
+    away into hundreds of dashes) from the delivered text before stitching a
+    continuation onto it. A legitimately short separator row survives the
+    16-char threshold; a truncated one is repairable client-side."""
+    return re.sub(r"[ \t|\-:=+_~*#.]{16,}\s*$", "", (text or "").rstrip()).rstrip()
 
 
 def _looks_like_restart(prior: str, round_head: str) -> bool:
@@ -744,7 +952,9 @@ async def _stream_round(sync_iter, state: dict[str, Any], *, prior_text: str = "
                 break
             if len(raw) < _CONTINUATION_TRIM_WINDOW:
                 continue  # keep buffering until the overlap window is full
-            head = _trim_overlap(prior_text, raw)
+            # Strip courteous lead-ins BEFORE the overlap/restart checks — a novel
+            # preamble at the head otherwise masks a full restart behind it.
+            head = _trim_overlap(prior_text, _strip_continuation_preamble(raw))
             if _looks_like_restart(prior_text, head):
                 state["restarted"] = True
                 aborted = True
@@ -768,7 +978,7 @@ async def _stream_round(sync_iter, state: dict[str, Any], *, prior_text: str = "
     if not aborted:
         raw, tail = _stream_tail_delta(raw, last_chunk)
         if not head_emitted:
-            head = _trim_overlap(prior_text, raw)
+            head = _trim_overlap(prior_text, _strip_continuation_preamble(raw))
             if _looks_like_restart(prior_text, head):
                 state["restarted"] = True
                 head = ""
@@ -829,13 +1039,21 @@ async def _stream_with_continuation(
     for round_i in range(attempts + 1):
         convo = list(contents)
         round_config = config
+        was_recovery = use_recovery and round_i > 0
         if round_i > 0:
+            # A truncated round can end in a runaway separator row (hundreds of
+            # dashes). Trim it from the stitched answer + the model-turn replay
+            # so the continuation doesn't resume the flood or glue onto it.
+            full = _trim_symbol_flood(full)
             if use_recovery:
                 follow_up = build_recovery_prompt(full)
                 round_config = _recovery_sampling(config, model)
             else:
                 follow_up = CHAT_CONTINUATION_PROMPT
-            convo.append(gt.Content(role="model", parts=[gt.Part(text=full.rstrip())]))
+            # Gemini rejects empty text parts — when round 0 degenerated with
+            # nothing delivered, send the recovery instruction without a model turn.
+            if full.rstrip():
+                convo.append(gt.Content(role="model", parts=[gt.Part(text=full.rstrip())]))
             convo.append(gt.Content(role="user", parts=[gt.Part(text=follow_up)]))
             yield {
                 "type": "status",
@@ -846,6 +1064,11 @@ async def _stream_with_continuation(
                     else f"Completing truncated answer ({round_i}/{attempts})..."
                 ),
             }
+            if was_recovery:
+                # The previous round was cut mid-structure (degenerate loop) and its
+                # streamed tail stays visible client-side. A paragraph break stops the
+                # recovery rewrite from gluing onto a broken table/list row mid-line.
+                yield {"type": "chunk", "text": "\n\n"}
             logger.info(
                 "Continuation round %s/%s (recovery=%s) model=%s answer_chars=%s",
                 round_i,
@@ -876,7 +1099,12 @@ async def _stream_with_continuation(
 
         # ── CRITICAL: Only append to the answer if the round was VALID ──
         if not restarted and not degenerate:
-            full += round_text
+            if was_recovery and full and round_text and not full.endswith("\n"):
+                # Keep the recovery rewrite on its own paragraph in the stitched
+                # answer too, so markdown structures parse cleanly.
+                full += "\n\n" + round_text
+            else:
+                full += round_text
         
         if state.get("last_chunk") is not None:
             had_chunk = True
@@ -898,7 +1126,10 @@ async def _stream_with_continuation(
             # cannot recover — deliver the partial answer, flagged honestly.
             truncated = True
             consec_degen += 1
-            if consec_degen >= 2 or not full.strip():
+            # NOTE: an empty `full` must NOT block recovery — a round-0 whitespace
+            # flood (e.g. inside the first table row) leaves full empty, and
+            # without a recovery attempt the user gets a blank/garbage answer.
+            if consec_degen >= 2:
                 logger.warning("Repetition persisted across rounds — delivering partial answer.")
                 break
             use_recovery = True
@@ -929,6 +1160,13 @@ async def _stream_with_continuation(
 
     if not had_chunk:
         return
+
+    # Authoritative stitched answer: excludes degenerate/restarted rounds whose
+    # chunks were streamed live. Consumers that accumulate chunks must replace
+    # their accumulation with this (same convention as gemini_cache_service).
+    # Emitted even when EMPTY — an all-degenerate stream must not let the
+    # streamed garbage become the saved answer.
+    yield {"type": "final_answer", "text": _trim_symbol_flood(full)}
 
     usage_ev: dict[str, Any] = {
         "type": "usage",
@@ -1279,7 +1517,29 @@ async def stream_llm_with_gcs(
     from google.genai import types as gt
 
     meta = metadata or {}
-    file_parts = _inline_file_parts(gcs_uris)
+    yield {"type": "status", "status": "generating", "message": "Reading document..."}
+    loop = asyncio.get_event_loop()
+    # Vertex rejects inline requests over ~20MB, and downloading big objects here
+    # would block the event loop — large documents go as gs:// URI parts that
+    # Vertex fetches itself. Small ones keep the proven inline path (off-loop).
+    _INLINE_LIMIT_BYTES = 18 * 1024 * 1024
+    total_size = await loop.run_in_executor(None, _total_gcs_size, gcs_uris)
+    if total_size > _INLINE_LIMIT_BYTES:
+        # ChatModel's large-file strategy: gs:// URI parts, page-splitting any
+        # PDF that exceeds Vertex's 50MB per-file limit.
+        logger.info("Document chat: %.1fMB total — using gs:// URI file parts", total_size / 1048576)
+        try:
+            effective_uris, split_notice = await loop.run_in_executor(
+                None, _split_oversized_pdfs, gcs_uris, meta.get("sessionId")
+            )
+        except Exception as split_exc:
+            yield {"type": "error", "message": str(split_exc)}
+            return
+        if split_notice:
+            question = f"{split_notice}{question}"
+        file_parts = _uri_file_parts(effective_uris)
+    else:
+        file_parts = await loop.run_in_executor(None, _inline_file_parts, gcs_uris)
     if not file_parts:
         yield {"type": "error", "message": "Could not load document content for processing"}
         return

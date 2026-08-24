@@ -216,6 +216,51 @@ def _compute_widths() -> None:
     _S.prefix_len = sum(_S.widths[c] for c in cols) + 3 * len(cols)
 
 
+_ANSI_WIDTH_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def _visible_len(text: str) -> int:
+    return len(_ANSI_WIDTH_RE.sub('', text or ''))
+
+
+def log_message_width() -> int:
+    """Columns left for MESSAGE after TIME/LEVEL/COMPONENT/MODEL.
+
+    ASCII tables must stay within this width or the terminal wraps them and
+    the borders fall apart.
+    """
+    try:
+        term = shutil.get_terminal_size(fallback=(120, 40)).columns
+    except Exception:
+        term = 120
+    term = _env_int('LOG_WIDTH', term)
+    prefix = _S.prefix_len or (8 + 5 + 16 + 20 + 12)
+    return max(40, term - prefix - 1)
+
+
+def _continuation_indent(msg: str) -> int:
+    """Pad wrapped log lines under MESSAGE, unless that would wrap an ASCII table.
+
+    Boxed reports (`+---+`, `| col |`) always start at column 0. Indenting them
+    under the MODEL column made Cursor wrap mid-border and scramble the table.
+    """
+    rest = (msg or '').split('\n')[1:]
+    if not rest:
+        return _S.prefix_len
+    if any(line.lstrip()[:1] in {'+', '|', '='} for line in rest):
+        return 0
+    indent = _S.prefix_len
+    try:
+        term = shutil.get_terminal_size(fallback=(140, 40)).columns
+    except Exception:
+        term = 140
+    term = _env_int('LOG_WIDTH', term)
+    widest = max(_visible_len(line) for line in rest)
+    if indent + widest + 4 >= term:
+        return 0
+    return indent
+
+
 def _paint(text: str, color: str) -> str:
     return f'{color}{text}{_R}' if (color and _S.color) else text
 
@@ -394,15 +439,18 @@ class RichFormatter(logging.Formatter):
         w = _S.widths
 
         msg = fields['message']
-        if not fields.get('plain'):
+        multiline = '\n' in msg
+        if not fields.get('plain') and not multiline:
             msg = _highlight_kv(msg)
             style = _MSG_STYLE.get(fields['status'], '')
             if style and fields['status'] in ('failed', 'completed'):
                 msg = _paint(msg, style)
 
         # Align continuation lines (token-usage tables, tracebacks) under MESSAGE.
-        if '\n' in msg:
-            msg = msg.replace('\n', '\n' + ' ' * _S.prefix_len)
+        # If the block is wider than the remaining columns, indent 0 so ASCII
+        # tables stay aligned instead of wrapping mid-border.
+        if multiline:
+            msg = msg.replace('\n', '\n' + ' ' * _continuation_indent(msg))
 
         level = record.levelname
         model = fields['model']

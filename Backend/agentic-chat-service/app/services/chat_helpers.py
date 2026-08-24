@@ -133,7 +133,8 @@ def build_attached_files_snapshot(
     out = []
     for f in files:
         gcs_path = f.get("gcs_path")
-        source_uri = f"gs://{bucket_name}/{gcs_path}" if gcs_path else None
+        from app.services.gcs_service import to_gcs_uri
+        source_uri = to_gcs_uri(bucket_name, gcs_path) if gcs_path else None
         prepared = prepared_by_uri.get(source_uri) if source_uri else None
         active = (
             prepared.get("active_gcs_uris")

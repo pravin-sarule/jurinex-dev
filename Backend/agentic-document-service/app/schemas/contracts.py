@@ -203,6 +203,7 @@ class ExtractCaseFieldsResponse(BaseModel):
     extractedData: dict[str, Any]
     requiresReview: bool
     sourceDocuments: list[str] = Field(default_factory=list)
+    chronology: dict[str, Any] = Field(default_factory=dict)
     message: str
 
 
