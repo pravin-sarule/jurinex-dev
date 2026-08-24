@@ -1039,7 +1039,8 @@ def es_legal_search(parsed: dict[str, Any], *, mode: str = "strict",
                                      if p["fragment"])
         doc.pop("_bm25", None)
         ranked.append(doc)
-    ranked.sort(key=lambda d: d["finalScore"], reverse=True)
+    # tid tie-break keeps equal-score ordering identical across runs.
+    ranked.sort(key=lambda d: (-d["finalScore"], str(d.get("tid") or "")))
     return ranked
 
 
@@ -1537,7 +1538,7 @@ class IndianKanoonClient:
             logger.info("[scope] dropped %d candidate(s) outside the selected courts",
                         dropped_scope)
         pool = sorted(by_id.values(),
-                      key=lambda c: (len(c.matched_terms), hits[c.doc_id]), reverse=True)
+                      key=lambda c: (-len(c.matched_terms), -hits[c.doc_id], c.doc_id))
         return pool[:cap]
 
 
@@ -2693,6 +2694,7 @@ async def grounded_good_law_check(title: str, court: str, year: int | None) -> d
                 config=gt.GenerateContentConfig(
                     tools=[gt.Tool(google_search=gt.GoogleSearch())],
                     temperature=0.0,  # determinism: same as every other agent
+                    seed=42,
                 ),
             )
 

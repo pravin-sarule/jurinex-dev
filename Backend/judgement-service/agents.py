@@ -148,7 +148,9 @@ def _gen_config(temperature: float,
     # 0 regardless of the per-agent request. The argument is kept so
     # per-agent tuning can return by deleting one line.
     del temperature
-    config = genai_types.GenerateContentConfig(temperature=0.0)
+    # Fixed seed: temperature 0 alone is not bit-reproducible on Gemini —
+    # the seed pins sampling so the same prompt yields the same output.
+    config = genai_types.GenerateContentConfig(temperature=0.0, seed=42)
     if model and model.startswith("gemini-3"):
         # Gemini 3 models think at a HIGH level by default; LOW keeps the
         # structured-extraction quality while cutting latency substantially
@@ -973,6 +975,7 @@ async def _verify_direct_cached(message: str) -> JudgmentVerification | None:
         return None
     config = genai_types.GenerateContentConfig(
         temperature=0.0,
+        seed=42,
         cached_content=cache_name,
         response_mime_type="application/json",
         response_schema=JudgmentVerification,
@@ -2104,7 +2107,8 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
 
     # Re-rank THIS issue's pool against THIS issue's text only.
     semantic = await rerank(issue.issue, pool)
-    pool.sort(key=lambda c: semantic.get(c.doc_id, 0.0), reverse=True)
+    # doc_id tie-break: tied scores must not rank by async arrival order.
+    pool.sort(key=lambda c: (-semantic.get(c.doc_id, 0.0), c.doc_id))
 
     # Fetch full text for the top N only (each /doc call is billed) —
     # needed for the relevance judge, party perspective, good-law markers,
@@ -2202,7 +2206,7 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
     if verifications:
         surfaced = [r for r in surfaced if r.breakdown.ai_relevance is not None]
     elif not surfaced:
-        surfaced = sorted(scored, key=lambda r: r.score, reverse=True)[:MAX_RESULTS_PER_ISSUE]
+        surfaced = sorted(scored, key=lambda r: (-r.score, r.doc_id))[:MAX_RESULTS_PER_ISSUE]
     # Support (petitioner-side) authorities lead; within a side, the
     # client's OWN High Court first (binding at the forum), then bench-wise
     # (Supreme Court → High Courts → tribunals → district), top score first.
@@ -2216,7 +2220,7 @@ async def _issue_round(issue: Issue, context: CaseContext, keywords: KeywordSet,
     court_by_id = {c.doc_id: c.court for c in pool}
     surfaced.sort(key=lambda r: (r.red_flag, side_rank.get(r.side, 1),
                                  forum_court_rank(court_by_id.get(r.doc_id, ""),
-                                                  forum_profile), -r.score))
+                                                  forum_profile), -r.score, r.doc_id))
     surfaced = surfaced[:MAX_RESULTS_PER_ISSUE]
 
     return {
