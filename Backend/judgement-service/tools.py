@@ -2692,7 +2692,7 @@ async def grounded_good_law_check(title: str, court: str, year: int | None) -> d
                 contents=prompt,
                 config=gt.GenerateContentConfig(
                     tools=[gt.Tool(google_search=gt.GoogleSearch())],
-                    temperature=0.1,
+                    temperature=0.0,  # determinism: same as every other agent
                 ),
             )
 
