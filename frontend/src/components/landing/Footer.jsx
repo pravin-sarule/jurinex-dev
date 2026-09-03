@@ -1,98 +1,198 @@
-import gavelIcon from "../../assets/JuriNex_gavel_logo.png"
+import PropTypes from "prop-types"
+import { useNavigate } from "react-router-dom"
+import { CONTACT_INFO, FOOTER_COLUMNS, SOCIAL_LINKS } from "../../utils/landingConstants"
+import { Icon } from "./primitives"
+import BrandLogo from "./BrandLogo"
 
+/** Brand icons lucide doesn't ship (Pinterest, X). */
+const PinterestIcon = () => (
+  <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4" aria-hidden="true">
+    <path d="M12 2C6.48 2 2 6.48 2 12c0 4.24 2.64 7.86 6.36 9.31-.09-.79-.17-2 .04-2.87.18-.78 1.18-4.98 1.18-4.98s-.3-.6-.3-1.49c0-1.4.81-2.44 1.82-2.44.86 0 1.27.64 1.27 1.42 0 .86-.55 2.15-.83 3.35-.24 1 .5 1.81 1.49 1.81 1.78 0 3.15-1.88 3.15-4.59 0-2.4-1.72-4.08-4.19-4.08-2.85 0-4.53 2.14-4.53 4.35 0 .86.33 1.79.75 2.29.08.1.09.19.07.29-.08.31-.25 1-.28 1.14-.04.19-.15.23-.34.14-1.25-.58-2.03-2.4-2.03-3.87 0-3.15 2.29-6.04 6.6-6.04 3.46 0 6.16 2.47 6.16 5.77 0 3.44-2.17 6.21-5.18 6.21-1.01 0-1.96-.53-2.29-1.15l-.62 2.37c-.22.87-.83 1.96-1.24 2.62.93.29 1.92.45 2.94.45 5.52 0 10-4.48 10-10S17.52 2 12 2z" />
+  </svg>
+)
+
+const XIcon = () => (
+  <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4" aria-hidden="true">
+    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+  </svg>
+)
+
+const SocialIcon = ({ icon }) => {
+  if (icon === "pinterest") return <PinterestIcon />
+  if (icon === "x") return <XIcon />
+  return <Icon name={icon} className="h-4 w-4" />
+}
+
+SocialIcon.propTypes = { icon: PropTypes.string.isRequired }
+
+/**
+ * Light enterprise footer with the full company record from jurinex.ai —
+ * columns, legal documents, social profiles, and statutory identifiers.
+ * Anchor links scroll in place on the landing page and route home (with a
+ * scroll target) from other pages; policy links open PolicyModal.
+ */
 const Footer = ({ onOpenPolicy, onGetInTouch }) => {
+  const navigate = useNavigate()
   const year = new Date().getFullYear()
 
+  const followLink = (link) => {
+    if (link.type === "policy") {
+      onOpenPolicy?.(link.href)
+      return
+    }
+    if (link.type === "route") {
+      navigate(link.href)
+      return
+    }
+    if (link.type === "external") {
+      window.open(link.href, "_blank", "noopener,noreferrer")
+      return
+    }
+    // anchor
+    const id = link.href.replace("#", "")
+    const el = document.getElementById(id)
+    if (el) el.scrollIntoView({ behavior: "smooth" })
+    else navigate("/", { state: { scrollTo: id } })
+  }
+
   return (
-    <footer id="about" className="bg-white">
-      {/* "Get in touch" banner */}
-      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-        <div className="flex flex-col items-center justify-between gap-4 rounded-2xl bg-gray-100 px-8 py-6 sm:flex-row">
-          <p className="font-dmSans text-lg font-medium text-teal-700">
-            Have a question or a use case in mind?
-          </p>
+    <footer className="border-t border-nx-line bg-white" aria-labelledby="footer-heading">
+      <h2 id="footer-heading" className="sr-only">
+        Footer
+      </h2>
+
+      {/* Get in touch banner */}
+      <div className="mx-auto max-w-7xl px-5 pt-10 sm:px-8">
+        <div className="flex flex-col items-center justify-between gap-5 rounded-3xl bg-teal-50 px-8 py-9 md:flex-row">
+          <div>
+            <p className="font-display text-xl font-semibold text-nx-ink">
+              Have a question or a use case in mind?
+            </p>
+            <p className="mt-1 text-sm text-nx-muted">
+              Tell us how your practice works — we'll show you where Jurinex fits.
+            </p>
+          </div>
           <button
             type="button"
-            onClick={onGetInTouch}
-            className="rounded-lg bg-teal-600 px-6 py-2.5 font-dmSans text-sm font-semibold text-white transition-all hover:bg-teal-600/90 active:scale-[0.98]"
+            onClick={() => (onGetInTouch ? onGetInTouch() : navigate("/contact"))}
+            className="inline-flex flex-none items-center gap-2 rounded-full bg-teal-600 px-6 py-3 text-sm font-semibold text-white shadow-md shadow-teal-500/25 transition-all duration-200 hover:bg-teal-700 active:scale-[0.98]"
           >
             Get in touch
+            <Icon name="ArrowRight" className="h-4 w-4" />
           </button>
         </div>
       </div>
 
-      {/* Main footer */}
-      <div className="mx-auto max-w-7xl px-4 pb-8 pt-10 sm:px-6 lg:px-8">
-        <div className="flex flex-col gap-10 sm:flex-row sm:justify-between">
-          {/* Brand */}
-          <div className="max-w-xs">
-            <a href="#platform" className="inline-flex items-center gap-2">
-              <img src={gavelIcon} alt="" aria-hidden="true" className="h-8 w-8 rounded-lg" />
-              <span className="font-playfair text-lg font-bold text-teal-700">
-                JuriNex by NextIntel AI
-              </span>
-            </a>
-            <p className="mt-3 font-dmSans text-sm leading-relaxed text-juri-muted">
-              Transforming legal document analysis with cutting-edge AI technology.
+      {/* Main columns */}
+      <div className="mx-auto max-w-7xl px-5 pb-10 pt-14 sm:px-8">
+        <div className="grid grid-cols-1 gap-12 lg:grid-cols-[1.3fr_2.7fr]">
+          {/* Brand + contact */}
+          <div>
+            <BrandLogo size="lg" />
+            <p className="mt-4 max-w-xs text-sm leading-relaxed text-nx-muted">
+              {CONTACT_INFO.tagline}
             </p>
-          </div>
-
-          {/* Right columns */}
-          <div className="flex gap-16">
-            {/* Contact Us */}
-            <div>
-              <p className="font-dmSans text-sm font-semibold text-teal-700">Contact Us</p>
-              <address className="mt-3 space-y-1 font-dmSans text-sm not-italic text-juri-muted">
-                <p>B-11, Near Railway Station Road,</p>
-                <p>MIDC, Chhatrapati Sambhaji Nagar,</p>
-                <p>Maharashtra 431005</p>
-                <p className="mt-2">+91 9684027372</p>
+            <address className="mt-6 space-y-1 text-sm not-italic leading-relaxed text-nx-muted">
+              <p className="font-semibold text-nx-ink">{CONTACT_INFO.company}</p>
+              {CONTACT_INFO.addressLines.map((line) => (
+                <p key={line}>{line}</p>
+              ))}
+              <p className="pt-2">
                 <a
-                  href="mailto:info@nexintelai.com"
-                  className="block text-teal-600 hover:underline"
+                  href={`tel:${CONTACT_INFO.phone.replace(/\s/g, "")}`}
+                  className="transition-colors hover:text-teal-700"
                 >
-                  info@nexintelai.com
+                  {CONTACT_INFO.phone}
                 </a>
-              </address>
-            </div>
+              </p>
+              <p>
+                <a
+                  href={`mailto:${CONTACT_INFO.email}`}
+                  className="font-medium text-teal-700 transition-colors hover:text-teal-800"
+                >
+                  {CONTACT_INFO.email}
+                </a>
+              </p>
+            </address>
 
-            {/* Legal */}
-            <div>
-              <p className="font-dmSans text-sm font-semibold text-teal-700">Legal</p>
-              <ul className="mt-3 space-y-2">
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => onOpenPolicy?.("terms")}
-                    className="font-dmSans text-sm text-juri-muted transition hover:text-teal-600"
-                  >
-                    Terms &amp; Conditions
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    onClick={() => onOpenPolicy?.("dpdpa")}
-                    className="font-dmSans text-sm text-juri-muted transition hover:text-teal-600"
-                  >
-                    Privacy Policy
-                  </button>
-                </li>
-              </ul>
+            {/* Social */}
+            <div className="mt-6 flex items-center gap-2.5">
+              <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-nx-faint">
+                Follow
+              </span>
+              {SOCIAL_LINKS.map((social) => (
+                <a
+                  key={social.label}
+                  href={social.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={`Jurinex on ${social.label}`}
+                  className="grid h-8 w-8 place-items-center rounded-full border border-nx-line text-nx-muted transition-colors hover:border-teal-600 hover:text-teal-700"
+                >
+                  <SocialIcon icon={social.icon} />
+                </a>
+              ))}
             </div>
           </div>
+
+          {/* Link columns */}
+          <nav
+            className="grid grid-cols-2 gap-x-8 gap-y-10 sm:grid-cols-3 lg:grid-cols-5"
+            aria-label="Footer"
+          >
+            {FOOTER_COLUMNS.map((column) => (
+              <div key={column.heading}>
+                <p className="text-sm font-semibold text-nx-ink">{column.heading}</p>
+                <ul className="mt-4 space-y-2.5">
+                  {column.links.map((link) => (
+                    <li key={`${column.heading}-${link.title}`}>
+                      <button
+                        type="button"
+                        onClick={() => followLink(link)}
+                        className="text-left text-sm text-nx-muted transition-colors hover:text-teal-700"
+                      >
+                        {link.title}
+                        {link.type === "external" && link.href.startsWith("https") && (
+                          <Icon name="ArrowUpRight" className="mb-1 ml-0.5 inline h-3 w-3" />
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </nav>
+        </div>
+
+        {/* Statutory identifiers */}
+        <div className="mt-14 flex flex-col gap-1.5 border-t border-nx-line pt-7 text-xs leading-relaxed text-nx-faint sm:flex-row sm:flex-wrap sm:gap-x-8">
+          <p>
+            <span className="font-semibold text-nx-muted">CIN:</span> {CONTACT_INFO.cin}
+          </p>
+          <p>
+            <span className="font-semibold text-nx-muted">GSTIN:</span> {CONTACT_INFO.gstin}
+          </p>
+          <p>
+            <span className="font-semibold text-nx-muted">Registered Office:</span>{" "}
+            {CONTACT_INFO.registeredOffice}
+          </p>
         </div>
 
         {/* Bottom bar */}
-        <div className="mt-10 border-t border-teal-300/60 pt-6 text-center">
-          <p className="font-dmSans text-sm text-juri-muted">
-            © {year} NexIntelAI. All rights reserved.
+        <div className="mt-6 flex flex-col items-center justify-between gap-3 border-t border-nx-line pt-6 sm:flex-row">
+          <p className="text-sm text-nx-faint">
+            © {year} {CONTACT_INFO.company}. {CONTACT_INFO.incorporation}
           </p>
+          <p className="text-sm text-nx-faint">All rights reserved.</p>
         </div>
       </div>
     </footer>
   )
 }
 
-export default Footer
+Footer.propTypes = {
+  onOpenPolicy: PropTypes.func,
+  onGetInTouch: PropTypes.func,
+}
 
+export default Footer

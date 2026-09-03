@@ -1,11 +1,16 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import PropTypes from "prop-types"
-import { motion as Motion, AnimatePresence } from "framer-motion"
+import { useNavigate } from "react-router-dom"
+import { motion as Motion, AnimatePresence, useReducedMotion } from "framer-motion"
 import { NAV_LINKS } from "../../utils/landingConstants"
 import { useLandingScrollAnimation } from "../../hooks/useLandingScrollAnimation"
-import gavelIcon from "../../assets/JuriNex_gavel_logo.png"
+import { EASE } from "./motionTokens"
+import { Icon } from "./primitives"
+import BrandLogo from "./BrandLogo"
 
-const SECTION_IDS = NAV_LINKS.map((l) => l.href.replace("#", ""))
+const SECTION_IDS = NAV_LINKS.filter((l) => l.href.startsWith("#")).map((l) =>
+  l.href.replace("#", "")
+)
 
 const useActiveSection = () => {
   const [active, setActive] = useState("")
@@ -31,208 +36,309 @@ const useActiveSection = () => {
   return active
 }
 
-const handleNavClick = (e, href, closeMenu) => {
-  e.preventDefault()
-  if (closeMenu) {
-    closeMenu()
-    // Wait for menu to close and body overflow to restore before scrolling
-    setTimeout(() => {
-      const el = document.getElementById(href.replace("#", ""))
-      if (el) el.scrollIntoView({ behavior: "smooth" })
-    }, 320)
-  } else {
-    const el = document.getElementById(href.replace("#", ""))
-    if (el) el.scrollIntoView({ behavior: "smooth" })
-  }
-}
-
-const JurinexLogo = ({ scrolled }) => (
-  <div className="flex items-center gap-2.5">
-    <img src={gavelIcon} alt="" aria-hidden="true" className="h-10 w-10 flex-shrink-0 rounded-xl" />
-    <span
-      className={`flex items-start gap-0.5 font-playfair text-2xl font-extrabold leading-none tracking-tight transition-colors duration-500 ${
-        scrolled ? "text-teal-700" : "text-white"
-      }`}
-    >
-      JuriNex
-      <span
-        aria-hidden="true"
-        className="mt-0.5 font-dmSans font-semibold"
-        style={{ verticalAlign: "super", fontSize: "9px" }}
-      >
-        TM
-      </span>
-    </span>
-  </div>
-)
-
-JurinexLogo.propTypes = { scrolled: PropTypes.bool }
-
+/**
+ * Brevo-style top bar: solid light-teal ground, brand + left-aligned nav
+ * with dropdown menus, Login text link and a teal demo pill on the right.
+ * Used on the landing page and all public pages. Always renders the solid
+ * light bar, so callers passing a legacy `solid` prop are unaffected.
+ */
 const Navbar = ({ onRequestDemo, onLogin, onSectionNav } = {}) => {
-  const { scrolled } = useLandingScrollAnimation({ thresholdPx: 40 })
+  const navigate = useNavigate()
+  const reduceMotion = useReducedMotion()
+  const { scrolled } = useLandingScrollAnimation({ thresholdPx: 8 })
   const activeSection = useActiveSection()
-  const [menuOpen, setMenuOpen] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false) // mobile drawer
+  const [openDropdown, setOpenDropdown] = useState(null) // desktop dropdown label
+  const navRef = useRef(null)
 
-  // Close mobile menu on resize to desktop
+  // Close the mobile menu when resizing up to desktop
   useEffect(() => {
-    const onResize = () => { if (window.innerWidth >= 768) setMenuOpen(false) }
+    const onResize = () => {
+      if (window.innerWidth >= 1024) setMenuOpen(false)
+    }
     window.addEventListener("resize", onResize)
     return () => window.removeEventListener("resize", onResize)
   }, [])
 
-  // Prevent body scroll when menu is open
+  // Lock body scroll while the drawer is open
   useEffect(() => {
     document.body.style.overflow = menuOpen ? "hidden" : ""
-    return () => { document.body.style.overflow = "" }
+    return () => {
+      document.body.style.overflow = ""
+    }
   }, [menuOpen])
+
+  // Close dropdowns on outside click / Escape
+  useEffect(() => {
+    const onDown = (e) => {
+      if (navRef.current && !navRef.current.contains(e.target)) setOpenDropdown(null)
+    }
+    const onKey = (e) => {
+      if (e.key === "Escape") setOpenDropdown(null)
+    }
+    document.addEventListener("pointerdown", onDown)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("pointerdown", onDown)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [])
+
+  /** Follow any nav href: route, in-page anchor, or cross-page section. */
+  const go = (href, { fromDrawer = false } = {}) => {
+    setOpenDropdown(null)
+    if (fromDrawer) setMenuOpen(false)
+
+    if (href.startsWith("/")) {
+      navigate(href)
+      return
+    }
+    const id = href.replace("#", "")
+    if (onSectionNav) {
+      onSectionNav(id)
+      return
+    }
+    const scroll = () => {
+      const el = document.getElementById(id)
+      if (el) el.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth" })
+      else navigate("/", { state: { scrollTo: id } })
+    }
+    // Wait for the drawer to close and body overflow to restore before scrolling
+    if (fromDrawer) setTimeout(scroll, 320)
+    else scroll()
+  }
 
   return (
     <header
-      className={`fixed inset-x-0 top-0 z-50 transition-all duration-500 ease-out ${
+      className={`fixed inset-x-0 top-0 z-50 border-b bg-teal-50 transition-shadow duration-300 ${
         scrolled || menuOpen
-          ? "border-b border-gray-200 bg-white shadow-sm backdrop-blur-md"
-          : "border-b border-transparent bg-transparent"
+          ? "border-teal-100 shadow-[0_1px_12px_rgba(13,148,136,0.10)]"
+          : "border-teal-100/60"
       }`}
     >
       <nav
-        className="flex w-full items-center justify-between gap-6 px-6 py-4 sm:px-10 lg:px-20"
+        ref={navRef}
+        className="mx-auto flex h-16 w-full max-w-7xl items-center gap-8 px-5 sm:px-8"
         aria-label="Primary"
       >
-        {/* Logo */}
+        {/* Brand */}
         <a
           href="#platform"
-          onClick={(e) => handleNavClick(e, "#platform", () => setMenuOpen(false))}
-          className="group flex shrink-0 items-center gap-2 transition-opacity hover:opacity-90"
+          onClick={(e) => {
+            e.preventDefault()
+            go("#platform")
+          }}
+          className="flex shrink-0 items-center transition-opacity hover:opacity-85"
+          aria-label="Jurinex.ai — back to top"
         >
-          <JurinexLogo scrolled={scrolled || menuOpen} />
+          <BrandLogo />
         </a>
 
-        {/* Desktop nav links */}
-        <ul className="flex flex-1 items-center justify-center gap-3">
+        {/* Desktop links, left-aligned next to the brand */}
+        <ul className="hidden items-center gap-1 lg:flex">
           {NAV_LINKS.map((link) => {
+            const hasMenu = Array.isArray(link.children) && link.children.length > 0
             const isActive = activeSection === link.href.replace("#", "")
+            const isOpen = openDropdown === link.label
+
             return (
-              <li key={link.href}>
-                <a
-                  href={link.href}
-                  onClick={(e) => {
-                    if (onSectionNav) { e.preventDefault(); onSectionNav(link.href.replace("#", "")) }
-                    else handleNavClick(e, link.href)
+              <li
+                key={link.label}
+                className="relative"
+                onMouseEnter={() => hasMenu && setOpenDropdown(link.label)}
+                onMouseLeave={() => hasMenu && setOpenDropdown(null)}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (hasMenu) setOpenDropdown(isOpen ? null : link.label)
+                    else go(link.href)
                   }}
-                  className={`relative px-1 py-1 text-sm font-bold uppercase tracking-wide transition-colors duration-300 ${
-                    scrolled
-                      ? "text-teal-700 hover:text-teal-800"
-                      : "text-white hover:text-teal-200"
+                  aria-expanded={hasMenu ? isOpen : undefined}
+                  aria-haspopup={hasMenu ? "menu" : undefined}
+                  className={`flex items-center gap-1 rounded-md px-3.5 py-2 text-[15px] font-medium transition-colors duration-200 ${
+                    isActive || isOpen ? "text-teal-700" : "text-black hover:text-teal-700"
                   }`}
                 >
                   {link.label}
-                </a>
+                  {hasMenu && (
+                    <Icon
+                      name="ChevronDown"
+                      className={`h-3.5 w-3.5 transition-transform duration-200 ${
+                        isOpen ? "rotate-180" : ""
+                      }`}
+                    />
+                  )}
+                </button>
+
+                {/* Dropdown */}
+                <AnimatePresence>
+                  {hasMenu && isOpen && (
+                    <Motion.div
+                      initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={reduceMotion ? undefined : { opacity: 0, y: 4 }}
+                      transition={{ duration: 0.16, ease: EASE }}
+                      className="absolute left-0 top-full z-50 w-60 pt-2"
+                      role="menu"
+                    >
+                      <div className="overflow-hidden rounded-xl border border-teal-100 bg-white py-1.5 shadow-[0_16px_40px_-16px_rgba(13,60,55,0.25)]">
+                        {link.children.map((child) => (
+                          <button
+                            key={child.label}
+                            type="button"
+                            role="menuitem"
+                            onClick={() => go(child.href)}
+                            className="block w-full px-4 py-2.5 text-left text-sm font-medium text-black transition-colors hover:bg-teal-50 hover:text-teal-700"
+                          >
+                            {child.label}
+                          </button>
+                        ))}
+                      </div>
+                    </Motion.div>
+                  )}
+                </AnimatePresence>
               </li>
             )
           })}
         </ul>
 
-        {/* Desktop CTA buttons */}
-        <div className="flex items-center gap-3">
+        {/* Desktop actions */}
+        <div className="ml-auto hidden items-center gap-4 lg:flex">
           <button
             type="button"
-            className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${
-              scrolled
-                ? "border border-gray-300 bg-transparent text-gray-800 hover:bg-gray-100"
-                : "border border-white/40 bg-white/10 text-white hover:bg-white/20"
-            }`}
             onClick={() => onLogin?.()}
-            aria-label="Log in to JuriNex"
+            aria-label="Log in to your account"
+            className="text-[15px] font-medium text-black underline decoration-1 underline-offset-4 transition-colors hover:text-teal-700"
           >
             Login
           </button>
+          {onRequestDemo && (
+            <button
+              type="button"
+              onClick={onRequestDemo}
+              aria-label="Book a product demo"
+              className="rounded-full border border-teal-600 px-4.5 py-2 text-sm font-semibold text-teal-700 transition-all duration-200 hover:bg-teal-600 hover:text-white active:scale-[0.98]"
+            >
+              Book a Demo
+            </button>
+          )}
           <button
             type="button"
-            className="rounded-full bg-teal-600 px-4 py-2 text-sm font-semibold text-white transition-transform hover:scale-[1.02] active:scale-[0.98]"
-            onClick={onRequestDemo}
-            aria-label="Book a product demo"
+            onClick={() => navigate("/register")}
+            aria-label="Start your free trial"
+            className="rounded-full bg-teal-600 px-4.5 py-2.5 text-sm font-semibold text-white shadow-md shadow-teal-500/25 transition-all duration-200 hover:bg-teal-700 active:scale-[0.98]"
           >
-            Book a Demo
+            Start Free Trial
           </button>
         </div>
 
-        {/* Mobile: hamburger */}
+        {/* Mobile hamburger */}
         <button
           type="button"
-          className="hidden h-10 w-10 items-center justify-center rounded-full sm:hidden"
+          className="ml-auto flex h-10 w-10 items-center justify-center rounded-lg text-black transition-colors hover:bg-teal-100/60 lg:hidden"
           onClick={() => setMenuOpen((o) => !o)}
           aria-label={menuOpen ? "Close menu" : "Open menu"}
           aria-expanded={menuOpen}
         >
-          <span className="relative flex h-5 w-6 flex-col justify-between">
+          <span className="relative flex h-4 w-5 flex-col justify-between" aria-hidden="true">
             <Motion.span
-              animate={menuOpen ? { rotate: 45, y: 9 } : { rotate: 0, y: 0 }}
-              transition={{ duration: 0.25 }}
-              className={`block h-0.5 w-full rounded-full transition-colors duration-500 ${scrolled || menuOpen ? "bg-juri-ink" : "bg-white"}`}
+              animate={menuOpen ? { rotate: 45, y: 7 } : { rotate: 0, y: 0 }}
+              transition={{ duration: reduceMotion ? 0 : 0.22 }}
+              className="block h-0.5 w-full rounded-full bg-current"
             />
             <Motion.span
               animate={menuOpen ? { opacity: 0, scaleX: 0 } : { opacity: 1, scaleX: 1 }}
-              transition={{ duration: 0.2 }}
-              className={`block h-0.5 w-full rounded-full transition-colors duration-500 ${scrolled || menuOpen ? "bg-juri-ink" : "bg-white"}`}
+              transition={{ duration: reduceMotion ? 0 : 0.16 }}
+              className="block h-0.5 w-full rounded-full bg-current"
             />
             <Motion.span
-              animate={menuOpen ? { rotate: -45, y: -9 } : { rotate: 0, y: 0 }}
-              transition={{ duration: 0.25 }}
-              className={`block h-0.5 w-full rounded-full transition-colors duration-500 ${scrolled || menuOpen ? "bg-juri-ink" : "bg-white"}`}
+              animate={menuOpen ? { rotate: -45, y: -7 } : { rotate: 0, y: 0 }}
+              transition={{ duration: reduceMotion ? 0 : 0.22 }}
+              className="block h-0.5 w-full rounded-full bg-current"
             />
           </span>
         </button>
       </nav>
 
-      {/* Mobile menu drawer */}
+      {/* Mobile drawer */}
       <AnimatePresence>
         {menuOpen && (
           <Motion.div
-            initial={{ opacity: 0, height: 0 }}
+            initial={reduceMotion ? false : { opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-            className="overflow-hidden border-t border-gray-100 bg-white md:hidden"
+            exit={reduceMotion ? undefined : { opacity: 0, height: 0 }}
+            transition={{ duration: 0.28, ease: EASE }}
+            className="max-h-[calc(100vh-4rem)] overflow-y-auto border-t border-teal-100 bg-teal-50 lg:hidden"
           >
-            <div className="flex flex-col px-6 py-5 gap-1">
-              {NAV_LINKS.map((link, i) => {
-                const isActive = activeSection === link.href.replace("#", "")
-                return (
-                  <Motion.a
-                    key={link.href}
-                    href={link.href}
-                    initial={{ opacity: 0, x: -16 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: i * 0.05, duration: 0.25 }}
-                    onClick={(e) => {
-                      if (onSectionNav) { e.preventDefault(); setMenuOpen(false); onSectionNav(link.href.replace("#", "")) }
-                      else handleNavClick(e, link.href, () => setMenuOpen(false))
-                    }}
-                    className={`rounded-xl px-4 py-3 font-dmSans text-sm font-semibold uppercase tracking-wider transition-colors ${
-                      isActive
-                        ? "bg-teal-500/10 text-teal-600"
-                        : "text-teal-700 hover:bg-gray-50 hover:text-teal-600"
+            <div className="flex flex-col gap-0.5 px-5 py-4">
+              {NAV_LINKS.map((link, i) => (
+                <Motion.div
+                  key={link.label}
+                  initial={reduceMotion ? false : { opacity: 0, x: -12 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: i * 0.04, duration: 0.22 }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => go(link.href, { fromDrawer: true })}
+                    className={`w-full rounded-lg px-4 py-3 text-left text-sm font-semibold transition-colors ${
+                      activeSection === link.href.replace("#", "")
+                        ? "bg-teal-500/10 text-teal-700"
+                        : "text-black hover:bg-teal-100/60 hover:text-teal-700"
                     }`}
                   >
                     {link.label}
-                  </Motion.a>
-                )
-              })}
+                  </button>
+                  {link.children && (
+                    <div className="mb-1 ml-4 border-l border-teal-200 pl-2">
+                      {link.children.map((child) => (
+                        <button
+                          key={child.label}
+                          type="button"
+                          onClick={() => go(child.href, { fromDrawer: true })}
+                          className="block w-full rounded-lg px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-teal-100/60 hover:text-teal-700"
+                        >
+                          {child.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </Motion.div>
+              ))}
 
-              <div className="mt-4 flex flex-col gap-3 border-t border-gray-100 pt-4">
+              <div className="mt-3 flex flex-col gap-2.5 border-t border-teal-100 pt-4">
                 <button
                   type="button"
-                  className="w-full rounded-full border border-gray-300 py-2.5 font-dmSans text-sm font-medium text-teal-700 transition-colors hover:bg-gray-50"
-                  onClick={() => { onLogin?.(); setMenuOpen(false) }}
+                  onClick={() => {
+                    setMenuOpen(false)
+                    onLogin?.()
+                  }}
+                  className="w-full rounded-full border border-gray-400 py-2.5 text-sm font-medium text-black transition-colors hover:bg-white"
                 >
                   Login
                 </button>
+                {onRequestDemo && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false)
+                      onRequestDemo()
+                    }}
+                    className="w-full rounded-full border border-teal-600 py-2.5 text-sm font-semibold text-teal-700 transition-colors hover:bg-teal-600 hover:text-white"
+                  >
+                    Book a Demo
+                  </button>
+                )}
                 <button
                   type="button"
-                  className="w-full rounded-full bg-teal-600 py-2.5 font-dmSans text-sm font-semibold text-white shadow-md shadow-teal-500/25 transition-transform hover:scale-[1.01] active:scale-[0.98]"
-                  onClick={() => { onRequestDemo?.(); setMenuOpen(false) }}
+                  onClick={() => {
+                    setMenuOpen(false)
+                    navigate("/register")
+                  }}
+                  className="w-full rounded-full bg-teal-600 py-2.5 text-sm font-semibold text-white shadow-md shadow-teal-500/25 transition-transform hover:bg-teal-700 active:scale-[0.99]"
                 >
-                  Book a Demo
+                  Start Free Trial
                 </button>
               </div>
             </div>
@@ -246,9 +352,8 @@ const Navbar = ({ onRequestDemo, onLogin, onSectionNav } = {}) => {
 Navbar.propTypes = {
   onRequestDemo: PropTypes.func,
   onLogin: PropTypes.func,
+  onSectionNav: PropTypes.func,
+  solid: PropTypes.bool,
 }
 
 export default Navbar
-
-
-

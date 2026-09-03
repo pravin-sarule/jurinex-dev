@@ -4,116 +4,57 @@ import { motion as Motion } from "framer-motion"
 import { PAYMENT_SERVICE_URL } from "../../config/apiConfig"
 import apiService from "../../services/api"
 import { buildPlanLimitSections, toDisplayString } from "../../utils/planDisplayConfig"
+import { PLAN_FEATURES } from "../../utils/landingConstants"
 import PlanLimitsDisplay from "../PlanLimitsDisplay"
 
+/**
+ * Subscription tiers as published on jurinex.ai. Every plan includes the
+ * same PLAN_FEATURES; tiers differ by seats. Checkout resolves the real
+ * backend plan from the payment-service catalog by name hints.
+ */
 const PLANS = [
   {
-    id: "enterprise",
-    name: "Enterprise",
-    description: "Custom enterprise plan - Contact sales for pricing and features",
-    monthlyPrice: null,
-    annualPrice: null,
-    monthlyPeriod: null,
-    annualPeriod: null,
-    features: [
-      "Customizable Systems (Tailored to your requirements)",
-      "Custom Case Management (Designed for your workflow)",
-      "Advanced Context Memory (Customizable retention policies)",
-      "Custom Prompts & Templates (Built for your firm)",
-      "Unlimited Users (Scalable to your organization size)",
-      "Storage: Custom Storage (Scalable based on requirements)",
-      "Usage: Custom Usage Limits (Tailored to your needs)",
-    ],
-    cta: "Select Plan",
-    monthlyHighlighted: false,
-    annualHighlighted: true,
-  },
-  {
-    id: "free",
-    name: "SoloLite",
-    description: "Starter plan for individual legal professionals",
-    monthlyPrice: "₹999",
-    annualPrice: "₹9,990",
-    monthlyPeriod: null,
-    annualPeriod: null,
-    features: [
-      "System 1 + System 2 (Chat + Deep Case Mgmt)",
-      "Full Project Folders (Interact with 50+ docs)",
-      "Context Caching (Remembers entire case)",
-      "Unlock ALL Prompts (+ Drafting, Evidence Matrix, Strategy, Cross-Exam)",
-      "1 User",
-      "Limited-Time Free Trial",
-      "Storage: 10 GB",
-      "Usage: FUP",
-    ],
-    cta: "Select Plan",
-    monthlyHighlighted: false,
-    annualHighlighted: false,
-  },
-  {
-    id: "law-firm",
-    name: "Law Firm",
-    description: "Full access for law firms with 5 users",
-    monthlyPrice: "₹9,999",
-    annualPrice: "₹59,990",
+    id: "lite",
+    name: "Jurinex Lite",
+    description: "1 user",
+    monthlyPrice: "₹3,100",
     monthlyPeriod: "/month",
-    annualPeriod: "/year",
-    features: [
-      "System 1 + System 2 (Multi-User Collaboration)",
-      "Shared Project Folders (Junior uploads, Senior analyzes)",
-      "Context Caching (Shared Team Context)",
-      "Unlock ALL Prompts (+ Custom Firm Templates)",
-      "Up to 5 Users",
-      "Storage: 50 GB",
-      "Usage: FUP",
-    ],
-    cta: "Select Plan",
-    monthlyHighlighted: true,
-    annualHighlighted: false,
+    badge: "Limited time offer",
+    features: PLAN_FEATURES,
+    cta: "Start Free Trial",
   },
   {
-    id: "solo-lawyer",
-    name: "Solo Lawyer",
-    description: "Full access for individual lawyers",
-    monthlyPrice: "₹2,004",
-    annualPrice: "₹24,990",
+    id: "plus",
+    name: "Jurinex Plus",
+    description: "Up to 3 users",
+    monthlyPrice: "₹5,100",
     monthlyPeriod: "/month",
-    annualPeriod: "/year",
-    features: [
-      "System 1 + System 2 (Chat + Deep Case Mgmt)",
-      "Full Project Folders (Interact with 50+ docs)",
-      "Context Caching (Remembers entire case)",
-      "Unlock ALL Prompts (+ Drafting, Evidence Matrix, Strategy, Cross-Exam)",
-      "1 User",
-      "Storage: 10 GB",
-      "Usage: FUP",
-    ],
-    cta: "Select Plan",
-    monthlyHighlighted: false,
-    annualHighlighted: false,
+    badge: null,
+    features: PLAN_FEATURES,
+    cta: "Start Free Trial",
+  },
+  {
+    id: "pro",
+    name: "Jurinex Pro",
+    description: "Up to 5 users",
+    monthlyPrice: "₹7,500",
+    monthlyPeriod: "/month",
+    badge: null,
+    features: PLAN_FEATURES,
+    cta: "Start Free Trial",
   },
 ]
 
-const CheckIcon = () => (
-  <svg
-    className="h-4 w-4 flex-shrink-0 text-teal-600"
-    viewBox="0 0 16 16"
-    fill="none"
-    aria-hidden="true"
-  >
-    <path
-      d="M3.5 8.5l3 3 6-6"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  </svg>
-)
+/** Backend catalog name hints per UI tier (new names first, legacy fallbacks after). */
+const NAME_HINTS = {
+  lite: ["jurinex lite", "lite", "sololite", "solo lite", "starter", "basic", "solo lawyer", "solo", "free"],
+  plus: ["jurinex plus", "plus", "law firm", "lawfirm", "team", "business"],
+  pro: ["jurinex pro", "pro", "enterprise"],
+}
+
+const MONTHLY_INTERVALS = ["month", "monthly"]
 
 const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
-  const [billing, setBilling] = useState("monthly")
-  const isAnnual = billing === "annual"
   const [plansCatalog, setPlansCatalog] = useState([])
   const [processingPlanId, setProcessingPlanId] = useState(null)
   const [paymentError, setPaymentError] = useState("")
@@ -168,20 +109,11 @@ const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
       document.body.appendChild(script)
     })
 
-  const resolveBackendPlanForCard = (uiPlan, annual) => {
-    const targetIntervals = annual
-      ? ["year", "yearly", "annual"]
-      : ["month", "monthly"]
-    const nameHints = {
-      enterprise: ["enterprise"],
-      "law-firm": ["law firm", "lawfirm", "business", "team"],
-      free: ["sololite", "solo lite", "free", "starter", "basic"],
-      "solo-lawyer": ["solo lawyer", "solo"],
-    }
-    const hints = nameHints[uiPlan.id] || [uiPlan.name.toLowerCase()]
+  const resolveBackendPlanForCard = (uiPlan) => {
+    const hints = NAME_HINTS[uiPlan.id] || [uiPlan.name.toLowerCase()]
     const activePlans = plansCatalog.filter((p) => p?.is_active !== false)
     const matchingInterval = activePlans.filter((plan) =>
-      targetIntervals.includes(String(plan?.interval || "").toLowerCase())
+      MONTHLY_INTERVALS.includes(String(plan?.interval || "").toLowerCase())
     )
     return (
       matchingInterval.find((plan) =>
@@ -194,50 +126,17 @@ const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
     )
   }
 
-  const resolvePlanIdForCheckout = (uiPlan, annual) => {
-    const targetIntervals = annual
-      ? ["year", "yearly", "annual"]
-      : ["month", "monthly"]
-    const nameHints = {
-      enterprise: ["enterprise"],
-      "law-firm": ["law firm", "lawfirm", "business", "team"],
-      free: ["sololite", "solo lite", "free", "starter", "basic"],
-      "solo-lawyer": ["solo lawyer", "solo"],
-    }
-    const hints = nameHints[uiPlan.id] || [uiPlan.name.toLowerCase()]
-    const activePlans = plansCatalog.filter((p) => p?.is_active !== false)
-
-    const matchingInterval = activePlans.filter((plan) =>
-      targetIntervals.includes(String(plan?.interval || "").toLowerCase())
-    )
-    const matchByName = matchingInterval.find((plan) =>
-      hints.some((hint) =>
-        String(plan?.name || "").toLowerCase().includes(hint)
-      )
-    )
-    if (matchByName?.id) return matchByName.id
-
-    const fallbackByName = activePlans.find((plan) =>
-      hints.some((hint) =>
-        String(plan?.name || "").toLowerCase().includes(hint)
-      )
-    )
-    return fallbackByName?.id || null
-  }
+  const resolvePlanIdForCheckout = (uiPlan) => resolveBackendPlanForCard(uiPlan)?.id || null
 
   const handlePlanCheckout = async (uiPlan) => {
     setPaymentError("")
-    if (uiPlan.id === "enterprise") {
-      onNavigateContact?.()
-      return
-    }
 
     const token = localStorage.getItem("token")
     if (!token) {
       const pendingUpgradePlan = {
         planId: uiPlan.id,
         planName: uiPlan.name,
-        billing: isAnnual ? "annual" : "monthly",
+        billing: "monthly",
       }
       localStorage.setItem("pendingUpgradeCheckout", JSON.stringify(pendingUpgradePlan))
       setPaymentError("Please log in to continue with subscription payment.")
@@ -255,7 +154,7 @@ const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
       return
     }
 
-    const backendPlanId = resolvePlanIdForCheckout(uiPlan, isAnnual)
+    const backendPlanId = resolvePlanIdForCheckout(uiPlan)
     if (!backendPlanId) {
       setPaymentError("No matching payment plan found. Please contact support.")
       return
@@ -339,10 +238,10 @@ const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
   return (
     <section
       id="pricing"
-      className="bg-white py-20 sm:py-28"
+      className="scroll-mt-20 bg-nx-pale py-20 sm:py-28"
       aria-labelledby="pricing-heading"
     >
-      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      <div className="mx-auto max-w-7xl px-5 sm:px-8">
         {/* Header */}
         <Motion.div
           className="text-center"
@@ -351,58 +250,26 @@ const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
           viewport={{ once: true, margin: "-80px" }}
           transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
         >
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-nx-teal">
+            Pricing
+          </p>
           <h2
             id="pricing-heading"
-            className="font-playfair text-3xl font-bold text-teal-700 sm:text-4xl"
+            className="mt-3 font-display text-3xl font-semibold leading-[1.15] tracking-tight text-nx-ink sm:text-4xl"
           >
-            Choose Your Plan
+            Subscription Plans
           </h2>
-          <p className="mx-auto mt-4 max-w-xl font-dmSans text-base text-juri-muted">
-            Select the perfect plan for your legal practice. All plans include our core
-            AI features with scalable pricing.
+          <p className="mx-auto mt-4 max-w-xl text-base text-nx-muted">
+            Start your 7-day free trial today. Every plan includes the full platform —
+            tiers scale with your team.
           </p>
-
-          {/* Toggle */}
-          <div className="mt-8 inline-flex items-center gap-3">
-            <div className="relative flex rounded-full border border-teal-300/60 bg-white p-1 shadow-sm">
-              <button
-                type="button"
-                onClick={() => setBilling("monthly")}
-                className={`rounded-full px-6 py-2 font-dmSans text-sm font-semibold transition-all duration-200 ${
-                  !isAnnual
-                    ? "bg-teal-600 text-white shadow"
-                    : "text-teal-700 hover:text-juri-muted"
-                }`}
-              >
-                Monthly
-              </button>
-              <button
-                type="button"
-                onClick={() => setBilling("annual")}
-                className={`rounded-full px-6 py-2 font-dmSans text-sm font-semibold transition-all duration-200 ${
-                  isAnnual
-                    ? "bg-teal-600 text-white shadow"
-                    : "text-teal-700 hover:text-juri-muted"
-                }`}
-              >
-                Annual
-              </button>
-            </div>
-            <span className="rounded-full bg-emerald-100 px-3 py-1 font-dmSans text-xs font-semibold text-emerald-700">
-              Save 20%
-            </span>
-          </div>
         </Motion.div>
 
         {/* Cards */}
-        <div className="mt-12 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="mx-auto mt-12 grid max-w-5xl gap-6 md:grid-cols-3">
           {PLANS.map((plan, i) => {
-            const price = isAnnual ? plan.annualPrice : plan.monthlyPrice
-            const period = isAnnual ? plan.annualPeriod : plan.monthlyPeriod
-            const ctaLabel =
-              plan.id === "enterprise" && !isAnnual ? "Contact Us" : plan.cta
             const isProcessing = processingPlanId === plan.id
-            const backendPlan = resolveBackendPlanForCard(plan, isAnnual)
+            const backendPlan = resolveBackendPlanForCard(plan)
             const planLimitSections = backendPlan
               ? buildPlanLimitSections(backendPlan)
               : { marketing: plan.features, sections: [] }
@@ -414,75 +281,98 @@ const PricingSection = ({ onNavigateLogin, onNavigateContact }) => {
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true, margin: "-60px" }}
                 transition={{ duration: 0.5, delay: i * 0.08, ease: [0.22, 1, 0.36, 1] }}
-                className="group flex flex-col rounded-2xl border border-teal-300/60 bg-white p-6 shadow-sm transition-all duration-300 hover:-translate-y-2 hover:border-teal-500 hover:shadow-[0_8px_32px_rgba(13,148,136,0.2)]"
+                className="group relative flex flex-col rounded-2xl border border-nx-ink/75 bg-white p-6 shadow-sm transition-all duration-300 hover:-translate-y-2 hover:border-nx-teal hover:shadow-[0_18px_44px_-18px_rgba(6,52,44,0.25)]"
               >
-                {/* Plan name */}
-                <h3 className="text-center font-playfair text-lg font-semibold text-teal-700 transition-colors duration-300 group-hover:text-teal-600">
-                  {plan.name}
-                </h3>
+                {plan.badge && (
+                  <span className="absolute -top-3 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-nx-teal px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-white shadow">
+                    {plan.badge}
+                  </span>
+                )}
 
-                {/* Description */}
-                <p className="mt-2 text-center font-dmSans text-xs leading-snug text-juri-muted">
-                  {toDisplayString(plan.description, "")}
+                {/* Plan name */}
+                <p className="text-center text-xs font-bold uppercase tracking-[0.14em] text-nx-faint">
+                  {plan.name}
                 </p>
 
                 {/* Price */}
-                <div className="mt-5 flex items-end justify-center gap-1">
-                  {price ? (
-                    <>
-                      <span className="font-playfair text-4xl font-bold text-teal-700">
-                        {price}
-                      </span>
-                      {period && (
-                        <span className="mb-1 font-dmSans text-sm text-juri-muted">
-                          {period}
-                        </span>
-                      )}
-                    </>
-                  ) : (
-                    <span className="font-dmSans text-sm italic text-juri-muted">
-                      Contact us for pricing
-                    </span>
-                  )}
+                <div className="mt-4 flex items-end justify-center gap-1">
+                  <span className="font-display text-4xl font-semibold text-nx-ink">
+                    {plan.monthlyPrice}
+                  </span>
+                  <span className="mb-1 text-sm text-nx-muted">{plan.monthlyPeriod}</span>
                 </div>
+                <p className="mt-1.5 text-center text-xs text-nx-muted">
+                  ({toDisplayString(plan.description, "")})
+                </p>
 
                 {/* CTA */}
                 <button
                   type="button"
                   onClick={() => handlePlanCheckout(plan)}
                   disabled={isProcessing}
-                  className="mt-5 w-full rounded-lg border border-teal-300/60 bg-white py-2.5 font-dmSans text-sm font-medium text-teal-700 transition-all duration-300 active:scale-[0.98] group-hover:border-teal-500 group-hover:bg-teal-600 group-hover:text-white"
+                  className="mt-5 w-full rounded-full border border-nx-teal bg-white py-2.5 text-sm font-semibold text-nx-teal transition-all duration-300 active:scale-[0.98] group-hover:bg-nx-teal group-hover:text-white"
                 >
-                  {isProcessing ? "Processing..." : ctaLabel}
+                  {isProcessing ? "Processing..." : plan.cta}
                 </button>
 
                 {/* Divider */}
-                <hr className="my-5 border-teal-300/60" />
+                <hr className="my-5 border-nx-line" />
 
-                {/* Features */}
-                <PlanLimitsDisplay
-                  plan={backendPlan || plan}
-                  planLimitSections={planLimitSections}
-                />
+                {/* Included features (as published on jurinex.ai) */}
+                <ul className="space-y-2.5">
+                  {plan.features.map((feature) => (
+                    <li key={feature} className="flex items-start gap-2.5 text-[13px] text-nx-ink">
+                      <svg
+                        className="mt-0.5 h-4 w-4 flex-none text-nx-teal"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M3.5 8.5l3 3 6-6"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                      {feature}
+                    </li>
+                  ))}
+                </ul>
+
+                {/* Backend-configured limits, when the catalog is reachable */}
+                {backendPlan && (
+                  <div className="mt-5 border-t border-nx-line pt-4">
+                    <PlanLimitsDisplay
+                      plan={backendPlan}
+                      planLimitSections={planLimitSections}
+                    />
+                  </div>
+                )}
               </Motion.div>
             )
           })}
         </div>
 
         {paymentError && (
-          <p className="mt-8 text-center font-dmSans text-sm text-red-600">
+          <p className="mt-8 text-center text-sm text-red-600">
             {toDisplayString(paymentError, "")}
           </p>
         )}
 
-        {/* Bottom CTA */}
-        <div className="mt-12 flex justify-center">
+        {/* Enterprise / custom */}
+        <div className="mx-auto mt-10 flex max-w-5xl flex-col items-center justify-between gap-4 rounded-2xl border border-nx-ink/75 bg-white px-7 py-6 sm:flex-row">
+          <p className="text-sm text-nx-muted">
+            <span className="font-semibold text-nx-ink">Need more than 5 seats</span> or a
+            custom enterprise setup? We'll tailor a plan to your firm.
+          </p>
           <button
             type="button"
-            onClick={() => (isAnnual ? onNavigateContact?.() : null)}
-            className="rounded-full bg-teal-600 px-10 py-3 font-dmSans text-sm font-semibold text-white shadow-md shadow-teal-500/30 transition-all hover:bg-teal-600/90 active:scale-[0.98]"
+            onClick={() => onNavigateContact?.()}
+            className="flex-none rounded-full bg-nx-teal px-7 py-2.5 text-sm font-semibold text-white shadow-md shadow-teal-500/25 transition-all hover:bg-nx-teal-deep active:scale-[0.98]"
           >
-            {isAnnual ? "Contact Us" : "Subscribe"}
+            Contact Us
           </button>
         </div>
       </div>

@@ -1,5 +1,26 @@
 @import "tailwindcss";
 
+/* ------------------------------------------------------------------ */
+/* NexIntel landing design system (nx-*). Adds utilities only — no    */
+/* existing class is redefined, so app pages are unaffected.          */
+/* ------------------------------------------------------------------ */
+@theme {
+  --font-display: "Lora", Georgia, "Times New Roman", serif;
+  --font-body: "Inter", "DM Sans", system-ui, -apple-system, sans-serif;
+
+  --color-nx-ink: #101413;         /* near-black — headings and body ink */
+  --color-nx-forest: #06342c;      /* deep forest teal — dark section ground */
+  --color-nx-forest-soft: #0b4a3f; /* raised surface on dark grounds */
+  --color-nx-teal: #0d9488;        /* primary accent (brand teal) */
+  --color-nx-teal-deep: #0f766e;
+  --color-nx-teal-ink: #115e59;    /* small labels / emphasized accents */
+  --color-nx-mint: #99f6e4;        /* accent text on dark grounds */
+  --color-nx-muted: #5b6664;       /* body text on light grounds */
+  --color-nx-faint: #8f9b98;
+  --color-nx-line: #e3e9e7;        /* hairline borders */
+  --color-nx-pale: #f5f8f7;        /* soft-gray section ground */
+}
+
 body {
   margin: 0;
   -webkit-font-smoothing: antialiased;

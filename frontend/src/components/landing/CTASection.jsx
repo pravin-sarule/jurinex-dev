@@ -1,73 +1,70 @@
 import PropTypes from "prop-types"
-import { motion as Motion } from "framer-motion"
+import { useNavigate } from "react-router-dom"
 import { CTA_COPY } from "../../utils/landingConstants"
+import { Icon, Reveal } from "./primitives"
 
 /**
- * Compact card-style red CTA section.
+ * Final conversion section. "Start for Free" creates an account;
+ * "Talk to Us" opens the demo-booking modal (real contact flow).
  */
 const CTASection = ({ onBookDemo } = {}) => {
+  const navigate = useNavigate()
+
   return (
-    <section
-      id="pricing"
-      className="px-4 py-10 sm:px-6 lg:px-8"
-      aria-labelledby="cta-heading"
-    >
-      <Motion.div
-        className="relative mx-auto max-w-5xl overflow-hidden rounded-3xl bg-teal-600 px-8 py-14 text-center sm:px-16 sm:py-16"
-        initial={{ opacity: 0, y: 28 }}
-        whileInView={{ opacity: 1, y: 0 }}
-        viewport={{ once: true, margin: "-60px" }}
-        transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
-      >
-        {/* Background glow */}
-        <div
-          className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_60%_at_50%_50%,rgba(255,255,255,0.08),transparent_70%)]"
-          aria-hidden="true"
-        />
+    <section className="bg-white px-5 py-16 sm:px-8 sm:py-20" aria-labelledby="cta-heading">
+      <Reveal y={28}>
+        <div className="relative mx-auto max-w-6xl overflow-hidden rounded-3xl bg-nx-forest px-7 py-16 text-center sm:px-16 sm:py-20">
+          {/* Ambient glows */}
+          <div
+            className="pointer-events-none absolute inset-0"
+            aria-hidden="true"
+            style={{
+              background:
+                "radial-gradient(ellipse 60% 70% at 50% 0%, rgba(13,148,136,0.28), transparent 60%), radial-gradient(ellipse 45% 45% at 85% 100%, rgba(15,118,110,0.2), transparent 65%)",
+            }}
+          />
+          <div
+            className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-nx-mint/50 to-transparent"
+            aria-hidden="true"
+          />
 
-        {/* Shimmer sweep */}
-        <Motion.div
-          className="pointer-events-none absolute top-0 left-[-30%] h-full w-[35%] rounded-full bg-white/10 blur-[60px]"
-          aria-hidden="true"
-          animate={{ x: ["0%", "370%", "0%"] }}
-          transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }}
-        />
-
-        {/* Top / bottom edge lines */}
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/20" aria-hidden="true" />
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-teal-300/40" aria-hidden="true" />
-
-        {/* Content */}
-        <div className="relative z-10">
-          <h2
-            id="cta-heading"
-            className="font-playfair text-3xl font-semibold leading-tight text-white sm:text-4xl lg:text-[2.6rem]"
-          >
-            {CTA_COPY.heading}
-          </h2>
-          <p className="mx-auto mt-4 max-w-md font-dmSans text-base leading-relaxed text-white/75">
-            See how Jurinex fits into your legal work — no pressure, no sales
-            pitch.
-          </p>
-
-          <div className="mt-8 flex flex-col items-center justify-center gap-4 sm:flex-row">
-            <button
-              type="button"
-              className="rounded-xl bg-white px-9 py-3 text-sm font-bold text-teal-600 shadow-md transition-all hover:scale-[1.03] hover:shadow-lg active:scale-[0.97]"
-              aria-label="Request a demo of JuriNex"
-              onClick={onBookDemo}
+          <div className="relative">
+            <h2
+              id="cta-heading"
+              className="mx-auto max-w-2xl font-display text-3xl font-semibold leading-[1.15] tracking-tight text-white sm:text-4xl lg:text-[2.75rem]"
             >
-              Book a Demo
-            </button>
-            <button
-              type="button"
-              className="text-sm font-semibold text-white/85 transition-all hover:text-white"
-            >
-              Talk to us →
-            </button>
+              {CTA_COPY.heading}
+            </h2>
+            <p className="mx-auto mt-5 max-w-xl text-base leading-relaxed text-teal-50/80">
+              {CTA_COPY.text}
+            </p>
+
+            <div className="mt-9 flex flex-col items-center justify-center gap-3.5 sm:flex-row">
+              <button
+                type="button"
+                onClick={() => navigate("/register")}
+                aria-label="Create a free Jurinex account"
+                className="inline-flex items-center gap-2 rounded-full bg-white px-8 py-3.5 text-sm font-semibold text-nx-ink shadow-lg transition-all duration-200 hover:bg-teal-50 active:scale-[0.98]"
+              >
+                {CTA_COPY.primary}
+                <Icon name="ArrowRight" className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={onBookDemo}
+                aria-label="Book a demo with the Jurinex team"
+                className="inline-flex items-center gap-2 rounded-full border border-white/40 bg-transparent px-8 py-3.5 text-sm font-semibold text-white transition-all duration-200 hover:bg-white/10 active:scale-[0.98]"
+              >
+                {CTA_COPY.secondary}
+              </button>
+            </div>
+
+            <p className="mt-6 text-sm text-teal-100/70">
+              {CTA_COPY.trial} · Developed, tried and tested by experienced lawyers
+            </p>
           </div>
         </div>
-      </Motion.div>
+      </Reveal>
     </section>
   )
 }
@@ -77,4 +74,3 @@ CTASection.propTypes = {
 }
 
 export default CTASection
-

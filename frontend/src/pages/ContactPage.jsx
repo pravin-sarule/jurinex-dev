@@ -63,7 +63,7 @@ const ContactPage = ({ onBackToHome, onNavigateLogin, onOpenDemo, onSectionNav }
 
   return (
     <div className="min-h-screen bg-white">
-      <Navbar onRequestDemo={onOpenDemo} onLogin={onNavigateLogin} onSectionNav={onSectionNav} />
+      <Navbar solid onRequestDemo={onOpenDemo} onLogin={onNavigateLogin} onSectionNav={onSectionNav} />
 
       <main className="mx-auto max-w-4xl px-6 pb-20 pt-32 sm:px-10">
         {/* Back */}

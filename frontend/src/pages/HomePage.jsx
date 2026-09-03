@@ -2,9 +2,24 @@ import { useState, useEffect, useRef } from "react"
 import PropTypes from "prop-types"
 import Navbar from "../components/landing/Navbar"
 import HeroSection from "../components/landing/HeroSection"
+import StatsSection from "../components/landing/StatsSection"
+import TrustSection from "../components/landing/TrustSection"
+import ProblemSolutionSection from "../components/landing/ProblemSolutionSection"
 import FeaturesSection from "../components/landing/FeaturesSection"
+import FeatureShowcase from "../components/landing/FeatureShowcase"
+import WorkflowSection from "../components/landing/WorkflowSection"
+import IndianCourtsSection from "../components/landing/IndianCourtsSection"
+import UseCasesSection from "../components/landing/UseCasesSection"
+import AICapabilitiesSection from "../components/landing/AICapabilitiesSection"
+import SecuritySection from "../components/landing/SecuritySection"
+import BenefitsSection from "../components/landing/BenefitsSection"
+import WhyChooseSection from "../components/landing/WhyChooseSection"
 import TestimonialsSection from "../components/landing/TestimonialsSection"
+import TeamSection from "../components/landing/TeamSection"
+import ThreeStepsSection from "../components/landing/ThreeStepsSection"
 import PricingSection from "../components/landing/PricingSection"
+import CommunitySection from "../components/landing/CommunitySection"
+import FAQSection from "../components/landing/FAQSection"
 import CTASection from "../components/landing/CTASection"
 import Footer from "../components/landing/Footer"
 import BookDemoModal from "../components/landing/BookDemoModal"
@@ -16,11 +31,14 @@ const POPUP_DELAYS = [15_000, 30_000, 60_000]
 
 /**
  * Marketing landing page composition.
- * No external props.
+ *
+ * Section rhythm: hero → trust → problem/solution → features →
+ * showcase → workflow → use cases → AI capabilities → security →
+ * benefits → why NexIntel → pricing → community → FAQ → CTA → footer.
  */
 const HomePage = ({ onNavigateLogin, onNavigateContact, pendingSection, onPendingSectionConsumed }) => {
-  const [demoOpen, setDemoOpen]     = useState(false)
-  const [policyKey, setPolicyKey]   = useState(null) // "terms" | "dpdpa" | null
+  const [demoOpen, setDemoOpen] = useState(false)
+  const [policyKey, setPolicyKey] = useState(null) // "terms" | "dpdpa" | null
 
   // Scroll to a section requested from another page (e.g. Contact nav links)
   useEffect(() => {
@@ -29,8 +47,9 @@ const HomePage = ({ onNavigateLogin, onNavigateContact, pendingSection, onPendin
     if (el) el.scrollIntoView({ behavior: "smooth" })
     onPendingSectionConsumed?.()
   }, [pendingSection]) // eslint-disable-line react-hooks/exhaustive-deps
-  const popupIndexRef = useRef(0)   // which delay to use next
-  const timerRef     = useRef(null)
+
+  const popupIndexRef = useRef(0) // which delay to use next
+  const timerRef = useRef(null)
 
   const scheduleNext = (index) => {
     if (index >= POPUP_DELAYS.length) return
@@ -44,7 +63,7 @@ const HomePage = ({ onNavigateLogin, onNavigateContact, pendingSection, onPendin
   useEffect(() => {
     scheduleNext(0)
     return () => clearTimeout(timerRef.current)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])
 
   const handleClose = () => {
     setDemoOpen(false)
@@ -60,30 +79,39 @@ const HomePage = ({ onNavigateLogin, onNavigateContact, pendingSection, onPendin
   }
 
   return (
-    <div className="min-h-screen bg-juri-canvas">
+    <div className="min-h-screen bg-white font-body text-nx-ink antialiased">
       <Navbar onRequestDemo={openDemo} onLogin={handleLogin} />
       <main>
-        <HeroSection onRequestDemo={openDemo} onLogin={handleLogin} />
+        <HeroSection onLogin={handleLogin} />
+        <StatsSection />
+        <TrustSection />
+        <ProblemSolutionSection />
         <FeaturesSection />
+        <FeatureShowcase />
+        <WorkflowSection />
+        <IndianCourtsSection />
+        <UseCasesSection />
+        <AICapabilitiesSection />
+        <SecuritySection />
+        <BenefitsSection />
+        <WhyChooseSection />
         <TestimonialsSection />
+        <TeamSection />
+        <ThreeStepsSection />
         <PricingSection
           onNavigateLogin={onNavigateLogin}
           onNavigateContact={onNavigateContact}
         />
+        <CommunitySection />
+        <FAQSection />
         <CTASection onBookDemo={openDemo} />
       </main>
       <Footer onOpenPolicy={setPolicyKey} onGetInTouch={onNavigateContact} />
 
-      <BookDemoModal
-        isOpen={demoOpen}
-        onClose={handleClose}
-      />
+      <BookDemoModal isOpen={demoOpen} onClose={handleClose} />
 
       {policyKey && (
-        <PolicyModal
-          policyKey={policyKey}
-          onClose={() => setPolicyKey(null)}
-        />
+        <PolicyModal policyKey={policyKey} onClose={() => setPolicyKey(null)} />
       )}
 
       <ChatbotWidget />
